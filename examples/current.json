@@ -89,7 +89,14 @@
       "title": "Validate install flow",
       "status": "active",
       "required": true,
-      "evidence": []
+      "evidence": [],
+      "metadata": {
+        "internalSteps": [
+          "Run installer smoke test",
+          "Verify generated AGENTS.md block",
+          "Confirm current task status matches rendered table"
+        ]
+      }
     }
   ]
 }

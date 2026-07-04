@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { createTaskManager } from '../src/core/manager.mjs';
 import { installWorkspace } from '../src/install/install-workspace.mjs';
 import { reviewProjectContext } from '../src/context/project-review.mjs';
+import { toMcpResult } from '../src/mcp/result.mjs';
 
 function tempWorkspace(prefix = 'otm-test-') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -40,12 +41,14 @@ test('route lifecycle requires evidence and clears after finalization', () => {
   assert.equal(typeof started.snapshot.lastRenderedHash, 'string');
   assert.doesNotMatch(JSON.stringify(started.snapshot), /:null/);
   const [first, second] = started.snapshot.tasks;
+  assert.equal(first.status, 'active');
 
   manager.markTaskActive({ workspaceRoot, taskId: first.id });
   assert.throws(() => manager.completeTask({ workspaceRoot, taskId: first.id }), /evidence is attached/);
   const completedFirst = manager.completeTask({ workspaceRoot, taskId: first.id, evidence: { kind: 'manual_note', summary: 'Route created.' } });
   assert.match(completedFirst.markdown, /^### OTM Progress/);
   assert.equal(completedFirst.snapshot.lastRenderedMode, 'delta');
+  assert.equal(completedFirst.snapshot.tasks.find((task) => task.id === second.id).status, 'active');
   assert.equal(manager.auditStop({ workspaceRoot }).stopAllowed, false);
 
   manager.markTaskActive({ workspaceRoot, taskId: second.id });
@@ -73,6 +76,168 @@ test('read-only snapshots do not rewrite current state files', async () => {
   manager.snapshot({ workspaceRoot, write: false });
   const after = fs.statSync(currentJson).mtimeMs;
   assert.equal(after, before);
+});
+
+test('reconcile keeps workflow order stable and chooses newly added work before final tasks', () => {
+  const workspaceRoot = tempWorkspace('otm-order-');
+  const manager = createTaskManager({ cwd: workspaceRoot, env: testEnv('otm-order') });
+  const started = manager.start({
+    workspaceRoot,
+    replaceExisting: true,
+    goal: 'Validate workflow ordering',
+    tasks: [
+      { title: 'Implement route feature', required: true },
+      { title: 'Run final audit and clear route', required: true }
+    ]
+  });
+
+  manager.completeTask({
+    workspaceRoot,
+    taskId: started.snapshot.tasks[0].id,
+    evidence: { kind: 'file_change', summary: 'Feature implemented.' }
+  });
+  manager.reconcile({
+    workspaceRoot,
+    mode: 'steer',
+    tasks: [{ title: 'Update README docs', required: true, acceptanceCriteria: ['Docs describe behavior'] }]
+  });
+
+  const snapshot = manager.snapshot({ workspaceRoot, write: false }).snapshot;
+  assert.equal(snapshot.currentTaskTitle, 'Update README docs');
+  assert.equal(snapshot.tasks.find((task) => task.title === 'Update README docs').status, 'active');
+  assert.deepEqual(snapshot.tasks.map((task) => task.title), [
+    'Implement route feature',
+    'Update README docs',
+    'Run final audit and clear route'
+  ]);
+
+  manager.completeTask({
+    workspaceRoot,
+    taskId: snapshot.tasks.find((task) => task.title === 'Update README docs').id,
+    evidence: { kind: 'test_result', summary: 'Docs verified.' }
+  });
+  manager.reconcile({
+    workspaceRoot,
+    mode: 'steer',
+    tasks: [{ title: 'Fix status accuracy', required: true, acceptanceCriteria: ['Current task table matches header'] }]
+  });
+
+  const afterDocs = manager.snapshot({ workspaceRoot, write: false }).snapshot;
+  assert.equal(afterDocs.currentTaskTitle, 'Fix status accuracy');
+  assert.equal(afterDocs.tasks.find((task) => task.title === 'Fix status accuracy').status, 'active');
+  assert.equal(afterDocs.tasks.find((task) => task.title === 'Run final audit and clear route').status, 'pending');
+});
+
+test('manual task switching is blocked until the active task is completed or reconciled', () => {
+  const workspaceRoot = tempWorkspace('otm-sequential-');
+  const manager = createTaskManager({ cwd: workspaceRoot, env: testEnv('otm-sequential') });
+  const started = manager.start({
+    workspaceRoot,
+    replaceExisting: true,
+    goal: 'Validate sequential task handling',
+    tasks: [
+      { title: 'Handle first task', required: true },
+      { title: 'Handle second task', required: true }
+    ]
+  });
+  const [first, second] = started.snapshot.tasks;
+  assert.equal(first.status, 'active');
+
+  assert.throws(
+    () => manager.markTaskActive({ workspaceRoot, taskId: second.id }),
+    /Complete or explicitly reconcile the active task before moving on/
+  );
+  assert.throws(
+    () => manager.progress({ workspaceRoot, taskId: second.id, message: 'Trying to jump ahead.' }),
+    /Complete or explicitly reconcile the active task before moving on/
+  );
+
+  manager.reconcile({
+    workspaceRoot,
+    mode: 'steer',
+    changes: [{ action: 'activate', taskId: second.id, reason: 'Explicit steering switch' }]
+  });
+  const switched = manager.snapshot({ workspaceRoot, write: false }).snapshot;
+  assert.equal(switched.currentTaskId, second.id);
+  assert.equal(switched.tasks.find((task) => task.id === second.id).status, 'active');
+  assert.equal(switched.tasks.find((task) => task.id === first.id).status, 'pending');
+});
+
+test('reconcile merges related open tasks, adds distinct tasks, and stores internal substeps', () => {
+  const workspaceRoot = tempWorkspace('otm-merge-');
+  const manager = createTaskManager({ cwd: workspaceRoot, env: testEnv('otm-merge') });
+  manager.start({
+    workspaceRoot,
+    replaceExisting: true,
+    goal: 'Validate steering normalization',
+    tasks: [{ title: 'Optimize render behavior', required: true, acceptanceCriteria: ['Render policy is stable'] }]
+  });
+
+  manager.reconcile({
+    workspaceRoot,
+    tasks: [{
+      title: 'Optimize rendering behavior',
+      required: true,
+      acceptanceCriteria: ['Compact progress stays fast'],
+      internalSteps: ['Profile current render path', 'Avoid unnecessary writes']
+    }]
+  });
+  let tasks = manager.snapshot({ workspaceRoot, write: false }).snapshot.tasks;
+  assert.equal(tasks.length, 1);
+  assert.deepEqual(tasks[0].acceptanceCriteria, ['Render policy is stable', 'Compact progress stays fast']);
+  assert.deepEqual(tasks[0].metadata.internalSteps, [
+    'Render policy is stable',
+    'Profile current render path',
+    'Avoid unnecessary writes'
+  ]);
+
+  manager.reconcile({
+    workspaceRoot,
+    tasks: [{ title: 'Update install docs', required: true, acceptanceCriteria: ['README is current'] }]
+  });
+  tasks = manager.snapshot({ workspaceRoot, write: false }).snapshot.tasks;
+  assert.equal(tasks.length, 2);
+  assert.equal(tasks[1].title, 'Update install docs');
+  assert.doesNotMatch(manager.snapshot({ workspaceRoot, write: false }).markdown, /Profile current render path/);
+});
+
+test('reconcile can explicitly reopen completed tasks without losing evidence', () => {
+  const workspaceRoot = tempWorkspace('otm-reopen-');
+  const manager = createTaskManager({ cwd: workspaceRoot, env: testEnv('otm-reopen') });
+  const started = manager.start({
+    workspaceRoot,
+    replaceExisting: true,
+    goal: 'Validate reopening',
+    tasks: [{ title: 'Validate docs', required: true, acceptanceCriteria: ['Docs checked'] }]
+  });
+  const taskId = started.snapshot.tasks[0].id;
+  manager.completeTask({
+    workspaceRoot,
+    taskId,
+    evidence: { kind: 'test_result', summary: 'Initial docs check passed.' }
+  });
+  assert.equal(manager.auditStop({ workspaceRoot }).stopAllowed, true);
+
+  manager.reconcile({
+    workspaceRoot,
+    changes: [{ action: 'reopen', taskId, reason: 'User requested another docs pass' }]
+  });
+  const reopened = manager.snapshot({ workspaceRoot, write: false }).snapshot.tasks.find((task) => task.id === taskId);
+  assert.equal(reopened.status, 'active');
+  assert.equal(reopened.evidence.length, 1);
+  assert.equal(reopened.metadata.reopened.at(-1).previousStatus, 'done');
+  assert.equal(manager.auditStop({ workspaceRoot }).stopAllowed, false);
+});
+
+test('MCP results return concise text content without structured JSON by default', () => {
+  const result = toMcpResult({ markdown: '## OTM\n\nPlain progress.\n', snapshot: { noisy: true } });
+  assert.deepEqual(Object.keys(result), ['content']);
+  assert.equal(result.content[0].text, '## OTM\n\nPlain progress.\n');
+
+  const fallback = toMcpResult({ stopAllowed: false, remainingRequired: [{ title: 'Finish tests' }] });
+  assert.deepEqual(Object.keys(fallback), ['content']);
+  assert.match(fallback.content[0].text, /audit blocked/i);
+  assert.doesNotMatch(fallback.content[0].text, /remainingRequired/);
 });
 
 test('workspace installer is idempotent and preserves existing guidance', () => {

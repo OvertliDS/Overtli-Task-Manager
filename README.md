@@ -14,6 +14,7 @@ Overtli Task Manager (OTM) structures AI coding sessions into evidence-backed ro
 *   **Persistent Task List:** Keeps a full checked-off task list in both chat Markdown and `current.json.checklist`.
 *   **Durable State Cache:** Syncs active routes to `.codex/overtli-task-manager/current.json` and `current.md` without rewriting unchanged files.
 *   **Optimized Rendering:** Shows a full checklist at route start and finalization, then compact progress cards during routine work.
+*   **Task Normalization:** Keeps one active route segment where possible, blocks manual jumps until the active task is handled, and lets reconciliation intentionally add, merge, reopen, or reorder work.
 *   **Lifecycle Hooks:** Intercepts sessions, prompts, tools, and stops to enforce task completion and audit progress.
 *   **Workspace Memory:** Keeps a lightweight, high-signal index of project guides (`AGENTS.md`), memory banks, and schemas.
 
@@ -130,6 +131,29 @@ Route finalization: full completion summary
 `current.json` includes render bookkeeping (`renderRevision`,
 `lastRenderedMode`, `lastRenderedTaskId`, and `lastRenderedHash`) so UIs and
 agents can avoid repeated full-list rendering.
+
+Task ordering is normalized for readability: completed work stays checked off,
+the current active segment is shown next, ordinary pending work stays ahead of
+validation/documentation, commit/push, and final audit/summary segments. When a
+route is steered, `otm_reconcile` can merge related open tasks, add distinct new
+tasks, or explicitly reopen completed/dropped/superseded work with
+`action: "reopen"` or `reopen: true`. Reopened tasks keep their prior evidence
+and record reopening metadata.
+
+OTM enforces sequential handling for manual task changes. Starting or recording
+progress on a different task is blocked while another required task is active
+unless the switch is performed through reconciliation or explicitly allowed by
+the caller. Whenever OTM chooses a current task, it promotes that task to
+`active` and demotes other active route segments so the header, table,
+`current.json`, and audit state agree.
+
+Each task keeps internal implementation detail in `metadata.internalSteps`.
+Those substeps are persisted for the AI and follow-on agents, but they are not
+rendered in chat progress tables by default.
+
+MCP tool results are Markdown/plain-text first. Full machine-readable route
+state remains available through the `otm://current` resource, while normal tool
+responses avoid showing an additional raw JSON block in chat.
 
 For faster hooks, OTM avoids rewriting unchanged state files and uses read-only
 snapshots for passive hook checks. Automatic evidence tracking records only

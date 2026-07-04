@@ -46,6 +46,7 @@ export function createTaskManager(options = {}) {
     const acceptanceCriteria = Array.isArray(input.acceptanceCriteria) && input.acceptanceCriteria.length
       ? input.acceptanceCriteria.map(String).filter(Boolean)
       : ['Complete this route segment with concrete evidence.'];
+    const metadata = normalizeTaskMetadata(input, acceptanceCriteria);
     return {
       id: input.id || newId('task'),
       runId,
@@ -63,8 +64,82 @@ export function createTaskManager(options = {}) {
       createdAt: nowIso(),
       updatedAt: nowIso(),
       completedAt: null,
-      metadata: input.metadata || {}
+      metadata
     };
+  }
+
+  function addOrMergeTask(input, run, sortOrder, createdBy = 'steering', reason = 'reconcile') {
+    const task = normalizeTask(input, run.id, sortOrder, createdBy);
+    if (input.reopen === true) {
+      const closed = findRelatedReopenableTask(store.getTasks(run.id), task);
+      if (closed) {
+        reopenTask(closed, task, reason);
+        return { action: 'reopened', taskId: closed.id };
+      }
+    }
+    const match = findRelatedOpenTask(store.getTasks(run.id), task);
+    if (match) {
+      mergeTask(match, task, reason);
+      return { action: 'merged', taskId: match.id };
+    }
+    store.addTasks([task]);
+    return { action: 'added', taskId: task.id };
+  }
+
+  function mergeTask(existing, incoming, reason) {
+    const existingMetadata = existing.metadata || {};
+    const incomingMetadata = incoming.metadata || {};
+    const metadata = { ...incomingMetadata, ...existingMetadata };
+    const internalSteps = unionStrings(existingMetadata.internalSteps || [], incomingMetadata.internalSteps || []);
+    if (internalSteps.length) metadata.internalSteps = internalSteps;
+    metadata.consolidatedFrom = [
+      ...(Array.isArray(existingMetadata.consolidatedFrom) ? existingMetadata.consolidatedFrom : []),
+      omitEmpty({
+        id: incoming.id,
+        title: incoming.title,
+        stableKey: incoming.stableKey,
+        reason,
+        at: nowIso()
+      })
+    ];
+    store.updateTask(existing.id, {
+      required: Boolean(existing.required || incoming.required),
+      priority: Math.min(Number(existing.priority || 50), Number(incoming.priority || 50)),
+      acceptanceCriteria: unionStrings(existing.acceptanceCriteria || [], incoming.acceptanceCriteria || []),
+      metadata
+    });
+  }
+
+  function reopenTask(existing, incoming = null, reason = 'reconcile') {
+    const existingMetadata = existing.metadata || {};
+    const incomingMetadata = incoming?.metadata || {};
+    const metadata = { ...incomingMetadata, ...existingMetadata };
+    const internalSteps = unionStrings(existingMetadata.internalSteps || [], incomingMetadata.internalSteps || []);
+    if (internalSteps.length) metadata.internalSteps = internalSteps;
+    metadata.reopened = [
+      ...(Array.isArray(existingMetadata.reopened) ? existingMetadata.reopened : []),
+      omitEmpty({
+        previousStatus: existing.status,
+        previousCompletedAt: existing.completedAt || undefined,
+        reason,
+        at: nowIso()
+      })
+    ];
+    store.updateTask(existing.id, {
+      status: incoming?.status === 'active' ? 'active' : 'pending',
+      completedAt: null,
+      required: incoming ? Boolean(existing.required || incoming.required) : existing.required,
+      priority: incoming ? Math.min(Number(existing.priority || 50), Number(incoming.priority || 50)) : existing.priority,
+      acceptanceCriteria: incoming ? unionStrings(existing.acceptanceCriteria || [], incoming.acceptanceCriteria || []) : existing.acceptanceCriteria,
+      metadata
+    });
+  }
+
+  function activateCurrentTask(runId, current) {
+    for (const task of store.getTasks(runId)) {
+      if (task.status === 'active' && task.id !== current?.id) store.updateTask(task.id, { status: 'pending' });
+    }
+    if (current && current.status === 'pending') store.updateTask(current.id, { status: 'active' });
   }
 
   function snapshotForRun(run, lastUpdate = null, { write = true } = {}) {
@@ -112,6 +187,7 @@ export function createTaskManager(options = {}) {
     };
     const taskInputs = Array.isArray(args.tasks) && args.tasks.length ? args.tasks : deriveFallbackTasks(prompt, { goal });
     const tasks = taskInputs.map((task, index) => normalizeTask(task, run.id, index + 1, task.createdBy || 'prompt'));
+    normalizeActiveTasks(tasks);
     run.currentTaskId = tasks.find((task) => task.status === 'active')?.id || tasks[0]?.id || null;
     store.createRun(run);
     store.addTasks(tasks);
@@ -127,6 +203,7 @@ export function createTaskManager(options = {}) {
     const now = nowIso();
     const tasks = store.getTasks(run.id);
     let changed = 0;
+    let preferredCurrentId = run.currentTaskId;
 
     if (mode === 'replace') {
       for (const task of tasks) {
@@ -146,33 +223,33 @@ export function createTaskManager(options = {}) {
         }
       } else if (change.action === 'activate') {
         markTaskActive({ runId: run.id, taskId: change.taskId, note: change.reason || 'Activated by reconciliation', silent: true });
+        preferredCurrentId = change.taskId;
         changed += 1;
+      } else if (change.action === 'reopen') {
+        const task = resolveTaskForReopen(change, store.getTasks(run.id));
+        if (task) {
+          reopenTask(task, change.title ? normalizeTask(change, run.id, task.sortOrder, 'steering') : null, change.reason || args.prompt || 'change:reopen');
+          preferredCurrentId = task.id;
+          changed += 1;
+        }
       } else if (change.action === 'add') {
         const nextOrder = store.getTasks(run.id).length + 1;
-        store.addTasks([normalizeTask(change, run.id, nextOrder, 'steering')]);
+        addOrMergeTask(change, run, nextOrder, 'steering', change.reason || args.prompt || 'change:add');
         changed += 1;
       }
     }
 
     if (Array.isArray(args.tasks) && args.tasks.length) {
-      const existing = store.getTasks(run.id);
-      const keys = new Set(existing.map((task) => task.stableKey));
-      const additions = [];
       for (const [index, input] of args.tasks.entries()) {
-        const task = normalizeTask(input, run.id, existing.length + index + 1, input.createdBy || 'steering');
-        if (!keys.has(task.stableKey)) {
-          keys.add(task.stableKey);
-          additions.push(task);
-        }
-      }
-      if (additions.length) {
-        store.addTasks(additions);
-        changed += additions.length;
+        const nextOrder = store.getTasks(run.id).length + index + 1;
+        addOrMergeTask(input, run, nextOrder, input.createdBy || 'steering', args.prompt || 'reconcile:tasks');
+        changed += 1;
       }
     }
 
     const refreshedTasks = store.getTasks(run.id);
-    const current = refreshedTasks.find((task) => task.status === 'active') || refreshedTasks.find((task) => !['done', 'dropped', 'superseded'].includes(task.status));
+    const current = chooseCurrentTask(refreshedTasks, preferredCurrentId);
+    activateCurrentTask(run.id, current);
     run = store.updateRun(run.id, {
       routeRevision: (run.routeRevision || 1) + (changed ? 1 : 0),
       currentTaskId: current?.id || null,
@@ -190,6 +267,7 @@ export function createTaskManager(options = {}) {
     const task = store.getTask(args.taskId || run.currentTaskId);
     assertCondition(task && task.runId === run.id, 'Task not found in active route.', 'TASK_NOT_FOUND');
     assertCondition(!['done', 'dropped', 'superseded'].includes(task.status), `Cannot activate task in status ${task.status}.`, 'INVALID_TRANSITION');
+    assertCanSwitchTask(store.getTasks(run.id), task, args);
 
     for (const other of store.getTasks(run.id)) {
       if (other.status === 'active' && other.id !== task.id) store.updateTask(other.id, { status: 'pending' });
@@ -207,6 +285,7 @@ export function createTaskManager(options = {}) {
     if (args.taskId) {
       const task = store.getTask(args.taskId);
       assertCondition(task && task.runId === run.id, 'Task not found in active route.', 'TASK_NOT_FOUND');
+      assertCanSwitchTask(store.getTasks(run.id), task, args);
       const evidence = [...(task.evidence || []), evidenceFromArgs(args.evidence || { kind: 'manual_note', summary: args.message || 'Progress recorded' })];
       store.updateTask(task.id, { evidence, status: task.status === 'pending' ? 'active' : task.status });
       run = store.updateRun(run.id, { currentTaskId: task.id, status: 'active' });
@@ -226,7 +305,8 @@ export function createTaskManager(options = {}) {
     const nextEvidence = evidence ? [...(task.evidence || []), evidence] : (task.evidence || []);
     assertCondition(args.force === true || nextEvidence.length > 0, 'A task can only be completed after evidence is attached.', 'EVIDENCE_REQUIRED');
     store.updateTask(task.id, { status: 'done', evidence: nextEvidence, completedAt: nowIso() });
-    const next = store.getTasks(run.id).find((item) => item.required && !['done', 'dropped', 'superseded'].includes(item.status));
+    const next = chooseCurrentTask(store.getTasks(run.id), task.id);
+    activateCurrentTask(run.id, next);
     run = store.updateRun(run.id, { currentTaskId: next?.id || null, status: next ? 'active' : 'active' });
     recordEvent(run.id, 'task_completed', { taskId: task.id, title: task.title, evidence }, args);
     const snapshot = snapshotForRun(run, { kind: 'task_completed', message: `Completed: ${task.title}`, at: nowIso() });
@@ -469,6 +549,129 @@ function clearedSnapshot(workspaceRoot, lastUpdate = null, lastRunId = null) {
 
 function omitEmpty(value) {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined && item !== null));
+}
+
+function normalizeTaskMetadata(input, acceptanceCriteria) {
+  const metadata = { ...(input.metadata || {}) };
+  const internalSteps = normalizeInternalSteps(input, acceptanceCriteria);
+  if (internalSteps.length) metadata.internalSteps = internalSteps;
+  return metadata;
+}
+
+function normalizeActiveTasks(tasks) {
+  const active = tasks.find((task) => task.status === 'active') || tasks[0] || null;
+  for (const task of tasks) {
+    if (task.id === active?.id && task.status === 'pending') task.status = 'active';
+    else if (task.id !== active?.id && task.status === 'active') task.status = 'pending';
+  }
+}
+
+function normalizeInternalSteps(input, acceptanceCriteria = []) {
+  const supplied = Array.isArray(input.internalSteps) ? input.internalSteps : input.metadata?.internalSteps;
+  const explicit = Array.isArray(supplied) ? unionStrings(supplied) : [];
+  if (explicit.length) return explicit;
+
+  const criteriaSteps = unionStrings(acceptanceCriteria)
+    .filter((item) => item !== 'Complete this route segment with concrete evidence.');
+  if (criteriaSteps.length) return criteriaSteps;
+
+  const title = String(input.title || 'route segment').trim();
+  return [
+    `Clarify scope for ${title}`,
+    `Implement or inspect the required change for ${title}`,
+    `Run relevant checks for ${title}`,
+    `Record evidence for ${title}`
+  ];
+}
+
+function findRelatedOpenTask(tasks, candidate) {
+  const open = tasks.filter((task) => !['done', 'dropped', 'superseded'].includes(task.status));
+  return open.find((task) => task.stableKey === candidate.stableKey)
+    || open.find((task) => relatedTaskScore(task, candidate) >= 0.72)
+    || null;
+}
+
+function findRelatedReopenableTask(tasks, candidate) {
+  const reopenable = tasks.filter((task) => ['done', 'dropped', 'superseded', 'blocked'].includes(task.status));
+  return reopenable.find((task) => task.stableKey === candidate.stableKey)
+    || reopenable.find((task) => relatedTaskScore(task, candidate) >= 0.72)
+    || null;
+}
+
+function chooseCurrentTask(tasks, previousCurrentId = null) {
+  const open = tasks.filter((task) => task.required && !['done', 'dropped', 'superseded'].includes(task.status));
+  if (!open.length) return null;
+  const ordered = [...open].sort((a, b) => {
+    const rank = workflowRank(a.title) - workflowRank(b.title);
+    if (rank !== 0) return rank;
+    return Number(a.sortOrder || 0) - Number(b.sortOrder || 0);
+  });
+  const previous = open.find((task) => task.id === previousCurrentId);
+  if (previous && workflowRank(previous.title) <= workflowRank(ordered[0].title)) return previous;
+  const active = open.find((task) => task.status === 'active');
+  if (active && workflowRank(active.title) <= workflowRank(ordered[0].title)) return active;
+  return ordered[0];
+}
+
+function assertCanSwitchTask(tasks, targetTask, args = {}) {
+  if (args.allowSwitch === true || args.silent === true) return;
+  const active = tasks.find((task) => task.status === 'active' && task.required);
+  assertCondition(
+    !active || active.id === targetTask.id,
+    `Complete or explicitly reconcile the active task before moving on: ${active?.title}`,
+    'ACTIVE_TASK_INCOMPLETE'
+  );
+}
+
+function workflowRank(title) {
+  const text = String(title || '').toLowerCase();
+  if (/\b(final|finalize|audit|stop|clear|summary|summarize)\b/.test(text)) return 40;
+  if (/\b(commit|push|publish|release)\b/.test(text)) return 30;
+  if (/\b(test|check|validate|verify|docs|documentation|readme)\b/.test(text)) return 20;
+  return 10;
+}
+
+function resolveTaskForReopen(change, tasks) {
+  if (change.taskId) return tasks.find((task) => task.id === change.taskId) || null;
+  if (change.stableKey) return tasks.find((task) => task.stableKey === change.stableKey) || null;
+  if (change.title) {
+    const candidate = {
+      stableKey: change.stableKey || stableTaskKey(change.title, Array.isArray(change.acceptanceCriteria) ? change.acceptanceCriteria : []),
+      title: change.title
+    };
+    return findRelatedReopenableTask(tasks, candidate);
+  }
+  return null;
+}
+
+function relatedTaskScore(a, b) {
+  const left = taskTokens(a.title);
+  const right = taskTokens(b.title);
+  if (left.size < 2 || right.size < 2) return 0;
+  let overlap = 0;
+  for (const token of left) if (right.has(token)) overlap += 1;
+  if (overlap < 2) return 0;
+  return overlap / Math.min(left.size, right.size);
+}
+
+function taskTokens(title) {
+  const stop = new Set(['the', 'and', 'for', 'with', 'from', 'into', 'route', 'task', 'tasks', 'segment', 'segments', 'work']);
+  const words = String(title || '').toLowerCase().match(/[a-z0-9]+/g) || [];
+  return new Set(words
+    .map((word) => word.replace(/ing$/, '').replace(/ed$/, '').replace(/s$/, ''))
+    .filter((word) => word.length > 2 && !stop.has(word)));
+}
+
+function unionStrings(...groups) {
+  const seen = new Set();
+  const values = [];
+  for (const group of groups.flat()) {
+    const value = String(group || '').trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    values.push(value);
+  }
+  return values;
 }
 
 function scoreEntry(entry, query) {

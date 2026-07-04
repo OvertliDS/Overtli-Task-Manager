@@ -21,9 +21,10 @@ export function buildSnapshot({ run, tasks, workspaceRoot, storageKind = 'unknow
   const optionalDone = optional.filter((task) => task.status === 'done').length;
   const remainingRequired = required.filter((task) => !['done'].includes(task.status));
   const currentTask = tasks.find((task) => task.id === run.currentTaskId) || tasks.find((task) => task.status === 'active') || remainingRequired[0] || null;
+  const displayTasks = sortTasksForDisplay(tasks, currentTask);
   const stopAllowed = remainingRequired.length === 0;
   const renderedMode = deriveRenderedMode(lastUpdate);
-  const renderHash = hashRenderState({ renderedMode, run, tasks, currentTask, requiredDone, requiredTotal: required.length, optionalDone, optionalTotal: optional.length, lastUpdate });
+  const renderHash = hashRenderState({ renderedMode, run, tasks: displayTasks, currentTask, requiredDone, requiredTotal: required.length, optionalDone, optionalTotal: optional.length, lastUpdate });
 
   return omitEmpty({
     schemaVersion: CURRENT_SCHEMA_VERSION,
@@ -53,7 +54,7 @@ export function buildSnapshot({ run, tasks, workspaceRoot, storageKind = 'unknow
     gitBranch: run.metadata?.gitBranch || undefined,
     currentTaskId: currentTask?.id || undefined,
     currentTaskTitle: currentTask?.title || undefined,
-    checklist: tasks.map((task) => omitEmpty({
+    checklist: displayTasks.map((task) => omitEmpty({
       id: task.id,
       title: task.title,
       status: task.status,
@@ -62,7 +63,7 @@ export function buildSnapshot({ run, tasks, workspaceRoot, storageKind = 'unknow
       required: Boolean(task.required),
       evidence: renderEvidenceBrief(task.evidence || [])
     })),
-    tasks: tasks.map((task) => ({
+    tasks: displayTasks.map((task) => ({
       id: task.id,
       title: task.title,
       ...(task.description ? { description: task.description } : {}),
@@ -232,6 +233,34 @@ function hashRenderState(value) {
 function lastCompletedTask(snapshot) {
   const done = (snapshot.tasks || []).filter((task) => task.status === 'done');
   return done[done.length - 1] || null;
+}
+
+function sortTasksForDisplay(tasks, currentTask) {
+  return [...tasks].sort((a, b) => {
+    const phase = displayPhaseRank(a, currentTask) - displayPhaseRank(b, currentTask);
+    if (phase !== 0) return phase;
+    const order = Number(a.sortOrder || 0) - Number(b.sortOrder || 0);
+    if (order !== 0) return order;
+    return String(a.createdAt || a.id).localeCompare(String(b.createdAt || b.id));
+  });
+}
+
+function displayPhaseRank(task, currentTask) {
+  if (task.status === 'done') return 10;
+  if (currentTask && task.id === currentTask.id) return 20;
+  if (task.status === 'active') return 20;
+  if (task.status === 'blocked') return 30;
+  if (task.status === 'pending') return 40 + pendingTaskRank(task.title);
+  if (task.status === 'dropped' || task.status === 'superseded') return 90;
+  return 50;
+}
+
+function pendingTaskRank(title) {
+  const text = String(title || '').toLowerCase();
+  if (/\b(final|finalize|audit|stop|clear|summary|summarize)\b/.test(text)) return 40;
+  if (/\b(commit|push|publish|release)\b/.test(text)) return 30;
+  if (/\b(test|check|validate|verify|docs|documentation|readme)\b/.test(text)) return 20;
+  return 10;
 }
 
 function derivePhase(tasks) {

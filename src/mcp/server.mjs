@@ -8,6 +8,7 @@ import { findWorkspaceRoot, currentJsonPath, currentMarkdownPath, readText, read
 import { installWorkspace, renderInstallResult } from '../install/install-workspace.mjs';
 import { reviewProjectContext } from '../context/project-review.mjs';
 import { tools } from './tools.mjs';
+import { toMcpResult } from './result.mjs';
 
 export async function runMcpServer({ env = process.env } = {}) {
   const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -91,14 +92,6 @@ async function dispatchTool({ name, args, manager, packageRoot }) {
   }
 }
 
-function toMcpResult(result) {
-  const text = result?.markdown || JSON.stringify(result, null, 2);
-  return {
-    content: [{ type: 'text', text }],
-    structuredContent: stripLarge(result)
-  };
-}
-
 function memorySearchResult(result) {
   const lines = ['## OTM memory search', ''];
   if (!result.entries.length) lines.push('No matching project memory entries found.');
@@ -110,15 +103,4 @@ function memorySearchResult(result) {
     lines.push('');
   }
   return { ...result, markdown: lines.join('\n') };
-}
-
-function stripLarge(value) {
-  try {
-    return JSON.parse(JSON.stringify(value, (key, item) => {
-      if (typeof item === 'string' && item.length > 10000) return `${item.slice(0, 10000)}\n…[truncated]`;
-      return item;
-    }));
-  } catch {
-    return { ok: true };
-  }
 }
