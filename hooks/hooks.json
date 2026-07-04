@@ -7,6 +7,7 @@
           {
             "type": "command",
             "command": "node ${PLUGIN_ROOT}/hooks/session-start.mjs",
+            "timeout": 15,
             "statusMessage": "Loading OTM route"
           }
         ]
@@ -18,31 +19,32 @@
           {
             "type": "command",
             "command": "node ${PLUGIN_ROOT}/hooks/user-prompt-submit.mjs",
-            "statusMessage": "Mapping prompt to OTM route"
+            "timeout": 12,
+            "statusMessage": "Mapping route"
           }
         ]
       }
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash|apply_patch|mcp__.*",
+        "matcher": "Bash|apply_patch",
         "hooks": [
           {
             "type": "command",
             "command": "node ${PLUGIN_ROOT}/hooks/pre-tool-use.mjs",
-            "statusMessage": "Checking OTM route"
+            "timeout": 8
           }
         ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "Bash|apply_patch|mcp__.*",
+        "matcher": "Bash|apply_patch",
         "hooks": [
           {
             "type": "command",
             "command": "node ${PLUGIN_ROOT}/hooks/post-tool-use.mjs",
-            "statusMessage": "Recording OTM evidence"
+            "timeout": 12
           }
         ]
       }
@@ -54,7 +56,8 @@
           {
             "type": "command",
             "command": "node ${PLUGIN_ROOT}/hooks/pre-compact.mjs",
-            "statusMessage": "Saving OTM route"
+            "timeout": 15,
+            "statusMessage": "Saving route"
           }
         ]
       }
@@ -66,7 +69,8 @@
           {
             "type": "command",
             "command": "node ${PLUGIN_ROOT}/hooks/post-compact.mjs",
-            "statusMessage": "Restoring OTM route"
+            "timeout": 15,
+            "statusMessage": "Restoring route"
           }
         ]
       }
@@ -77,8 +81,8 @@
           {
             "type": "command",
             "command": "node ${PLUGIN_ROOT}/hooks/stop.mjs",
-            "timeout": 30,
-            "statusMessage": "Auditing OTM completion"
+            "timeout": 45,
+            "statusMessage": "Auditing completion"
           }
         ]
       }

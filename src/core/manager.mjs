@@ -3,7 +3,7 @@ import { createStore } from '../storage/store.mjs';
 import { assertCondition, OtmError } from './errors.mjs';
 import { newId, nowIso, sha256, stableTaskKey, shortHash } from './ids.mjs';
 import { findWorkspaceRoot, workspaceStateDir, ensureDir, summariesDir, atomicWriteJson, atomicWriteText, currentJsonPath, currentMarkdownPath, removeFileIfExists } from './fs-utils.mjs';
-import { buildSnapshot, renderSnapshotMarkdown, renderSummaryMarkdown, writeCurrentFiles } from './renderer.mjs';
+import { buildSnapshot, renderSnapshotMarkdown, renderSummaryMarkdown, renderDeltaMarkdown, writeCurrentFiles } from './renderer.mjs';
 import { deriveFallbackTasks } from './planner.mjs';
 import { CURRENT_SCHEMA_VERSION, MANAGER_NAME, TASK_STATUSES } from './constants.mjs';
 
@@ -67,10 +67,10 @@ export function createTaskManager(options = {}) {
     };
   }
 
-  function snapshotForRun(run, lastUpdate = null) {
+  function snapshotForRun(run, lastUpdate = null, { write = true } = {}) {
     const tasks = store.getTasks(run.id);
     const snapshot = buildSnapshot({ run, tasks, workspaceRoot: run.workspaceRoot, storageKind: store.kind, lastUpdate });
-    writeCurrentFiles(run.workspaceRoot, snapshot);
+    if (write) writeCurrentFiles(run.workspaceRoot, snapshot);
     return snapshot;
   }
 
@@ -198,7 +198,7 @@ export function createTaskManager(options = {}) {
     run = store.updateRun(run.id, { currentTaskId: task.id, status: 'active' });
     recordEvent(run.id, 'task_started', { taskId: task.id, title: task.title, note: args.note || null }, args);
     const snapshot = snapshotForRun(run, { kind: 'task_started', message: `Working on: ${task.title}`, at: nowIso() });
-    return args.silent ? { run, snapshot } : { run, snapshot, markdown: renderSnapshotMarkdown(snapshot) };
+    return args.silent ? { run, snapshot } : { run, snapshot, markdown: renderDeltaMarkdown(snapshot) };
   }
 
   function progress(args = {}) {
@@ -213,7 +213,7 @@ export function createTaskManager(options = {}) {
     }
     recordEvent(run.id, 'progress', { message: args.message || null, taskId: args.taskId || null }, args);
     const snapshot = snapshotForRun(run, { kind: 'progress', message: args.message || 'Progress checkpoint recorded.', at: nowIso() });
-    return { run, snapshot, markdown: renderSnapshotMarkdown(snapshot) };
+    return { run, snapshot, markdown: renderDeltaMarkdown(snapshot) };
   }
 
   function completeTask(args = {}) {
@@ -230,7 +230,7 @@ export function createTaskManager(options = {}) {
     run = store.updateRun(run.id, { currentTaskId: next?.id || null, status: next ? 'active' : 'active' });
     recordEvent(run.id, 'task_completed', { taskId: task.id, title: task.title, evidence }, args);
     const snapshot = snapshotForRun(run, { kind: 'task_completed', message: `Completed: ${task.title}`, at: nowIso() });
-    return { run, snapshot, markdown: renderSnapshotMarkdown(snapshot) };
+    return { run, snapshot, markdown: renderDeltaMarkdown(snapshot) };
   }
 
   function blockTask(args = {}) {
@@ -247,7 +247,7 @@ export function createTaskManager(options = {}) {
     run = store.updateRun(run.id, { currentTaskId: task.id, status: 'blocked' });
     recordEvent(run.id, 'task_blocked', { taskId: task.id, reason: args.reason || null, requiresUser: Boolean(args.requiresUser) }, args);
     const snapshot = snapshotForRun(run, { kind: 'task_blocked', message: `Blocked: ${task.title}${args.reason ? ` — ${args.reason}` : ''}`, at: nowIso() });
-    return { run, snapshot, markdown: renderSnapshotMarkdown(snapshot) };
+    return { run, snapshot, markdown: renderDeltaMarkdown(snapshot, { title: 'OTM Gate' }) };
   }
 
   function dropTask(args = {}) {
@@ -260,7 +260,7 @@ export function createTaskManager(options = {}) {
     run = store.updateRun(run.id, { currentTaskId: next?.id || null, status: 'active', routeRevision: (run.routeRevision || 1) + 1 });
     recordEvent(run.id, args.supersede ? 'task_superseded' : 'task_dropped', { taskId: task.id, reason: args.reason || null }, args);
     const snapshot = snapshotForRun(run, { kind: args.supersede ? 'task_superseded' : 'task_dropped', message: `${args.supersede ? 'Superseded' : 'Dropped'}: ${task.title}`, at: nowIso() });
-    return { run, snapshot, markdown: renderSnapshotMarkdown(snapshot) };
+    return { run, snapshot, markdown: renderDeltaMarkdown(snapshot) };
   }
 
   function auditStop(args = {}) {
@@ -336,10 +336,10 @@ ${cleared.markdown || ''}` };
     const run = args.runId ? store.getRun(args.runId) : store.getActiveRun(workspaceRoot);
     if (!run) {
       const empty = clearedSnapshot(workspaceRoot, { message: 'No active route.' });
-      writeCurrentFiles(workspaceRoot, empty);
+      if (args.write !== false) writeCurrentFiles(workspaceRoot, empty);
       return { run: null, snapshot: empty, markdown: renderSnapshotMarkdown(empty) };
     }
-    const snap = snapshotForRun(run, args.lastUpdate || null);
+    const snap = snapshotForRun(run, args.lastUpdate || null, { write: args.write !== false });
     return { run, snapshot: snap, markdown: renderSnapshotMarkdown(snap) };
   }
 
@@ -408,15 +408,15 @@ ${cleared.markdown || ''}` };
 }
 
 function evidenceFromArgs(input = {}) {
-  return {
+  return omitEmpty({
     kind: input.kind || 'manual_note',
     summary: String(input.summary || input.message || 'Evidence captured').trim(),
-    files: Array.isArray(input.files) ? input.files.map(String) : [],
-    command: input.command || null,
-    exitCode: input.exitCode ?? null,
-    notes: input.notes || null,
+    files: Array.isArray(input.files) && input.files.length ? input.files.map(String) : undefined,
+    command: input.command || undefined,
+    exitCode: input.exitCode ?? undefined,
+    notes: input.notes || undefined,
     at: nowIso()
-  };
+  });
 }
 
 function buildSummaryJson({ run, tasks, outcome, nextSteps }) {
@@ -424,11 +424,11 @@ function buildSummaryJson({ run, tasks, outcome, nextSteps }) {
   const blocked = tasks.filter((task) => task.status === 'blocked').map((task) => task.title);
   const dropped = tasks.filter((task) => ['dropped', 'superseded'].includes(task.status)).map((task) => task.title);
   const evidence = tasks.flatMap((task) => (task.evidence || []).map((item) => `${task.title}: ${item.summary || item.kind}`));
-  return {
+  return omitEmpty({
     schemaVersion: 'otm.summary.v1',
     manager: MANAGER_NAME,
     runId: run.id,
-    turnId: run.turnId || null,
+    turnId: run.turnId || undefined,
     workspaceRoot: run.workspaceRoot,
     goal: run.goal,
     outcome,
@@ -439,37 +439,36 @@ function buildSummaryJson({ run, tasks, outcome, nextSteps }) {
     nextSteps,
     routeRevision: run.routeRevision || 1,
     createdAt: nowIso()
-  };
+  });
 }
 
 function clearedSnapshot(workspaceRoot, lastUpdate = null, lastRunId = null) {
-  return {
+  return omitEmpty({
     schemaVersion: CURRENT_SCHEMA_VERSION,
     manager: MANAGER_NAME,
     status: 'cleared',
-    runId: null,
-    lastRunId,
-    sessionId: null,
-    turnId: null,
+    lastRunId: lastRunId || undefined,
     workspaceRoot,
-    gitBranch: null,
     goal: 'No active route',
     routeRevision: 0,
     phase: 'idle',
-    currentTaskId: null,
-    currentTaskTitle: null,
     stopAllowed: true,
     stopReason: 'No active route.',
     progress: { requiredDone: 0, requiredTotal: 0, optionalDone: 0, optionalTotal: 0, percentRequired: 100 },
+    checklist: [],
     tasks: [],
-    lastUpdate,
+    lastUpdate: lastUpdate || undefined,
     storage: { kind: 'unknown' },
     paths: {
       currentJson: '.codex/overtli-task-manager/current.json',
       currentMarkdown: '.codex/overtli-task-manager/current.md'
     },
     updatedAt: nowIso()
-  };
+  });
+}
+
+function omitEmpty(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined && item !== null));
 }
 
 function scoreEntry(entry, query) {

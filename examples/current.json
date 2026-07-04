@@ -5,6 +5,20 @@
   "runId": "run_example",
   "goal": "Ship a Codex-first task manager",
   "routeRevision": 2,
+  "renderRevision": 2,
+  "renderPolicy": {
+    "mode": "start_end_delta",
+    "showFullOnStart": true,
+    "showFullOnFinal": true,
+    "showFullOnSteering": true,
+    "showFullOnManualStatus": true,
+    "showFullOnCheckpoint": false,
+    "showDeltaOnProgress": true,
+    "suppressNoopUpdates": true
+  },
+  "lastRenderedMode": "delta",
+  "lastRenderedTaskId": "task_003",
+  "lastRenderedHash": "example-render-hash",
   "currentTaskId": "task_003",
   "currentTaskTitle": "Validate install flow",
   "stopAllowed": false,
@@ -12,8 +26,39 @@
   "progress": {
     "requiredDone": 2,
     "requiredTotal": 3,
+    "optionalDone": 0,
+    "optionalTotal": 0,
     "percentRequired": 67
   },
+  "checklist": [
+    {
+      "id": "task_001",
+      "title": "Create route",
+      "status": "done",
+      "checked": true,
+      "active": false,
+      "required": true,
+      "evidence": "Route created"
+    },
+    {
+      "id": "task_002",
+      "title": "Implement tools",
+      "status": "done",
+      "checked": true,
+      "active": false,
+      "required": true,
+      "evidence": "MCP tools implemented"
+    },
+    {
+      "id": "task_003",
+      "title": "Validate install flow",
+      "status": "active",
+      "checked": false,
+      "active": true,
+      "required": true,
+      "evidence": "—"
+    }
+  ],
   "tasks": [
     {
       "id": "task_001",

@@ -3,13 +3,13 @@ import path from 'node:path';
 import { readJson, readText, atomicWriteText } from '../core/fs-utils.mjs';
 
 const EVENT_COMMANDS = {
-  SessionStart: { matcher: 'startup|resume|compact', statusMessage: 'Loading OTM route', event: 'session-start' },
-  UserPromptSubmit: { statusMessage: 'Mapping prompt to OTM route', event: 'user-prompt-submit' },
-  PreToolUse: { matcher: 'Bash|apply_patch|mcp__.*', statusMessage: 'Checking OTM route', event: 'pre-tool-use' },
-  PostToolUse: { matcher: 'Bash|apply_patch|mcp__.*', statusMessage: 'Recording OTM evidence', event: 'post-tool-use' },
-  PreCompact: { matcher: 'manual|auto', statusMessage: 'Saving OTM route', event: 'pre-compact' },
-  PostCompact: { matcher: 'manual|auto', statusMessage: 'Restoring OTM route', event: 'post-compact' },
-  Stop: { statusMessage: 'Auditing OTM completion', event: 'stop', timeout: 30 }
+  SessionStart: { matcher: 'startup|resume|compact', statusMessage: 'Loading OTM route', event: 'session-start', timeout: 15 },
+  UserPromptSubmit: { statusMessage: 'Mapping route', event: 'user-prompt-submit', timeout: 12 },
+  PreToolUse: { matcher: 'Bash|apply_patch', event: 'pre-tool-use', timeout: 8 },
+  PostToolUse: { matcher: 'Bash|apply_patch', event: 'post-tool-use', timeout: 12 },
+  PreCompact: { matcher: 'manual|auto', statusMessage: 'Saving route', event: 'pre-compact', timeout: 15 },
+  PostCompact: { matcher: 'manual|auto', statusMessage: 'Restoring route', event: 'post-compact', timeout: 15 },
+  Stop: { statusMessage: 'Auditing completion', event: 'stop', timeout: 45 }
 };
 
 export function patchHooksJson({ workspaceRoot, packageRoot, dryRun = false } = {}) {
@@ -20,7 +20,7 @@ export function patchHooksJson({ workspaceRoot, packageRoot, dryRun = false } = 
     const command = `node ${JSON.stringify(path.join(packageRoot, 'bin', 'otm.mjs'))} hook ${spec.event}`;
     const entry = {
       ...(spec.matcher ? { matcher: spec.matcher } : {}),
-      hooks: [{ type: 'command', command, ...(spec.timeout ? { timeout: spec.timeout } : {}), statusMessage: spec.statusMessage }]
+      hooks: [{ type: 'command', command, ...(spec.timeout ? { timeout: spec.timeout } : {}), ...(spec.statusMessage ? { statusMessage: spec.statusMessage } : {}) }]
     };
     const existing = Array.isArray(doc.hooks[eventName]) ? doc.hooks[eventName] : [];
     const filtered = existing.filter((item) => !entryHasOtmCommand(item));

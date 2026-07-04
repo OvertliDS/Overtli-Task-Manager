@@ -1,6 +1,18 @@
+import crypto from 'node:crypto';
 import { CURRENT_SCHEMA_VERSION, MANAGER_NAME } from './constants.mjs';
 import { markdownEscapeCell, compactOneLine } from './text-utils.mjs';
 import { currentJsonPath, currentMarkdownPath, relativeToWorkspace, atomicWriteJson, atomicWriteText } from './fs-utils.mjs';
+
+export const DEFAULT_RENDER_POLICY = {
+  mode: 'start_end_delta',
+  showFullOnStart: true,
+  showFullOnFinal: true,
+  showFullOnSteering: true,
+  showFullOnManualStatus: true,
+  showFullOnCheckpoint: false,
+  showDeltaOnProgress: true,
+  suppressNoopUpdates: true
+};
 
 export function buildSnapshot({ run, tasks, workspaceRoot, storageKind = 'unknown', lastUpdate = null }) {
   const required = tasks.filter((task) => task.required && !['dropped', 'superseded'].includes(task.status));
@@ -10,21 +22,23 @@ export function buildSnapshot({ run, tasks, workspaceRoot, storageKind = 'unknow
   const remainingRequired = required.filter((task) => !['done'].includes(task.status));
   const currentTask = tasks.find((task) => task.id === run.currentTaskId) || tasks.find((task) => task.status === 'active') || remainingRequired[0] || null;
   const stopAllowed = remainingRequired.length === 0;
+  const renderedMode = deriveRenderedMode(lastUpdate);
+  const renderHash = hashRenderState({ renderedMode, run, tasks, currentTask, requiredDone, requiredTotal: required.length, optionalDone, optionalTotal: optional.length, lastUpdate });
 
-  return {
+  return omitEmpty({
     schemaVersion: CURRENT_SCHEMA_VERSION,
     manager: MANAGER_NAME,
     status: run.status,
     runId: run.id,
-    sessionId: run.sessionId || null,
-    turnId: run.turnId || null,
     workspaceRoot,
-    gitBranch: run.metadata?.gitBranch || null,
     goal: run.goal,
     routeRevision: run.routeRevision || 1,
+    renderRevision: run.metadata?.renderRevision || run.routeRevision || 1,
+    renderPolicy: DEFAULT_RENDER_POLICY,
+    lastRenderedMode: renderedMode,
+    lastRenderedTaskId: currentTask?.id || undefined,
+    lastRenderedHash: renderHash,
     phase: derivePhase(tasks),
-    currentTaskId: currentTask?.id || null,
-    currentTaskTitle: currentTask?.title || null,
     stopAllowed,
     stopReason: stopAllowed ? 'All required route segments are complete.' : `${remainingRequired.length} required route segment${remainingRequired.length === 1 ? '' : 's'} remain open.`,
     progress: {
@@ -34,29 +48,43 @@ export function buildSnapshot({ run, tasks, workspaceRoot, storageKind = 'unknow
       optionalTotal: optional.length,
       percentRequired: required.length ? Math.round((requiredDone / required.length) * 100) : 100
     },
+    sessionId: run.sessionId || undefined,
+    turnId: run.turnId || undefined,
+    gitBranch: run.metadata?.gitBranch || undefined,
+    currentTaskId: currentTask?.id || undefined,
+    currentTaskTitle: currentTask?.title || undefined,
+    checklist: tasks.map((task) => omitEmpty({
+      id: task.id,
+      title: task.title,
+      status: task.status,
+      checked: task.status === 'done',
+      active: task.id === currentTask?.id,
+      required: Boolean(task.required),
+      evidence: renderEvidenceBrief(task.evidence || [])
+    })),
     tasks: tasks.map((task) => ({
       id: task.id,
       title: task.title,
-      description: task.description || null,
+      ...(task.description ? { description: task.description } : {}),
       status: task.status,
       required: Boolean(task.required),
       priority: task.priority,
       sortOrder: task.sortOrder,
       acceptanceCriteria: task.acceptanceCriteria || [],
-      evidence: task.evidence || [],
+      evidence: (task.evidence || []).map(sanitizeEvidence),
       createdBy: task.createdBy,
       updatedAt: task.updatedAt,
-      completedAt: task.completedAt || null,
+      ...(task.completedAt ? { completedAt: task.completedAt } : {}),
       metadata: task.metadata || {}
     })),
-    lastUpdate,
+    lastUpdate: lastUpdate || undefined,
     storage: { kind: storageKind },
     paths: {
       currentJson: relativeToWorkspace(workspaceRoot, currentJsonPath(workspaceRoot)),
       currentMarkdown: relativeToWorkspace(workspaceRoot, currentMarkdownPath(workspaceRoot))
     },
     updatedAt: new Date().toISOString()
-  };
+  });
 }
 
 export function renderSnapshotMarkdown(snapshot, options = {}) {
@@ -91,9 +119,22 @@ export function renderSnapshotMarkdown(snapshot, options = {}) {
   return `${lines.join('\n')}\n`;
 }
 
+export function renderDeltaMarkdown(snapshot, options = {}) {
+  const title = options.title || 'OTM Progress';
+  const lines = [];
+  lines.push(`### ${title}`);
+  if (snapshot.lastUpdate?.message) lines.push(snapshot.lastUpdate.message);
+  const completed = lastCompletedTask(snapshot);
+  if (completed) lines.push(`✅ Completed: ${completed.title}`);
+  if (snapshot.currentTaskTitle && !snapshot.stopAllowed) lines.push(`▶ Now: ${snapshot.currentTaskTitle}`);
+  lines.push(`Gate: ${snapshot.stopAllowed ? 'Stop allowed' : snapshot.stopReason}`);
+  return `${lines.join('\n')}\n`;
+}
+
 export function writeCurrentFiles(workspaceRoot, snapshot) {
-  atomicWriteJson(currentJsonPath(workspaceRoot), snapshot);
-  atomicWriteText(currentMarkdownPath(workspaceRoot), renderSnapshotMarkdown(snapshot));
+  const jsonChanged = atomicWriteJson(currentJsonPath(workspaceRoot), snapshot);
+  const markdownChanged = atomicWriteText(currentMarkdownPath(workspaceRoot), renderSnapshotMarkdown(snapshot));
+  return { jsonChanged, markdownChanged };
 }
 
 export function renderSummaryMarkdown(summary) {
@@ -145,6 +186,52 @@ function taskIcon(status) {
     case 'superseded': return '↪ superseded';
     default: return '○ pending';
   }
+}
+
+function omitEmpty(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined && item !== null));
+}
+
+function sanitizeEvidence(item = {}) {
+  return omitEmpty({
+    kind: item.kind,
+    summary: item.summary,
+    files: Array.isArray(item.files) && item.files.length ? item.files : undefined,
+    command: item.command || undefined,
+    exitCode: item.exitCode ?? undefined,
+    notes: item.notes || undefined,
+    at: item.at
+  });
+}
+
+function deriveRenderedMode(lastUpdate) {
+  switch (lastUpdate?.kind) {
+    case 'run_started':
+    case 'run_reconciled':
+      return 'full';
+    case 'turn_finalized':
+      return 'final';
+    case 'task_started':
+    case 'task_completed':
+    case 'task_blocked':
+    case 'task_dropped':
+    case 'task_superseded':
+    case 'progress':
+      return 'delta';
+    case 'stop_audit':
+      return 'gate';
+    default:
+      return 'full';
+  }
+}
+
+function hashRenderState(value) {
+  return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 16);
+}
+
+function lastCompletedTask(snapshot) {
+  const done = (snapshot.tasks || []).filter((task) => task.status === 'done');
+  return done[done.length - 1] || null;
 }
 
 function derivePhase(tasks) {

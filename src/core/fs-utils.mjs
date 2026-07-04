@@ -34,13 +34,15 @@ export function readJson(filePath, fallback = null) {
 
 export function atomicWriteText(filePath, text) {
   ensureDir(path.dirname(filePath));
+  if (readText(filePath, null) === text) return false;
   const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
   fs.writeFileSync(tmp, text, 'utf8');
   fs.renameSync(tmp, filePath);
+  return true;
 }
 
 export function atomicWriteJson(filePath, value) {
-  atomicWriteText(filePath, `${JSON.stringify(value, null, 2)}
+  return atomicWriteText(filePath, `${JSON.stringify(value, null, 2)}
 `);
 }
 

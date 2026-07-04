@@ -34,11 +34,18 @@ test('route lifecycle requires evidence and clears after finalization', () => {
     ]
   });
   assert.equal(started.snapshot.status, 'active');
+  assert.ok(Array.isArray(started.snapshot.checklist));
+  assert.equal(started.snapshot.checklist.length, 2);
+  assert.equal(started.snapshot.renderPolicy.mode, 'start_end_delta');
+  assert.equal(typeof started.snapshot.lastRenderedHash, 'string');
+  assert.doesNotMatch(JSON.stringify(started.snapshot), /:null/);
   const [first, second] = started.snapshot.tasks;
 
   manager.markTaskActive({ workspaceRoot, taskId: first.id });
   assert.throws(() => manager.completeTask({ workspaceRoot, taskId: first.id }), /evidence is attached/);
-  manager.completeTask({ workspaceRoot, taskId: first.id, evidence: { kind: 'manual_note', summary: 'Route created.' } });
+  const completedFirst = manager.completeTask({ workspaceRoot, taskId: first.id, evidence: { kind: 'manual_note', summary: 'Route created.' } });
+  assert.match(completedFirst.markdown, /^### OTM Progress/);
+  assert.equal(completedFirst.snapshot.lastRenderedMode, 'delta');
   assert.equal(manager.auditStop({ workspaceRoot }).stopAllowed, false);
 
   manager.markTaskActive({ workspaceRoot, taskId: second.id });
@@ -47,7 +54,25 @@ test('route lifecycle requires evidence and clears after finalization', () => {
 
   const finalized = manager.finalizeTurn({ workspaceRoot, clear: true });
   assert.equal(finalized.snapshot.status, 'cleared');
+  assert.doesNotMatch(JSON.stringify(finalized.summaryJson), /:null/);
   assert.ok(fs.existsSync(path.join(workspaceRoot, '.codex/overtli-task-manager/current.json')));
+});
+
+test('read-only snapshots do not rewrite current state files', async () => {
+  const workspaceRoot = tempWorkspace('otm-snapshot-');
+  const manager = createTaskManager({ cwd: workspaceRoot, env: testEnv('otm-snapshot') });
+  manager.start({
+    workspaceRoot,
+    replaceExisting: true,
+    goal: 'Validate read-only snapshot',
+    tasks: [{ title: 'Keep current files stable', required: true }]
+  });
+  const currentJson = path.join(workspaceRoot, '.codex/overtli-task-manager/current.json');
+  const before = fs.statSync(currentJson).mtimeMs;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  manager.snapshot({ workspaceRoot, write: false });
+  const after = fs.statSync(currentJson).mtimeMs;
+  assert.equal(after, before);
 });
 
 test('workspace installer is idempotent and preserves existing guidance', () => {
@@ -67,6 +92,11 @@ test('workspace installer is idempotent and preserves existing guidance', () => 
   assert.match(agents, /Keep tests passing/);
   assert.ok(fs.existsSync(path.join(workspaceRoot, '.agents/skills/overtli-task-manager/SKILL.md')));
   assert.ok(fs.existsSync(path.join(workspaceRoot, '.codex/hooks.json')));
+  const hooks = JSON.parse(fs.readFileSync(path.join(workspaceRoot, '.codex/hooks.json'), 'utf8')).hooks;
+  assert.equal(hooks.PreToolUse.at(-1).matcher, 'Bash|apply_patch');
+  assert.equal(hooks.PostToolUse.at(-1).matcher, 'Bash|apply_patch');
+  assert.equal(hooks.PreToolUse.at(-1).hooks[0].timeout, 8);
+  assert.equal(hooks.Stop.at(-1).hooks[0].timeout, 45);
 });
 
 test('project review scans memory-bank / memory_bank and indexes overview files', () => {
@@ -93,4 +123,3 @@ test('project review scans memory-bank / memory_bank and indexes overview files'
   assert.match(review.summary, /memory_bank/);
   assert.match(review.summary, /memory-bank/);
 });
-

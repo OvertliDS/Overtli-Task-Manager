@@ -12,7 +12,7 @@ const ROOT_FILES = [
 const DOC_DIRS = ['docs', 'doc', 'memory-bank', 'memory_bank', '.ai', '.agents', 'design', 'product', 'gdd'];
 const DOC_EXTENSIONS = new Set(['.md', '.mdx', '.txt', '.json', '.toml', '.yaml', '.yml']);
 
-export function reviewProjectContext({ cwd = process.cwd(), workspaceRoot = null, maxFiles = 30, maxBytesPerFile = 12000 } = {}) {
+export function reviewProjectContext({ cwd = process.cwd(), workspaceRoot = null, maxFiles = 20, maxBytesPerFile = 12000 } = {}) {
   const root = path.resolve(workspaceRoot || findWorkspaceRoot(cwd));
   const candidates = collectCandidateFiles(root, maxFiles);
   const sources = [];

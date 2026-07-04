@@ -11,7 +11,9 @@ Overtli Task Manager (OTM) structures AI coding sessions into evidence-backed ro
 *   **Route Checklists:** Deconstruct complex goals into discrete segments (`pending` ➔ `active` ➔ `done` / `blocked`).
 *   **Evidence Enforcement:** Tasks can only be marked complete once concrete proof (changed files, test results, command outputs) is provided.
 *   **Chat Integration:** Renders real-time, user-friendly Markdown progress dashboards directly in your Codex chat.
-*   **Durable State Cache:** Syncs active routes to `.codex/overtli-task-manager/current.json` and `current.md`.
+*   **Persistent Task List:** Keeps a full checked-off task list in both chat Markdown and `current.json.checklist`.
+*   **Durable State Cache:** Syncs active routes to `.codex/overtli-task-manager/current.json` and `current.md` without rewriting unchanged files.
+*   **Optimized Rendering:** Shows a full checklist at route start and finalization, then compact progress cards during routine work.
 *   **Lifecycle Hooks:** Intercepts sessions, prompts, tools, and stops to enforce task completion and audit progress.
 *   **Workspace Memory:** Keeps a lightweight, high-signal index of project guides (`AGENTS.md`), memory banks, and schemas.
 
@@ -107,10 +109,37 @@ Global Durable Store (~/.codex/overtli-task-manager/)
  └── state.sqlite (SQLite with WAL mode; falls back to JSON if sqlite3 is missing)
 
 Workspace State (.codex/overtli-task-manager/)
- ├── current.json / current.md (Active route and checkpoint status)
+ ├── current.json / current.md (Active route, checklist, and checkpoint status)
  ├── cache/ (Lightweight context and review caches)
  └── summaries/ (Historical turn summaries)
 ```
+
+`current.md` is the persistent chat-friendly checklist. `current.json.checklist`
+contains the same full route list in a compact machine-readable form for UIs,
+hooks, or follow-on agents that need to show tasks being checked off.
+
+The default render policy is `start_end_delta`:
+
+```text
+Route start: full checklist
+Routine progress: compact status card
+Steering/manual status: full snapshot
+Route finalization: full completion summary
+```
+
+`current.json` includes render bookkeeping (`renderRevision`,
+`lastRenderedMode`, `lastRenderedTaskId`, and `lastRenderedHash`) so UIs and
+agents can avoid repeated full-list rendering.
+
+For faster hooks, OTM avoids rewriting unchanged state files and uses read-only
+snapshots for passive hook checks. Automatic evidence tracking records only
+file edits, validation/build commands, failed commands, and explicit OTM
+checkpoint calls by default. Set `OTM_RECORD_PRE_TOOL=1` to record pre-tool
+observations, or `OTM_TRACK_MCP_EVIDENCE=1` to opt into broad MCP evidence.
+
+Default hook timeouts are capped but not brittle on Windows: SessionStart 15s,
+UserPromptSubmit 12s, PreToolUse 8s, PostToolUse 12s, PreCompact/PostCompact
+15s, and Stop 45s.
 
 ---
 

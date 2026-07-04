@@ -31,7 +31,7 @@ export async function runHookScript(eventName, { stdin = '', cwd = process.cwd()
 function handleSessionStart(manager, input, workspaceRoot) {
   let projectReview = null;
   try {
-    projectReview = reviewProjectContext({ workspaceRoot, maxFiles: Number(process.env.OTM_PROJECT_REVIEW_MAX_FILES || 30) });
+    projectReview = reviewProjectContext({ workspaceRoot, maxFiles: Number(process.env.OTM_PROJECT_REVIEW_MAX_FILES || 20) });
     manager.upsertMemory({ workspaceRoot, kind: 'project_overview', title: 'Project overview cache', body: projectReview.summary, tags: ['project-overview', 'auto-review'], source: { fingerprint: projectReview.fingerprint, sourceCount: projectReview.sourceCount } });
   } catch {}
   const snap = manager.snapshot({ workspaceRoot, lastUpdate: { kind: 'session_start', message: 'Session loaded OTM state.', at: new Date().toISOString() } });
@@ -42,7 +42,7 @@ function handleSessionStart(manager, input, workspaceRoot) {
 }
 
 function handleUserPromptSubmit(manager, input, workspaceRoot) {
-  const active = manager.snapshot({ workspaceRoot }).run;
+  const active = manager.snapshot({ workspaceRoot, write: false }).run;
   const classification = classifyPrompt(input.prompt || '', Boolean(active));
   if (classification === 'empty' || classification === 'simple') {
     return { continue: true, suppressOutput: true };
@@ -60,18 +60,21 @@ function handleUserPromptSubmit(manager, input, workspaceRoot) {
 }
 
 function handlePreToolUse(manager, input, workspaceRoot) {
-  const current = manager.snapshot({ workspaceRoot }).snapshot;
+  const current = manager.snapshot({ workspaceRoot, write: false }).snapshot;
   if (!current?.runId || input.tool_name?.includes('overtli_task_manager')) return { continue: true, suppressOutput: true };
-  const message = classifyToolIntent(input);
-  if (message) {
-    try { manager.progress({ workspaceRoot, message, evidence: { kind: 'hook_observation', summary: message, command: input.tool_input?.command || null }, hookEventName: input.hook_event_name, turnId: input.turn_id }); } catch {}
+  if (process.env.OTM_RECORD_PRE_TOOL === '1') {
+    const message = classifyToolIntent(input);
+    if (message) {
+      try { manager.progress({ workspaceRoot, message, evidence: { kind: 'hook_observation', summary: message, command: input.tool_input?.command || null }, hookEventName: input.hook_event_name, turnId: input.turn_id }); } catch {}
+    }
   }
   return { continue: true, suppressOutput: true };
 }
 
 function handlePostToolUse(manager, input, workspaceRoot) {
-  const current = manager.snapshot({ workspaceRoot }).snapshot;
+  const current = manager.snapshot({ workspaceRoot, write: false }).snapshot;
   if (!current?.runId || input.tool_name?.includes('overtli_task_manager')) return { continue: true, suppressOutput: true };
+  if (!shouldRecordPostToolEvidence(input)) return { continue: true, suppressOutput: true };
   const command = input.tool_input?.command || null;
   const summary = summarizeToolResult(input);
   try {
@@ -120,9 +123,9 @@ function classifyToolIntent(input) {
   const name = input.tool_name || '';
   const command = String(input.tool_input?.command || '');
   if (name === 'apply_patch') return 'Applying file changes for the active route segment.';
-  if (name === 'Bash' && /\b(test|lint|check|typecheck|vitest|jest|pytest|npm run|pnpm|yarn)\b/i.test(command)) return 'Running validation for the active route segment.';
+  if (name === 'Bash' && isValidationCommand(command)) return 'Running validation for the active route segment.';
   if (name === 'Bash') return 'Running a project command for the active route segment.';
-  if (name.startsWith('mcp__')) return `Using ${name} as evidence for the active route segment.`;
+  if (name.startsWith('mcp__') && process.env.OTM_TRACK_MCP_EVIDENCE === '1') return `Using ${name} as evidence for the active route segment.`;
   return null;
 }
 
@@ -140,9 +143,28 @@ function inferEvidenceKind(input) {
   const name = input.tool_name || '';
   const command = String(input.tool_input?.command || '');
   if (name === 'apply_patch') return 'file_change';
-  if (/\b(test|lint|check|typecheck|vitest|jest|pytest)\b/i.test(command)) return 'test_result';
+  if (isValidationCommand(command)) return 'test_result';
   if (name === 'Bash') return 'command_result';
   return 'tool_result';
+}
+
+function shouldRecordPostToolEvidence(input) {
+  const name = input.tool_name || '';
+  const command = String(input.tool_input?.command || '');
+  if (name === 'apply_patch') return true;
+  if (name.startsWith('mcp__')) return process.env.OTM_TRACK_MCP_EVIDENCE === '1';
+  if (name === 'Bash') return isValidationCommand(command) || toolFailed(input);
+  return toolFailed(input);
+}
+
+function isValidationCommand(command) {
+  return /\b(test|lint|check|typecheck|build|vitest|jest|pytest|npm run|pnpm|yarn)\b/i.test(command);
+}
+
+function toolFailed(input) {
+  const response = input.tool_response || {};
+  const code = response.exit_code ?? response.status ?? response.code;
+  return code !== undefined && code !== 0 && code !== '0';
 }
 
 function parseJson(value, fallback) {
