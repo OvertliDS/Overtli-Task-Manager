@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { CURRENT_SCHEMA_VERSION, MANAGER_NAME } from './constants.mjs';
 import { markdownEscapeCell, compactOneLine } from './text-utils.mjs';
-import { currentJsonPath, currentMarkdownPath, relativeToWorkspace, atomicWriteJson, atomicWriteText } from './fs-utils.mjs';
+import { cleanupWorkspaceStateTempFiles, currentJsonPath, currentMarkdownPath, relativeToWorkspace, atomicWriteJson, atomicWriteText, workspaceTempDir } from './fs-utils.mjs';
 
 export const DEFAULT_RENDER_POLICY = {
   mode: 'start_end_delta',
@@ -133,8 +133,11 @@ export function renderDeltaMarkdown(snapshot, options = {}) {
 }
 
 export function writeCurrentFiles(workspaceRoot, snapshot) {
-  const jsonChanged = atomicWriteJson(currentJsonPath(workspaceRoot), snapshot);
-  const markdownChanged = atomicWriteText(currentMarkdownPath(workspaceRoot), renderSnapshotMarkdown(snapshot));
+  cleanupWorkspaceStateTempFiles(workspaceRoot);
+  const tempDir = workspaceTempDir(workspaceRoot);
+  const jsonChanged = atomicWriteJson(currentJsonPath(workspaceRoot), snapshot, { tempDir });
+  const markdownChanged = atomicWriteText(currentMarkdownPath(workspaceRoot), renderSnapshotMarkdown(snapshot), { tempDir });
+  cleanupWorkspaceStateTempFiles(workspaceRoot);
   return { jsonChanged, markdownChanged };
 }
 
@@ -161,7 +164,7 @@ export function renderSummaryMarkdown(summary) {
   }
   if (summary.evidence?.length) {
     lines.push('### Evidence');
-    for (const item of summary.evidence.slice(0, 12)) lines.push(`- ${item}`);
+    for (const item of conciseEvidence(summary.evidence).slice(0, 12)) lines.push(`- ${item}`);
     lines.push('');
   }
   if (summary.nextSteps?.length) {
@@ -176,6 +179,18 @@ export function renderSummaryMarkdown(summary) {
 function renderEvidenceBrief(evidence = []) {
   if (!evidence.length) return '—';
   return compactOneLine(evidence[evidence.length - 1].summary || evidence[evidence.length - 1].kind || 'captured', 80);
+}
+
+function conciseEvidence(evidence = []) {
+  const seen = new Set();
+  const out = [];
+  for (const item of evidence) {
+    const value = compactOneLine(String(item || '').replace(/\s+/g, ' '), 180);
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+  }
+  return out;
 }
 
 function taskIcon(status) {

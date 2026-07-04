@@ -53,6 +53,16 @@ export async function handleCli({ argv, cwd, stdin, packageRoot, env }) {
     return;
   }
 
+  if (command === 'cleanup') {
+    const result = manager.cleanupWorkspace({
+      workspaceRoot,
+      minAgeMs: flags.minAgeMs === undefined ? undefined : Number(flags.minAgeMs),
+      scratchMaxAgeMs: flags.scratchMaxAgeMs === undefined ? undefined : Number(flags.scratchMaxAgeMs)
+    });
+    console.log(result.markdown);
+    return;
+  }
+
   if (command === 'hook') {
     const eventName = argv[1];
     await runHookScript(eventName, { stdin, cwd: workspaceRoot, env });
@@ -119,6 +129,7 @@ Commands:
   otm snapshot [--workspace PATH]
   otm review-project [--workspace PATH] [--max-files N]
   otm clear-current [--workspace PATH] [--delete-files]
+  otm cleanup [--workspace PATH] [--min-age-ms N] [--scratch-max-age-ms N]
   otm mcp-config
 
 MCP server:

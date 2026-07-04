@@ -1,11 +1,14 @@
+import path from 'node:path';
+import crypto from 'node:crypto';
 import { createTaskManager } from '../core/manager.mjs';
 import { classifyPrompt } from '../core/planner.mjs';
-import { findWorkspaceRoot } from '../core/fs-utils.mjs';
+import { atomicWriteText, cleanupWorkspaceStateTempFiles, ensureDir, findWorkspaceRoot, relativeToWorkspace, workspaceScratchDir, workspaceTempDir } from '../core/fs-utils.mjs';
 import { reviewProjectContext } from '../context/project-review.mjs';
 
 export async function runHookScript(eventName, { stdin = '', cwd = process.cwd(), env = process.env } = {}) {
   const input = parseJson(stdin, {});
   const workspaceRoot = findWorkspaceRoot(input.cwd || cwd);
+  try { cleanupWorkspaceStateTempFiles(workspaceRoot); } catch {}
   const manager = createTaskManager({ cwd: workspaceRoot, env });
 
   switch (eventName) {
@@ -79,14 +82,14 @@ function handlePostToolUse(manager, input, workspaceRoot) {
   const current = manager.snapshot({ workspaceRoot, write: false }).snapshot;
   if (!current?.runId || input.tool_name?.includes('overtli_task_manager')) return { continue: true, suppressOutput: true };
   if (!shouldRecordPostToolEvidence(input)) return { continue: true, suppressOutput: true };
-  const command = input.tool_input?.command || null;
+  const commandEvidence = commandEvidenceForTool(input, workspaceRoot);
   const summary = summarizeToolResult(input);
   try {
     manager.progress({
       workspaceRoot,
       taskId: current.currentTaskId,
       message: summary,
-      evidence: { kind: inferEvidenceKind(input), summary, command, exitCode: input.tool_response?.exit_code ?? input.tool_response?.status ?? null },
+      evidence: { kind: inferEvidenceKind(input), summary, ...commandEvidence, exitCode: input.tool_response?.exit_code ?? input.tool_response?.status ?? null },
       hookEventName: input.hook_event_name,
       turnId: input.turn_id
     });
@@ -150,6 +153,24 @@ function inferEvidenceKind(input) {
   if (isValidationCommand(command)) return 'test_result';
   if (name === 'Bash') return 'command_result';
   return 'tool_result';
+}
+
+function commandEvidenceForTool(input, workspaceRoot) {
+  const command = input.tool_input?.command || null;
+  if (!command) return {};
+  const text = String(command);
+  if (text.length <= 800) return { command: text };
+  const scratchRoot = workspaceScratchDir(workspaceRoot);
+  ensureDir(scratchRoot);
+  const digest = crypto.createHash('sha256').update(text).digest('hex').slice(0, 12);
+  const fileName = `${new Date().toISOString().replace(/[:.]/g, '-')}-${input.tool_name || 'tool'}-${digest}.txt`;
+  const filePath = path.join(scratchRoot, fileName);
+  atomicWriteText(filePath, text, { tempDir: workspaceTempDir(workspaceRoot) });
+  const rel = relativeToWorkspace(workspaceRoot, filePath);
+  return {
+    command: `[omitted long ${input.tool_name || 'tool'} input; saved to ${rel}]`,
+    notes: { scratchFile: rel, originalLength: text.length }
+  };
 }
 
 function shouldRecordPostToolEvidence(input) {

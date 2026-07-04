@@ -86,6 +86,7 @@ node ~/.codex/plugins/overtli-task-manager/bin/otm.mjs doctor
 | `otm_audit_stop` | Completion | Check if all required route segments are completed |
 | `otm_finalize_turn` | Completion | Save turn summary and update project memory |
 | `otm_clear_current` | Completion | Clear active route state files |
+| `otm_cleanup_workspace` | Completion | Clean OTM-owned temp and scratch artifacts |
 | `otm_project_review`| Memory | Index high-signal repository context |
 | `otm_memory_search` | Memory | Search stored checkpoints and decision records |
 
@@ -96,6 +97,7 @@ otm doctor [--workspace PATH]
 otm snapshot [--workspace PATH]
 otm review-project [--workspace PATH] [--max-files N]
 otm clear-current [--workspace PATH] [--delete-files]
+otm cleanup [--workspace PATH] [--min-age-ms N] [--scratch-max-age-ms N]
 otm mcp-config
 ```
 
@@ -112,12 +114,24 @@ Global Durable Store (~/.codex/overtli-task-manager/)
 Workspace State (.codex/overtli-task-manager/)
  ├── current.json / current.md (Active route, checklist, and checkpoint status)
  ├── cache/ (Lightweight context and review caches)
+ │   ├── tmp/ (Atomic write staging; stale OTM temp files are cleaned automatically)
+ │   └── scratch/ (Raw hook/tool payloads kept out of user-facing Markdown)
  └── summaries/ (Historical turn summaries)
 ```
 
 `current.md` is the persistent chat-friendly checklist. `current.json.checklist`
 contains the same full route list in a compact machine-readable form for UIs,
 hooks, or follow-on agents that need to show tasks being checked off.
+Current-state writes stage temporary files under `cache/tmp` and clean stale
+OTM-owned `current.json.*.tmp` / `current.md.*.tmp` files from older versions,
+so the workspace state folder stays inspectable.
+Long raw tool inputs are written to `cache/scratch` and referenced from route
+evidence with a short pointer, keeping `current.md` and turn summaries readable.
+Workflow cleanup treats scratch files as short-lived and removes stale scratch
+dumps after roughly 30 minutes.
+`otm_clear_current` also runs immediate OTM-owned temp/scratch cleanup at route
+completion, and `otm_cleanup_workspace` exposes the same cleanup as an explicit
+tool/CLI command.
 
 The default render policy is `start_end_delta`:
 

@@ -6,9 +6,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createTaskManager } from '../src/core/manager.mjs';
 import { deriveFallbackTasks } from '../src/core/planner.mjs';
+import { workspaceScratchDir, workspaceTempDir } from '../src/core/fs-utils.mjs';
 import { installWorkspace } from '../src/install/install-workspace.mjs';
 import { reviewProjectContext } from '../src/context/project-review.mjs';
 import { toMcpResult } from '../src/mcp/result.mjs';
+import { runHookScript } from '../src/hooks/runner.mjs';
 
 function tempWorkspace(prefix = 'otm-test-') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -20,6 +22,23 @@ function tempWorkspace(prefix = 'otm-test-') {
 function testEnv(name) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), `${name}-state-`));
   return { ...process.env, OTM_STORAGE: 'json', OTM_STATE_DIR: stateDir };
+}
+
+async function withCapturedStdout(fn) {
+  const originalWrite = process.stdout.write;
+  let captured = '';
+  process.stdout.write = function write(chunk, encoding, callback) {
+    captured += Buffer.isBuffer(chunk) ? chunk.toString(typeof encoding === 'string' ? encoding : 'utf8') : String(chunk);
+    if (typeof encoding === 'function') encoding();
+    if (typeof callback === 'function') callback();
+    return true;
+  };
+  try {
+    const result = await fn();
+    return { result, captured };
+  } finally {
+    process.stdout.write = originalWrite;
+  }
 }
 
 test('route lifecycle requires evidence and clears after finalization', () => {
@@ -56,10 +75,16 @@ test('route lifecycle requires evidence and clears after finalization', () => {
   manager.completeTask({ workspaceRoot, taskId: second.id, evidence: { kind: 'test_result', summary: 'Audit passed after both tasks.' } });
   assert.equal(manager.auditStop({ workspaceRoot }).stopAllowed, true);
 
+  const scratchDir = workspaceScratchDir(workspaceRoot);
+  fs.mkdirSync(scratchDir, { recursive: true });
+  const scratchFile = path.join(scratchDir, 'final-clear-dump.txt');
+  fs.writeFileSync(scratchFile, 'raw scratch content', 'utf8');
+
   const finalized = manager.finalizeTurn({ workspaceRoot, clear: true });
   assert.equal(finalized.snapshot.status, 'cleared');
   assert.doesNotMatch(JSON.stringify(finalized.summaryJson), /:null/);
   assert.ok(fs.existsSync(path.join(workspaceRoot, '.codex/overtli-task-manager/current.json')));
+  assert.equal(fs.existsSync(scratchFile), false);
 });
 
 test('read-only snapshots do not rewrite current state files', async () => {
@@ -77,6 +102,112 @@ test('read-only snapshots do not rewrite current state files', async () => {
   manager.snapshot({ workspaceRoot, write: false });
   const after = fs.statSync(currentJson).mtimeMs;
   assert.equal(after, before);
+});
+
+test('current state writes use organized temp directory and clean stale state temp files', () => {
+  const workspaceRoot = tempWorkspace('otm-temp-clean-');
+  const manager = createTaskManager({ cwd: workspaceRoot, env: testEnv('otm-temp-clean') });
+  manager.start({
+    workspaceRoot,
+    replaceExisting: true,
+    goal: 'Validate temp cleanup',
+    tasks: [{ title: 'Write current files', required: true }]
+  });
+
+  const stateDir = path.join(workspaceRoot, '.codex', 'overtli-task-manager');
+  const cacheRoot = path.join(stateDir, 'cache');
+  const scratchRoot = workspaceScratchDir(workspaceRoot);
+  const staleCurrent = path.join(stateDir, 'current.md.1234.1000.tmp');
+  const staleJson = path.join(stateDir, 'current.json.5678.1000.tmp');
+  const staleCache = path.join(cacheRoot, 'project-review.json.9012.1000.tmp');
+  const staleScratch = path.join(scratchRoot, 'old-raw-dump.txt');
+  const unrelated = path.join(stateDir, 'user-note.tmp');
+  fs.mkdirSync(cacheRoot, { recursive: true });
+  fs.mkdirSync(scratchRoot, { recursive: true });
+  fs.writeFileSync(staleCurrent, 'stale markdown temp', 'utf8');
+  fs.writeFileSync(staleJson, '{}\n', 'utf8');
+  fs.writeFileSync(staleCache, '{}\n', 'utf8');
+  fs.writeFileSync(staleScratch, 'old scratch payload', 'utf8');
+  fs.writeFileSync(unrelated, 'keep me', 'utf8');
+  const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  const veryOld = new Date(Date.now() - 45 * 60 * 1000);
+  fs.utimesSync(staleCurrent, old, old);
+  fs.utimesSync(staleJson, old, old);
+  fs.utimesSync(staleCache, old, old);
+  fs.utimesSync(staleScratch, veryOld, veryOld);
+
+  manager.progress({ workspaceRoot, message: 'Force current state rewrite.' });
+
+  assert.equal(fs.existsSync(staleCurrent), false);
+  assert.equal(fs.existsSync(staleJson), false);
+  assert.equal(fs.existsSync(staleCache), false);
+  assert.equal(fs.existsSync(staleScratch), false);
+  assert.equal(fs.existsSync(unrelated), true);
+  assert.ok(fs.existsSync(workspaceTempDir(workspaceRoot)));
+  const leaked = fs.readdirSync(stateDir).filter((name) => /^current\.(?:md|json)\.\d+\.\d+\.tmp$/.test(name));
+  assert.deepEqual(leaked, []);
+  const tempLeaked = fs.readdirSync(workspaceTempDir(workspaceRoot)).filter((name) => /\.tmp$/.test(name));
+  assert.deepEqual(tempLeaked, []);
+});
+
+test('explicit cleanup removes OTM-owned temp and scratch artifacts immediately', () => {
+  const workspaceRoot = tempWorkspace('otm-explicit-clean-');
+  const manager = createTaskManager({ cwd: workspaceRoot, env: testEnv('otm-explicit-clean') });
+  manager.start({
+    workspaceRoot,
+    replaceExisting: true,
+    goal: 'Validate explicit cleanup',
+    tasks: [{ title: 'Create cleanup artifacts', required: true }]
+  });
+
+  const stateDir = path.join(workspaceRoot, '.codex', 'overtli-task-manager');
+  const scratchRoot = workspaceScratchDir(workspaceRoot);
+  fs.mkdirSync(scratchRoot, { recursive: true });
+  const tempFile = path.join(stateDir, 'current.json.1234.2000.tmp');
+  const scratchFile = path.join(scratchRoot, 'raw-dump.txt');
+  const keepFile = path.join(stateDir, 'keep.tmp');
+  fs.writeFileSync(tempFile, '{}\n', 'utf8');
+  fs.writeFileSync(scratchFile, 'raw scratch content', 'utf8');
+  fs.writeFileSync(keepFile, 'not owned by OTM cleanup', 'utf8');
+
+  const result = manager.cleanupWorkspace({ workspaceRoot });
+
+  assert.equal(fs.existsSync(tempFile), false);
+  assert.equal(fs.existsSync(scratchFile), false);
+  assert.equal(fs.existsSync(keepFile), true);
+  assert.equal(result.removed.length, 2);
+  assert.match(result.markdown, /Removed artifact\(s\): 2/);
+});
+
+test('post-tool hook stores long raw command input in scratchpad instead of route evidence', async () => {
+  const workspaceRoot = tempWorkspace('otm-scratchpad-');
+  const env = testEnv('otm-scratchpad');
+  const manager = createTaskManager({ cwd: workspaceRoot, env });
+  manager.start({
+    workspaceRoot,
+    replaceExisting: true,
+    goal: 'Validate scratchpad evidence',
+    tasks: [{ title: 'Capture hook evidence', required: true }]
+  });
+
+  const rawCommand = 'apply patch payload\n'.repeat(120);
+  await withCapturedStdout(() => runHookScript('post-tool-use', {
+    cwd: workspaceRoot,
+    env,
+    stdin: JSON.stringify({
+      tool_name: 'apply_patch',
+      tool_input: { command: rawCommand },
+      tool_response: { status: 0 }
+    })
+  }));
+
+  const snapshot = manager.snapshot({ workspaceRoot, write: false }).snapshot;
+  const evidence = snapshot.tasks[0].evidence.at(-1);
+  assert.match(evidence.command, /^\[omitted long apply_patch input; saved to /);
+  assert.ok(evidence.notes.scratchFile);
+  const scratchPath = path.join(workspaceRoot, evidence.notes.scratchFile);
+  assert.equal(fs.readFileSync(scratchPath, 'utf8'), rawCommand);
+  assert.equal(JSON.stringify(snapshot).includes(rawCommand), false);
 });
 
 test('reconcile preserves model task order and activates newly added work by insertion order', () => {

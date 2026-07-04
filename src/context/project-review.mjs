@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { findWorkspaceRoot, readText, statSafe, hashFile, atomicWriteJson, atomicWriteText, cacheDir, ensureDir, relativeToWorkspace } from '../core/fs-utils.mjs';
+import { findWorkspaceRoot, readText, statSafe, hashFile, atomicWriteJson, atomicWriteText, cacheDir, ensureDir, relativeToWorkspace, workspaceTempDir } from '../core/fs-utils.mjs';
 import { nowIso, shortHash } from '../core/ids.mjs';
 import { clampText, compactOneLine } from '../core/text-utils.mjs';
 
@@ -40,8 +40,9 @@ export function reviewProjectContext({ cwd = process.cwd(), workspaceRoot = null
     fingerprint: shortHash(JSON.stringify(sources.map((src) => [src.path, src.hash, src.mtimeMs])))
   };
   ensureDir(cacheDir(root));
-  atomicWriteJson(path.join(cacheDir(root), 'project-review.json'), payload);
-  atomicWriteText(path.join(cacheDir(root), 'project-review.md'), summary);
+  const tempDir = workspaceTempDir(root);
+  atomicWriteJson(path.join(cacheDir(root), 'project-review.json'), payload, { tempDir });
+  atomicWriteText(path.join(cacheDir(root), 'project-review.md'), summary, { tempDir });
   return payload;
 }
 

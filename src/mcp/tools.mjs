@@ -85,6 +85,11 @@ export const tools = [
     inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, runId: { type: 'string' }, deleteFiles: { type: 'boolean' } } }
   },
   {
+    name: 'otm_cleanup_workspace',
+    description: 'Clean OTM-owned workspace temp and scratch artifacts immediately. Use at final completion or when stale .tmp/scratch files clutter .codex/overtli-task-manager.',
+    inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, minAgeMs: { type: 'number' }, scratchMaxAgeMs: { type: 'number' } } }
+  },
+  {
     name: 'otm_project_review',
     description: 'Refresh the project-specific lightweight context cache by reading overview docs, AGENTS.md, memory banks, docs, manifests, PRDs, and GDDs without full source scanning.',
     inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, maxFiles: { type: 'number' } } }

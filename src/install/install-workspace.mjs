@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { findWorkspaceRoot, ensureDir, workspaceStateDir, atomicWriteJson, readJson } from '../core/fs-utils.mjs';
+import { findWorkspaceRoot, ensureDir, workspaceStateDir, workspaceTempDir, atomicWriteJson, readJson } from '../core/fs-utils.mjs';
 import { patchAgentsFile } from './agent-block.mjs';
 import { patchHooksJson } from './hook-config.mjs';
 import { installRepoSkills } from './skill-install.mjs';
@@ -16,7 +16,7 @@ export function installWorkspace({ cwd = process.cwd(), workspaceRoot = null, pa
   results.push({ step: 'gitignore', ...patchGitignore({ workspaceRoot: root, dryRun }) });
   if (installMcpConfig) results.push({ step: 'mcp-config', ...patchProjectMcpConfig({ workspaceRoot: root, packageRoot, dryRun }) });
   const manifest = buildInstallManifest({ root, packageRoot, dryRun, results });
-  if (!dryRun) atomicWriteJson(path.join(workspaceStateDir(root), 'install.json'), manifest);
+  if (!dryRun) atomicWriteJson(path.join(workspaceStateDir(root), 'install.json'), manifest, { tempDir: workspaceTempDir(root) });
   return { ok: results.every((r) => r.ok !== false), workspaceRoot: root, dryRun, manifest, results };
 }
 

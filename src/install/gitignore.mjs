@@ -12,6 +12,7 @@ export function patchGitignore({ workspaceRoot, dryRun = false } = {}) {
 .codex/overtli-task-manager/current.md
 .codex/overtli-task-manager/summaries/
 .codex/overtli-task-manager/cache/
+.codex/overtli-task-manager/*.tmp
 .codex/overtli-task-manager/install.json
 .codex/overtli-task-manager/*.sqlite*
 ${BLOCK_END}`;

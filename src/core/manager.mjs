@@ -2,7 +2,7 @@ import path from 'node:path';
 import { createStore } from '../storage/store.mjs';
 import { assertCondition, OtmError } from './errors.mjs';
 import { newId, nowIso, sha256, stableTaskKey, shortHash } from './ids.mjs';
-import { findWorkspaceRoot, workspaceStateDir, ensureDir, summariesDir, atomicWriteJson, atomicWriteText, currentJsonPath, currentMarkdownPath, removeFileIfExists } from './fs-utils.mjs';
+import { cleanupWorkspaceStateTempFiles, findWorkspaceRoot, workspaceStateDir, ensureDir, summariesDir, atomicWriteJson, atomicWriteText, currentJsonPath, currentMarkdownPath, removeFileIfExists, workspaceTempDir } from './fs-utils.mjs';
 import { buildSnapshot, renderSnapshotMarkdown, renderSummaryMarkdown, renderDeltaMarkdown, writeCurrentFiles } from './renderer.mjs';
 import { combinePromptContext, deriveFallbackTasks } from './planner.mjs';
 import { CURRENT_SCHEMA_VERSION, MANAGER_NAME, TASK_STATUSES } from './constants.mjs';
@@ -395,8 +395,9 @@ export function createTaskManager(options = {}) {
     store.upsertSummary(summary);
     ensureDir(summariesDir(workspaceRoot));
     const base = path.join(summariesDir(workspaceRoot), `${turnId}-${summaryId}`);
-    atomicWriteJson(`${base}.json`, summaryJson);
-    atomicWriteText(`${base}.md`, summaryMd);
+    const tempDir = workspaceTempDir(workspaceRoot);
+    atomicWriteJson(`${base}.json`, summaryJson, { tempDir });
+    atomicWriteText(`${base}.md`, summaryMd, { tempDir });
     upsertMemory({ workspaceRoot, kind: 'turn_summary', title: `Turn summary: ${run.goal}`, body: summaryMd, tags: ['turn-summary', 'checkpoint'], source: { runId: run.id, summaryId, turnId } });
     run = store.updateRun(run.id, { status: audit.stopAllowed ? 'completed' : 'blocked', finalizedAt: createdAt });
     recordEvent(run.id, 'turn_finalized', { summaryId, complete: audit.stopAllowed }, args);
@@ -419,11 +420,23 @@ ${cleared.markdown || ''}` };
     if (args.deleteFiles) {
       removeFileIfExists(currentJsonPath(workspaceRoot));
       removeFileIfExists(currentMarkdownPath(workspaceRoot));
+      cleanupWorkspaceStateTempFiles(workspaceRoot, { minAgeMs: 0, scratchMaxAgeMs: 0 });
       return { cleared: true, deleted: true, markdown: '## ✅ Overtli Task Manager\n\nActive route cleared.\n' };
     }
     const tombstone = clearedSnapshot(workspaceRoot, { message: 'Active route cleared after summary.' }, run?.id || null);
     writeCurrentFiles(workspaceRoot, tombstone);
+    cleanupWorkspaceStateTempFiles(workspaceRoot, { minAgeMs: 0, scratchMaxAgeMs: 0 });
     return { cleared: true, deleted: false, snapshot: tombstone, markdown: renderSnapshotMarkdown(tombstone) };
+  }
+
+  function cleanupWorkspace(args = {}) {
+    const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
+    const removed = cleanupWorkspaceStateTempFiles(workspaceRoot, {
+      minAgeMs: args.minAgeMs ?? 0,
+      scratchMaxAgeMs: args.scratchMaxAgeMs ?? 0
+    });
+    const lines = ['## ✅ OTM cleanup', '', `Workspace: \`${workspaceRoot}\``, `Removed artifact(s): ${removed.length}`];
+    return { workspaceRoot, removed, markdown: `${lines.join('\n')}\n` };
   }
 
   function snapshot(args = {}) {
@@ -493,6 +506,7 @@ ${cleared.markdown || ''}` };
     auditStop,
     finalizeTurn,
     clearCurrent,
+    cleanupWorkspace,
     snapshot,
     upsertMemory,
     searchMemory,
