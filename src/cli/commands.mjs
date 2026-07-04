@@ -63,6 +63,16 @@ export async function handleCli({ argv, cwd, stdin, packageRoot, env }) {
     return;
   }
 
+  if (command === 'prune-history') {
+    const result = manager.pruneHistory({
+      workspaceRoot,
+      retentionDays: flags.retentionDays === undefined ? undefined : Number(flags.retentionDays),
+      dryRun: Boolean(flags.dryRun)
+    });
+    console.log(result.markdown);
+    return;
+  }
+
   if (command === 'hook') {
     const eventName = argv[1];
     await runHookScript(eventName, { stdin, cwd: workspaceRoot, env });
@@ -130,6 +140,7 @@ Commands:
   otm review-project [--workspace PATH] [--max-files N]
   otm clear-current [--workspace PATH] [--delete-files]
   otm cleanup [--workspace PATH] [--min-age-ms N] [--scratch-max-age-ms N]
+  otm prune-history [--workspace PATH] [--retention-days N] [--dry-run]
   otm mcp-config
 
 MCP server:

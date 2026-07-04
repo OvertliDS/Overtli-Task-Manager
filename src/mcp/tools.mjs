@@ -106,6 +106,11 @@ export const tools = [
     inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, minAgeMs: { type: 'number' }, scratchMaxAgeMs: { type: 'number' } } }
   },
   {
+    name: 'otm_prune_history',
+    description: 'Prune durable OTM history older than the retention window. Defaults to 7 days and preserves active, blocked, and paused routes.',
+    inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, retentionDays: { type: 'number' }, dryRun: { type: 'boolean' } } }
+  },
+  {
     name: 'otm_project_review',
     description: 'Refresh the project-specific lightweight context cache by reading overview docs, AGENTS.md, memory banks, docs, manifests, PRDs, and GDDs without full source scanning.',
     inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, maxFiles: { type: 'number' } } }

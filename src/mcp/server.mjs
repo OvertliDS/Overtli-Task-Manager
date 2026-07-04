@@ -71,6 +71,7 @@ async function dispatchTool({ name, args, manager, packageRoot }) {
     case 'otm_finalize_turn': return manager.finalizeTurn(args);
     case 'otm_clear_current': return manager.clearCurrent(args);
     case 'otm_cleanup_workspace': return manager.cleanupWorkspace(args);
+    case 'otm_prune_history': return manager.pruneHistory(args);
     case 'otm_memory_search': return memorySearchResult(manager.searchMemory(args));
     case 'otm_memory_upsert': return { ...manager.upsertMemory(args), markdown: `## ✅ OTM memory updated\n\nSaved: **${args.title}**\n` };
     case 'otm_memory_delete': return { ...manager.deleteMemory(args), markdown: '## ✅ OTM memory cleanup\n\nRequested memory entries were removed when matched.\n' };

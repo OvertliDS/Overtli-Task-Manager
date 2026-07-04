@@ -87,6 +87,7 @@ node ~/.codex/plugins/overtli-task-manager/bin/otm.mjs doctor
 | `otm_finalize_turn` | Completion | Save turn summary and update project memory |
 | `otm_clear_current` | Completion | Clear active route state files |
 | `otm_cleanup_workspace` | Completion | Clean OTM-owned temp and scratch artifacts |
+| `otm_prune_history` | Completion | Prune durable run/task/event/summary/cache history older than retention |
 | `otm_project_review`| Memory | Index high-signal repository context |
 | `otm_memory_search` | Memory | Search stored checkpoints and decision records |
 
@@ -98,6 +99,7 @@ otm snapshot [--workspace PATH]
 otm review-project [--workspace PATH] [--max-files N]
 otm clear-current [--workspace PATH] [--delete-files]
 otm cleanup [--workspace PATH] [--min-age-ms N] [--scratch-max-age-ms N]
+otm prune-history [--workspace PATH] [--retention-days N] [--dry-run]
 otm mcp-config
 ```
 
@@ -132,6 +134,13 @@ dumps after roughly 30 minutes.
 `otm_clear_current` also runs immediate OTM-owned temp/scratch cleanup at route
 completion, and `otm_cleanup_workspace` exposes the same cleanup as an explicit
 tool/CLI command.
+
+Durable history cleanup is separate from workspace temp cleanup. `otm_clear_current`
+also runs a best-effort prune of inactive history older than 7 days. Use
+`otm_prune_history` or `otm prune-history` to run it explicitly, with
+`--dry-run` for an audit-only report. History pruning preserves active, blocked,
+and paused routes even when they are older than the cutoff, then removes old
+inactive runs plus their tasks, events, summaries, and expired/old cache entries.
 
 The default render policy is `start_end_delta`:
 

@@ -48,6 +48,15 @@ At route completion, `otm_clear_current` runs immediate OTM-owned temp/scratch
 cleanup. `otm_cleanup_workspace` and `otm cleanup` expose the same cleanup path
 for explicit maintenance.
 
+Durable store cleanup is retention-based and separate from workspace file
+cleanup. The default retention window is 7 days. `otm_clear_current` invokes a
+best-effort history prune after clearing the active route, and
+`otm_prune_history` / `otm prune-history` expose the same database cleanup
+explicitly. The prune preserves active, blocked, and paused runs, then removes
+inactive runs older than the cutoff along with their tasks, events, and
+summaries. Cache entries are pruned when they are expired or older than the
+cutoff. Dry-run mode reports the row counts without deleting anything.
+
 ## Project memory
 
 Project memory is not a full RAG index. It is a lightweight, project-specific cache that prefers overview files and durable summaries.

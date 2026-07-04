@@ -7,6 +7,8 @@ import { buildSnapshot, renderSnapshotMarkdown, renderSummaryMarkdown, renderDel
 import { combinePromptContext, deriveFallbackTasks } from './planner.mjs';
 import { CURRENT_SCHEMA_VERSION, MANAGER_NAME, TASK_STATUSES } from './constants.mjs';
 
+const DEFAULT_HISTORY_RETENTION_DAYS = 7;
+
 export function createTaskManager(options = {}) {
   const env = options.env || process.env;
   const store = options.store || createStore({ env });
@@ -430,11 +432,13 @@ ${cleared.markdown || ''}` };
       removeFileIfExists(currentJsonPath(workspaceRoot));
       removeFileIfExists(currentMarkdownPath(workspaceRoot));
       cleanupWorkspaceStateTempFiles(workspaceRoot, { minAgeMs: 0, scratchMaxAgeMs: 0 });
+      pruneHistoryQuietly(workspaceRoot);
       return { cleared: true, deleted: true, markdown: '## ✅ Overtli Task Manager\n\nActive route cleared.\n' };
     }
     const tombstone = clearedSnapshot(workspaceRoot, { message: 'Active route cleared after summary.' }, run?.id || null);
     writeCurrentFiles(workspaceRoot, tombstone);
     cleanupWorkspaceStateTempFiles(workspaceRoot, { minAgeMs: 0, scratchMaxAgeMs: 0 });
+    pruneHistoryQuietly(workspaceRoot);
     return { cleared: true, deleted: false, snapshot: tombstone, markdown: renderSnapshotMarkdown(tombstone) };
   }
 
@@ -446,6 +450,30 @@ ${cleared.markdown || ''}` };
     });
     const lines = ['## ✅ OTM cleanup', '', `Workspace: \`${workspaceRoot}\``, `Removed artifact(s): ${removed.length}`];
     return { workspaceRoot, removed, markdown: `${lines.join('\n')}\n` };
+  }
+
+  function pruneHistory(args = {}) {
+    const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
+    assertCondition(typeof store.pruneHistory === 'function', 'Current OTM store does not support history pruning.', 'PRUNE_UNSUPPORTED');
+    const retentionDays = normalizeRetentionDays(args.retentionDays);
+    const olderThan = args.olderThan || retentionCutoffIso(retentionDays, args.now);
+    const result = store.pruneHistory({
+      workspaceRoot,
+      retentionDays,
+      olderThan,
+      now: args.now || nowIso(),
+      dryRun: args.dryRun === true
+    });
+    return { ...result, markdown: renderPruneHistoryMarkdown(result) };
+  }
+
+  function pruneHistoryQuietly(workspaceRoot) {
+    try {
+      if (typeof store.pruneHistory !== 'function') return null;
+      return pruneHistory({ workspaceRoot });
+    } catch {
+      return null;
+    }
   }
 
   function snapshot(args = {}) {
@@ -516,6 +544,7 @@ ${cleared.markdown || ''}` };
     finalizeTurn,
     clearCurrent,
     cleanupWorkspace,
+    pruneHistory,
     snapshot,
     upsertMemory,
     searchMemory,
@@ -558,6 +587,42 @@ function buildSummaryJson({ run, tasks, outcome, nextSteps }) {
     routeRevision: run.routeRevision || 1,
     createdAt: nowIso()
   });
+}
+
+function normalizeRetentionDays(value) {
+  if (value === undefined || value === null || value === '') return DEFAULT_HISTORY_RETENTION_DAYS;
+  const days = Number(value);
+  assertCondition(Number.isFinite(days) && days >= 0, 'retentionDays must be a non-negative number.', 'INVALID_RETENTION');
+  return days;
+}
+
+function retentionCutoffIso(retentionDays, now = null) {
+  const base = now ? new Date(now) : new Date();
+  assertCondition(!Number.isNaN(base.getTime()), 'now must be a valid date/time.', 'INVALID_RETENTION');
+  return new Date(base.getTime() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function renderPruneHistoryMarkdown(result = {}) {
+  const deleted = result.deleted || {};
+  const total = Object.values(deleted).reduce((sum, value) => sum + Number(value || 0), 0);
+  const lines = [
+    `## ${result.dryRun ? '🧪' : '✅'} OTM history cleanup`,
+    '',
+    `Workspace: \`${result.workspaceRoot || 'all workspaces'}\``,
+    `Retention: ${result.retentionDays ?? DEFAULT_HISTORY_RETENTION_DAYS} day(s)`,
+    `Cutoff: \`${result.olderThan}\``,
+    `Mode: ${result.dryRun ? 'dry run' : 'deleted'}`,
+    '',
+    '| Table | Rows |',
+    '|---|---:|',
+    `| runs | ${deleted.runs || 0} |`,
+    `| tasks | ${deleted.tasks || 0} |`,
+    `| events | ${deleted.events || 0} |`,
+    `| summaries | ${deleted.summaries || 0} |`,
+    `| cache_entries | ${deleted.cacheEntries || 0} |`,
+    `| total | ${total} |`
+  ];
+  return `${lines.join('\n')}\n`;
 }
 
 function clearedSnapshot(workspaceRoot, lastUpdate = null, lastRunId = null) {

@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { createTaskManager } from '../src/core/manager.mjs';
 import { deriveFallbackTasks } from '../src/core/planner.mjs';
 import { workspaceScratchDir, workspaceTempDir } from '../src/core/fs-utils.mjs';
+import { loadBetterSqlite3 } from '../src/storage/sqlite-store.mjs';
 import { installWorkspace } from '../src/install/install-workspace.mjs';
 import { reviewProjectContext } from '../src/context/project-review.mjs';
 import { toMcpResult } from '../src/mcp/result.mjs';
@@ -22,6 +23,11 @@ function tempWorkspace(prefix = 'otm-test-') {
 function testEnv(name) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), `${name}-state-`));
   return { ...process.env, OTM_STORAGE: 'json', OTM_STATE_DIR: stateDir };
+}
+
+function sqliteTestEnv(name) {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), `${name}-sqlite-state-`));
+  return { ...process.env, OTM_STORAGE: 'sqlite', OTM_STATE_DIR: stateDir };
 }
 
 async function withCapturedStdout(fn) {
@@ -205,6 +211,111 @@ test('explicit cleanup removes OTM-owned temp and scratch artifacts immediately'
   assert.equal(fs.existsSync(keepFile), true);
   assert.equal(result.removed.length, 2);
   assert.match(result.markdown, /Removed artifact\(s\): 2/);
+});
+
+test('history pruning defaults to durable cleanup while preserving active routes', () => {
+  const workspaceRoot = tempWorkspace('otm-prune-history-');
+  const manager = createTaskManager({ cwd: workspaceRoot, env: testEnv('otm-prune-history') });
+  const oldIso = '2026-06-20T00:00:00.000Z';
+  const recentNow = '2026-07-04T00:00:00.000Z';
+
+  const oldRun = manager.start({
+    workspaceRoot,
+    replaceExisting: true,
+    goal: 'Old completed route',
+    tasks: [{ title: 'Finish old route', required: true }]
+  }).run;
+  const oldTask = manager.snapshot({ workspaceRoot, write: false }).snapshot.tasks[0];
+  finishInternalSteps(manager, workspaceRoot, oldTask.id);
+  manager.completeTask({
+    workspaceRoot,
+    taskId: oldTask.id,
+    evidence: { kind: 'test_result', summary: 'Old route completed.' }
+  });
+  manager.finalizeTurn({ workspaceRoot, clear: true });
+  manager.store.updateRun(oldRun.id, { status: 'cleared', updatedAt: oldIso, finalizedAt: oldIso });
+  manager.store.upsertSummary({
+    id: 'summary_old',
+    runId: oldRun.id,
+    workspaceRoot,
+    turnId: 'manual',
+    summaryMd: 'old summary',
+    summaryJson: { old: true },
+    currentCleared: true,
+    createdAt: oldIso
+  });
+  manager.store.upsertCache({
+    id: 'cache_old',
+    workspaceRoot,
+    kind: 'turn_summary',
+    title: 'Old cache',
+    body: 'old cache body',
+    tags: ['turn-summary'],
+    source: {},
+    scoreHint: 0,
+    createdAt: oldIso,
+    updatedAt: oldIso,
+    expiresAt: null
+  });
+
+  const activeRun = manager.start({
+    workspaceRoot,
+    replaceExisting: true,
+    goal: 'Old but active route',
+    tasks: [{ title: 'Keep active route', required: true }]
+  }).run;
+  manager.store.updateRun(activeRun.id, { status: 'active', updatedAt: oldIso, finalizedAt: null });
+
+  const dryRun = manager.pruneHistory({ workspaceRoot, now: recentNow, dryRun: true });
+  assert.equal(dryRun.retentionDays, 7);
+  assert.equal(dryRun.deleted.runs, 1);
+  assert.equal(dryRun.deleted.tasks, 1);
+  assert.ok(dryRun.deleted.events >= 1);
+  assert.equal(dryRun.deleted.summaries, 2);
+  assert.ok(dryRun.deleted.cacheEntries >= 1);
+  assert.ok(manager.store.getRun(oldRun.id));
+
+  const pruned = manager.pruneHistory({ workspaceRoot, now: recentNow });
+  assert.equal(pruned.deleted.runs, 1);
+  assert.equal(manager.store.getRun(oldRun.id), null);
+  assert.ok(manager.store.getRun(activeRun.id));
+  assert.equal(manager.store.getTasks(oldRun.id).length, 0);
+  assert.equal(manager.store.getEvents(oldRun.id).length, 0);
+  assert.equal(manager.store.listSummaries(workspaceRoot, 20).some((summary) => summary.runId === oldRun.id), false);
+  assert.equal(manager.store.listCache(workspaceRoot, 20).some((entry) => entry.id === 'cache_old'), false);
+  assert.match(pruned.markdown, /Retention: 7 day/);
+});
+
+test('sqlite history pruning removes old inactive rows', { skip: !loadBetterSqlite3() }, () => {
+  const workspaceRoot = tempWorkspace('otm-sqlite-prune-');
+  const manager = createTaskManager({ cwd: workspaceRoot, env: sqliteTestEnv('otm-sqlite-prune') });
+  const oldIso = '2026-06-20T00:00:00.000Z';
+  const now = '2026-07-04T00:00:00.000Z';
+
+  const started = manager.start({
+    workspaceRoot,
+    replaceExisting: true,
+    goal: 'Old sqlite route',
+    tasks: [{ title: 'Complete old sqlite route', required: true }]
+  });
+  const taskId = started.snapshot.tasks[0].id;
+  finishInternalSteps(manager, workspaceRoot, taskId);
+  manager.completeTask({
+    workspaceRoot,
+    taskId,
+    evidence: { kind: 'test_result', summary: 'Old sqlite route complete.' }
+  });
+  manager.finalizeTurn({ workspaceRoot, clear: true });
+  manager.store.updateRun(started.run.id, { status: 'cleared', updatedAt: oldIso, finalizedAt: oldIso });
+
+  const dryRun = manager.pruneHistory({ workspaceRoot, now, dryRun: true });
+  assert.equal(dryRun.deleted.runs, 1);
+  assert.ok(manager.store.getRun(started.run.id));
+
+  const pruned = manager.pruneHistory({ workspaceRoot, now });
+  assert.equal(pruned.deleted.runs, 1);
+  assert.equal(manager.store.getRun(started.run.id), null);
+  assert.equal(manager.store.getTasks(started.run.id).length, 0);
 });
 
 test('post-tool hook stores long raw command input in scratchpad instead of route evidence', async () => {

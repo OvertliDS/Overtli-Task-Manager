@@ -163,4 +163,43 @@ export class JsonStore {
       .sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)))
       .slice(0, limit);
   }
+
+  pruneHistory(options = {}) {
+    const workspaceRoot = options.workspaceRoot || null;
+    const olderThan = options.olderThan;
+    const now = options.now || nowIso();
+    const dryRun = options.dryRun === true;
+    if (!olderThan) throw new Error('olderThan is required for history pruning');
+
+    return this.transaction((data) => {
+      const removableRunIds = new Set(data.runs
+        .filter((run) => (!workspaceRoot || run.workspaceRoot === workspaceRoot)
+          && !['active', 'blocked', 'paused'].includes(run.status)
+          && String(run.finalizedAt || run.updatedAt || run.createdAt) < olderThan)
+        .map((run) => run.id));
+      const isOldCache = (entry) => (!workspaceRoot || entry.workspaceRoot === workspaceRoot)
+        && ((entry.expiresAt && String(entry.expiresAt) <= now) || String(entry.updatedAt || entry.createdAt) < olderThan);
+      const deleted = {
+        runs: removableRunIds.size,
+        tasks: data.tasks.filter((task) => removableRunIds.has(task.runId)).length,
+        events: data.events.filter((event) => removableRunIds.has(event.runId)).length,
+        summaries: data.summaries.filter((summary) => removableRunIds.has(summary.runId)).length,
+        cacheEntries: data.cache.filter(isOldCache).length
+      };
+      if (!dryRun) {
+        data.runs = data.runs.filter((run) => !removableRunIds.has(run.id));
+        data.tasks = data.tasks.filter((task) => !removableRunIds.has(task.runId));
+        data.events = data.events.filter((event) => !removableRunIds.has(event.runId));
+        data.summaries = data.summaries.filter((summary) => !removableRunIds.has(summary.runId));
+        data.cache = data.cache.filter((entry) => !isOldCache(entry));
+      }
+      return {
+        dryRun,
+        workspaceRoot,
+        olderThan,
+        retentionDays: options.retentionDays,
+        deleted
+      };
+    });
+  }
 }

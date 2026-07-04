@@ -206,6 +206,72 @@ export class SqliteStore {
   listCache(workspaceRoot, limit = 100) {
     return this.db.prepare('SELECT * FROM cache_entries WHERE workspace_root = ? ORDER BY updated_at DESC LIMIT ?').all(workspaceRoot, limit).map(fromCacheRow);
   }
+
+  pruneHistory(options = {}) {
+    const workspaceRoot = options.workspaceRoot || null;
+    const olderThan = options.olderThan;
+    const now = options.now || nowIso();
+    const dryRun = options.dryRun === true;
+    if (!olderThan) throw new Error('olderThan is required for history pruning');
+
+    const runWhere = [
+      "status NOT IN ('active','blocked','paused')",
+      'COALESCE(finalized_at, updated_at, created_at) < ?'
+    ];
+    const runParams = [olderThan];
+    if (workspaceRoot) {
+      runWhere.unshift('workspace_root = ?');
+      runParams.unshift(workspaceRoot);
+    }
+    const removableRuns = this.db.prepare(`SELECT id FROM runs WHERE ${runWhere.join(' AND ')}`).all(...runParams).map((row) => row.id);
+    const runIdClause = removableRuns.length ? `run_id IN (${removableRuns.map(() => '?').join(',')})` : null;
+
+    const counts = {
+      runs: removableRuns.length,
+      tasks: runIdClause ? this.db.prepare(`SELECT COUNT(*) AS count FROM tasks WHERE ${runIdClause}`).get(...removableRuns).count : 0,
+      events: runIdClause ? this.db.prepare(`SELECT COUNT(*) AS count FROM events WHERE ${runIdClause}`).get(...removableRuns).count : 0,
+      summaries: runIdClause ? this.db.prepare(`SELECT COUNT(*) AS count FROM summaries WHERE ${runIdClause}`).get(...removableRuns).count : 0,
+      cacheEntries: countPrunableCacheEntries(this.db, { workspaceRoot, olderThan, now })
+    };
+
+    if (!dryRun) {
+      this.transaction(() => {
+        if (runIdClause) {
+          this.db.prepare(`DELETE FROM tasks WHERE ${runIdClause}`).run(...removableRuns);
+          this.db.prepare(`DELETE FROM events WHERE ${runIdClause}`).run(...removableRuns);
+          this.db.prepare(`DELETE FROM summaries WHERE ${runIdClause}`).run(...removableRuns);
+          this.db.prepare(`DELETE FROM runs WHERE id IN (${removableRuns.map(() => '?').join(',')})`).run(...removableRuns);
+        }
+        deletePrunableCacheEntries(this.db, { workspaceRoot, olderThan, now });
+      });
+    }
+
+    return {
+      dryRun,
+      workspaceRoot,
+      olderThan,
+      retentionDays: options.retentionDays,
+      deleted: counts
+    };
+  }
+}
+
+function cacheWhere({ workspaceRoot }) {
+  const clauses = ['((expires_at IS NOT NULL AND expires_at <= ?) OR COALESCE(updated_at, created_at) < ?)'];
+  if (workspaceRoot) clauses.unshift('workspace_root = ?');
+  return clauses.join(' AND ');
+}
+
+function cacheParams({ workspaceRoot, olderThan, now }) {
+  return workspaceRoot ? [workspaceRoot, now, olderThan] : [now, olderThan];
+}
+
+function countPrunableCacheEntries(db, options) {
+  return db.prepare(`SELECT COUNT(*) AS count FROM cache_entries WHERE ${cacheWhere(options)}`).get(...cacheParams(options)).count;
+}
+
+function deletePrunableCacheEntries(db, options) {
+  return db.prepare(`DELETE FROM cache_entries WHERE ${cacheWhere(options)}`).run(...cacheParams(options)).changes || 0;
 }
 
 function parseJson(value, fallback) {
