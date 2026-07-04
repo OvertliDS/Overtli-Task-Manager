@@ -12,6 +12,17 @@ Codex hooks    ──┘
 
 The durable store tracks runs, tasks, events, summaries, and cache entries. SQLite is preferred; JSON is a fallback for machines that cannot install native dependencies.
 
+Tasks are the stop-gated route checkpoints. Each task may also carry
+`metadata.internalSteps`, which are normalized from model-supplied strings or
+objects into durable `{ id, title, status }` records. These records preserve the
+AI's exact internal progress location through `current.json`, compaction, and
+handoff. Internal-step statuses are intentionally separate from the task status:
+checking off a substep does not complete the route gate. A task cannot move to
+`done` until every internal step is terminal (`done` or `skipped`) and the
+completion call includes concrete evidence. This keeps compaction-resume detail
+and stop-gated route completion aligned without letting either replace the
+other.
+
 ## Workspace files
 
 Workspace state is intentionally small and inspectable:

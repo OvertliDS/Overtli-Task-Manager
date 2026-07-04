@@ -22,6 +22,7 @@ export function buildSnapshot({ run, tasks, workspaceRoot, storageKind = 'unknow
   const remainingRequired = required.filter((task) => !['done'].includes(task.status));
   const currentTask = tasks.find((task) => task.id === run.currentTaskId) || tasks.find((task) => task.status === 'active') || remainingRequired[0] || null;
   const displayTasks = sortTasksForDisplay(tasks, currentTask);
+  const currentInternal = currentTask ? summarizeInternalSteps(currentTask.metadata?.internalSteps || []) : null;
   const stopAllowed = remainingRequired.length === 0;
   const renderedMode = deriveRenderedMode(lastUpdate);
   const renderHash = hashRenderState({ renderedMode, run, tasks: displayTasks, currentTask, requiredDone, requiredTotal: required.length, optionalDone, optionalTotal: optional.length, lastUpdate });
@@ -54,6 +55,13 @@ export function buildSnapshot({ run, tasks, workspaceRoot, storageKind = 'unknow
     gitBranch: run.metadata?.gitBranch || undefined,
     currentTaskId: currentTask?.id || undefined,
     currentTaskTitle: currentTask?.title || undefined,
+    currentInternalStep: currentInternal?.current ? omitEmpty({
+      id: currentInternal.current.id,
+      title: currentInternal.current.title,
+      status: currentInternal.current.status,
+      done: currentInternal.done,
+      total: currentInternal.total
+    }) : undefined,
     checklist: displayTasks.map((task) => omitEmpty({
       id: task.id,
       title: task.title,
@@ -61,9 +69,12 @@ export function buildSnapshot({ run, tasks, workspaceRoot, storageKind = 'unknow
       checked: task.status === 'done',
       active: task.id === currentTask?.id,
       required: Boolean(task.required),
+      internal: summarizeInternalSteps(task.metadata?.internalSteps || []),
       evidence: renderEvidenceBrief(task.evidence || [])
     })),
-    tasks: displayTasks.map((task) => ({
+    tasks: displayTasks.map((task) => {
+      const internalSteps = normalizeInternalStepList(task.metadata?.internalSteps || []);
+      return {
       id: task.id,
       title: task.title,
       ...(task.description ? { description: task.description } : {}),
@@ -76,8 +87,10 @@ export function buildSnapshot({ run, tasks, workspaceRoot, storageKind = 'unknow
       createdBy: task.createdBy,
       updatedAt: task.updatedAt,
       ...(task.completedAt ? { completedAt: task.completedAt } : {}),
-      metadata: task.metadata || {}
-    })),
+      internalSteps,
+      metadata: { ...(task.metadata || {}), ...(internalSteps.length ? { internalSteps } : {}) }
+    };
+    }),
     lastUpdate: lastUpdate || undefined,
     storage: { kind: storageKind },
     paths: {
@@ -100,6 +113,9 @@ export function renderSnapshotMarkdown(snapshot, options = {}) {
   lines.push(`**Goal:** ${snapshot.goal || 'No active goal'}`);
   lines.push(`**Progress:** ${snapshot.progress.requiredDone}/${snapshot.progress.requiredTotal} required complete (${snapshot.progress.percentRequired}%)`);
   lines.push(`${current}`);
+  if (snapshot.currentInternalStep) {
+    lines.push(`**Internal:** ${snapshot.currentInternalStep.done}/${snapshot.currentInternalStep.total} done; ${taskIcon(snapshot.currentInternalStep.status)} ${snapshot.currentInternalStep.title}`);
+  }
   lines.push(`**Gate:** ${stop}`);
   lines.push('');
   if (snapshot.lastUpdate?.message) {
@@ -109,7 +125,7 @@ export function renderSnapshotMarkdown(snapshot, options = {}) {
   lines.push('| State | Task | Evidence |');
   lines.push('|---|---|---|');
   for (const task of snapshot.tasks) {
-    lines.push(`| ${taskIcon(task.status)} | ${markdownEscapeCell(task.title)}${task.required ? '' : ' _(optional)_'} | ${markdownEscapeCell(renderEvidenceBrief(task.evidence))} |`);
+    lines.push(`| ${taskIcon(task.status)} | ${markdownEscapeCell(task.title)}${task.required ? '' : ' _(optional)_'} | ${markdownEscapeCell(renderTaskBrief(task))} |`);
   }
   if (!snapshot.tasks.length) {
     lines.push('| — | No tasks are active. | — |');
@@ -181,6 +197,18 @@ function renderEvidenceBrief(evidence = []) {
   return compactOneLine(evidence[evidence.length - 1].summary || evidence[evidence.length - 1].kind || 'captured', 80);
 }
 
+function renderTaskBrief(task = {}) {
+  const internal = summarizeInternalSteps(task.internalSteps || task.metadata?.internalSteps || []);
+  const parts = [];
+  if (internal?.total) {
+    const current = internal.current ? `; ${taskIcon(internal.current.status)} ${internal.current.title}` : '';
+    parts.push(`Internal ${internal.done}/${internal.total}${current}`);
+  }
+  const evidence = renderEvidenceBrief(task.evidence || []);
+  if (evidence !== '—') parts.push(evidence);
+  return compactOneLine(parts.join(' | ') || '—', 100);
+}
+
 function conciseEvidence(evidence = []) {
   const seen = new Set();
   const out = [];
@@ -218,6 +246,43 @@ function sanitizeEvidence(item = {}) {
     notes: item.notes || undefined,
     at: item.at
   });
+}
+
+function normalizeInternalStepList(steps = []) {
+  if (!Array.isArray(steps)) return [];
+  return steps.map((item) => {
+    const raw = typeof item === 'object' && item !== null ? item : { title: item };
+    const title = String(raw.title || raw.text || raw.summary || raw.name || '').trim();
+    if (!title) return null;
+    const status = normalizeInternalStepStatus(raw.status);
+    return omitEmpty({
+      id: raw.id ? String(raw.id) : undefined,
+      title,
+      status,
+      kind: raw.kind ? String(raw.kind) : undefined,
+      source: raw.source ? String(raw.source) : undefined,
+      updatedAt: raw.updatedAt ? String(raw.updatedAt) : undefined,
+      completedAt: raw.completedAt ? String(raw.completedAt) : undefined
+    });
+  }).filter(Boolean);
+}
+
+function normalizeInternalStepStatus(status) {
+  const value = String(status || 'pending').toLowerCase();
+  if (value === 'complete' || value === 'completed') return 'done';
+  if (['pending', 'active', 'done', 'blocked', 'skipped'].includes(value)) return value;
+  return 'pending';
+}
+
+function summarizeInternalSteps(steps = []) {
+  const normalized = normalizeInternalStepList(steps);
+  if (!normalized.length) return undefined;
+  const done = normalized.filter((step) => step.status === 'done' || step.status === 'skipped').length;
+  const current = normalized.find((step) => step.status === 'active')
+    || normalized.find((step) => step.status === 'blocked')
+    || normalized.find((step) => step.status === 'pending')
+    || normalized.at(-1);
+  return { done, total: normalized.length, current };
 }
 
 function deriveRenderedMode(lastUpdate) {

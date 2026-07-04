@@ -51,8 +51,24 @@ export const tools = [
   },
   {
     name: 'otm_progress',
-    description: 'Record a progress checkpoint and return a Markdown status update. Use for meaningful step-by-step chat updates.',
-    inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, runId: { type: 'string' }, taskId: { type: 'string' }, message: { type: 'string' }, evidence: { type: 'object', additionalProperties: true } }, required: ['message'] }
+    description: 'Record a progress checkpoint and return a Markdown status update. May also update one internal step, but route gates still require otm_complete_task evidence.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workspaceRoot: { type: 'string' },
+        runId: { type: 'string' },
+        taskId: { type: 'string' },
+        message: { type: 'string' },
+        evidence: { type: 'object', additionalProperties: true },
+        internalStep: { description: 'Internal step title or object to update for the active/task route segment.', oneOf: [{ type: 'string' }, { type: 'object', additionalProperties: true }] },
+        internalStepId: { type: 'string' },
+        internalStepTitle: { type: 'string' },
+        internalStepIndex: { type: 'number' },
+        internalStepStatus: { type: 'string', enum: ['pending', 'active', 'done', 'blocked', 'skipped', 'complete', 'completed'] },
+        advanceInternalStep: { type: 'boolean' }
+      },
+      required: ['message']
+    }
   },
   {
     name: 'otm_complete_task',

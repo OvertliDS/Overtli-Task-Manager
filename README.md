@@ -178,8 +178,16 @@ the caller. Whenever OTM chooses a current task, it promotes that task to
 `current.json`, and audit state agree.
 
 Each task keeps internal implementation detail in `metadata.internalSteps`.
-Those substeps are persisted for the AI and follow-on agents, but they are not
-rendered in chat progress tables by default.
+String inputs remain accepted, but OTM normalizes them into small records with
+`id`, `title`, and `status` so `current.json` can show which internal checkpoint
+is pending, active, done, blocked, or skipped after compaction or handoff.
+`otm_progress` can update one internal step by id, title, index, or object.
+Internal steps are prerequisites for the parent route segment: a route gate
+cannot be completed while any internal step is pending, active, or blocked.
+`done` and `skipped` are terminal internal states. Internal steps still do not
+complete the parent route segment or open the stop gate by themselves; the model
+must also call `otm_complete_task` with concrete evidence when a top-level route
+checkpoint/gate is actually complete.
 
 MCP tool results are Markdown/plain-text first. Full machine-readable route
 state remains available through the `otm://current` resource, while normal tool

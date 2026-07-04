@@ -90,7 +90,7 @@ export function createTaskManager(options = {}) {
     const existingMetadata = existing.metadata || {};
     const incomingMetadata = incoming.metadata || {};
     const metadata = { ...incomingMetadata, ...existingMetadata };
-    const internalSteps = unionStrings(existingMetadata.internalSteps || [], incomingMetadata.internalSteps || []);
+    const internalSteps = mergeInternalSteps(existingMetadata.internalSteps || [], incomingMetadata.internalSteps || []);
     if (internalSteps.length) metadata.internalSteps = internalSteps;
     metadata.consolidatedFrom = [
       ...(Array.isArray(existingMetadata.consolidatedFrom) ? existingMetadata.consolidatedFrom : []),
@@ -114,7 +114,7 @@ export function createTaskManager(options = {}) {
     const existingMetadata = existing.metadata || {};
     const incomingMetadata = incoming?.metadata || {};
     const metadata = { ...incomingMetadata, ...existingMetadata };
-    const internalSteps = unionStrings(existingMetadata.internalSteps || [], incomingMetadata.internalSteps || []);
+    const internalSteps = resetInternalStepsForReopen(mergeInternalSteps(existingMetadata.internalSteps || [], incomingMetadata.internalSteps || []));
     if (internalSteps.length) metadata.internalSteps = internalSteps;
     metadata.reopened = [
       ...(Array.isArray(existingMetadata.reopened) ? existingMetadata.reopened : []),
@@ -139,7 +139,12 @@ export function createTaskManager(options = {}) {
     for (const task of store.getTasks(runId)) {
       if (task.status === 'active' && task.id !== current?.id) store.updateTask(task.id, { status: 'pending' });
     }
-    if (current && current.status === 'pending') store.updateTask(current.id, { status: 'active' });
+    if (current) {
+      store.updateTask(current.id, {
+        status: current.status === 'pending' ? 'active' : current.status,
+        metadata: ensureInternalStepProgress(current.metadata, current.status === 'pending' ? 'active' : current.status)
+      });
+    }
   }
 
   function snapshotForRun(run, lastUpdate = null, { write = true } = {}) {
@@ -297,12 +302,15 @@ export function createTaskManager(options = {}) {
   function progress(args = {}) {
     const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
     let run = getRunOrActive({ runId: args.runId, workspaceRoot });
-    if (args.taskId) {
-      const task = store.getTask(args.taskId);
+    const targetTaskId = args.taskId || (hasInternalStepUpdate(args) ? run.currentTaskId : null);
+    if (targetTaskId) {
+      const task = store.getTask(targetTaskId);
       assertCondition(task && task.runId === run.id, 'Task not found in active route.', 'TASK_NOT_FOUND');
       assertCanSwitchTask(store.getTasks(run.id), task, args);
       const evidence = [...(task.evidence || []), evidenceFromArgs(args.evidence || { kind: 'manual_note', summary: args.message || 'Progress recorded' })];
-      store.updateTask(task.id, { evidence, status: task.status === 'pending' ? 'active' : task.status });
+      const status = task.status === 'pending' ? 'active' : task.status;
+      const metadata = updateInternalStepProgress(task.metadata, args, { taskStatus: status });
+      store.updateTask(task.id, { evidence, status, metadata });
       run = store.updateRun(run.id, { currentTaskId: task.id, status: 'active' });
     }
     recordEvent(run.id, 'progress', { message: args.message || null, taskId: args.taskId || null }, args);
@@ -318,8 +326,9 @@ export function createTaskManager(options = {}) {
     assertCondition(task && task.runId === run.id, 'Task not found in active route.', 'TASK_NOT_FOUND');
     const evidence = args.evidence ? evidenceFromArgs(args.evidence) : null;
     const nextEvidence = evidence ? [...(task.evidence || []), evidence] : (task.evidence || []);
-    assertCondition(args.force === true || nextEvidence.length > 0, 'A task can only be completed after evidence is attached.', 'EVIDENCE_REQUIRED');
-    store.updateTask(task.id, { status: 'done', evidence: nextEvidence, completedAt: nowIso() });
+    assertCondition(args.force === true || evidence, 'A task can only be completed after completion evidence is attached.', 'EVIDENCE_REQUIRED');
+    assertInternalStepsComplete(task.metadata);
+    store.updateTask(task.id, { status: 'done', evidence: nextEvidence, completedAt: nowIso(), metadata: normalizeCompletedInternalSteps(task.metadata) });
     const next = chooseCurrentTask(store.getTasks(run.id), task.id);
     activateCurrentTask(run.id, next);
     run = store.updateRun(run.id, { currentTaskId: next?.id || null, status: next ? 'active' : 'active' });
@@ -592,25 +601,174 @@ function normalizeActiveTasks(tasks) {
   for (const task of tasks) {
     if (task.id === active?.id && task.status === 'pending') task.status = 'active';
     else if (task.id !== active?.id && task.status === 'active') task.status = 'pending';
+    task.metadata = ensureInternalStepProgress(task.metadata, task.status);
   }
 }
 
 function normalizeInternalSteps(input, acceptanceCriteria = []) {
   const supplied = Array.isArray(input.internalSteps) ? input.internalSteps : input.metadata?.internalSteps;
-  const explicit = Array.isArray(supplied) ? unionStrings(supplied) : [];
+  const explicit = Array.isArray(supplied) ? normalizeInternalStepList(supplied) : [];
   if (explicit.length) return explicit;
 
   const criteriaSteps = unionStrings(acceptanceCriteria)
     .filter((item) => item !== 'Complete this route segment with concrete evidence.');
-  if (criteriaSteps.length) return criteriaSteps;
+  if (criteriaSteps.length) return normalizeInternalStepList(criteriaSteps);
 
   const title = String(input.title || 'route segment').trim();
-  return [
+  return normalizeInternalStepList([
     `Clarify scope for ${title}`,
     `Implement or inspect the required change for ${title}`,
     `Run relevant checks for ${title}`,
     `Record evidence for ${title}`
-  ];
+  ]);
+}
+
+function normalizeInternalStepList(steps = []) {
+  const seen = new Set();
+  const normalized = [];
+  for (const [index, item] of steps.entries()) {
+    const raw = typeof item === 'object' && item !== null ? item : { title: item };
+    const title = String(raw.title || raw.text || raw.summary || raw.name || '').trim();
+    if (!title) continue;
+    const key = title.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const status = normalizeInternalStepStatus(raw.status);
+    normalized.push(omitEmpty({
+      id: raw.id ? String(raw.id) : `step_${shortHash(`${title}:${index}`)}`,
+      title,
+      status,
+      kind: raw.kind ? String(raw.kind) : undefined,
+      source: raw.source ? String(raw.source) : undefined,
+      updatedAt: raw.updatedAt ? String(raw.updatedAt) : undefined,
+      completedAt: raw.completedAt ? String(raw.completedAt) : undefined
+    }));
+  }
+  return normalized;
+}
+
+function normalizeInternalStepStatus(status) {
+  const value = String(status || 'pending').toLowerCase();
+  if (value === 'complete' || value === 'completed') return 'done';
+  if (['pending', 'active', 'done', 'blocked', 'skipped'].includes(value)) return value;
+  return 'pending';
+}
+
+function mergeInternalSteps(existing = [], incoming = []) {
+  const merged = normalizeInternalStepList(existing);
+  const byTitle = new Map(merged.map((step, index) => [step.title.toLowerCase(), index]));
+  for (const step of normalizeInternalStepList(incoming)) {
+    const key = step.title.toLowerCase();
+    const existingIndex = byTitle.get(key);
+    if (existingIndex === undefined) {
+      byTitle.set(key, merged.length);
+      merged.push(step);
+    } else {
+      merged[existingIndex] = { ...step, ...merged[existingIndex], status: merged[existingIndex].status || step.status || 'pending' };
+    }
+  }
+  return merged;
+}
+
+function resetInternalStepsForReopen(steps = []) {
+  return normalizeInternalStepList(steps).map((step, index) => omitEmpty({
+    ...step,
+    status: index === 0 ? 'active' : 'pending',
+    reopenedAt: nowIso(),
+    completedAt: undefined
+  }));
+}
+
+function ensureInternalStepProgress(metadata = {}, taskStatus = 'pending') {
+  const internalSteps = normalizeInternalStepList(metadata.internalSteps || []);
+  if (!internalSteps.length) return metadata || {};
+  if (taskStatus === 'done') return { ...metadata, internalSteps: internalSteps.map((step) => markInternalStep(step, 'done')) };
+  if (taskStatus === 'active' && !internalSteps.some((step) => step.status === 'active')) {
+    const index = internalSteps.findIndex((step) => step.status === 'pending');
+    if (index >= 0) internalSteps[index] = markInternalStep(internalSteps[index], 'active');
+  }
+  return { ...metadata, internalSteps };
+}
+
+function hasInternalStepUpdate(args = {}) {
+  return args.internalStep !== undefined || args.internalStepId !== undefined || args.internalStepTitle !== undefined || args.internalStepIndex !== undefined || args.internalStepStatus !== undefined;
+}
+
+function updateInternalStepProgress(metadata = {}, args = {}, options = {}) {
+  let internalSteps = normalizeInternalStepList(metadata.internalSteps || []);
+  if (!internalSteps.length) return metadata || {};
+  if (!hasInternalStepUpdate(args)) return ensureInternalStepProgress({ ...metadata, internalSteps }, options.taskStatus || 'active');
+
+  const request = normalizeInternalStepRequest(args);
+  let index = findInternalStepIndex(internalSteps, request);
+  if (index < 0 && request.title) {
+    internalSteps.push({ id: `step_${shortHash(`${request.title}:${internalSteps.length}`)}`, title: request.title, status: 'pending' });
+    index = internalSteps.length - 1;
+  }
+  if (index < 0) return ensureInternalStepProgress({ ...metadata, internalSteps }, options.taskStatus || 'active');
+
+  const nextStatus = request.status || 'done';
+  if (nextStatus === 'active') internalSteps = internalSteps.map((step, stepIndex) => step.status === 'active' && stepIndex !== index ? markInternalStep(step, 'pending') : step);
+  internalSteps[index] = markInternalStep(internalSteps[index], nextStatus);
+  if (nextStatus === 'done' && request.advance !== false) {
+    const nextIndex = internalSteps.findIndex((step, stepIndex) => stepIndex > index && step.status === 'pending');
+    if (nextIndex >= 0) internalSteps[nextIndex] = markInternalStep(internalSteps[nextIndex], 'active');
+  }
+  return { ...metadata, internalSteps };
+}
+
+function normalizeInternalStepRequest(args = {}) {
+  const raw = typeof args.internalStep === 'object' && args.internalStep !== null ? args.internalStep : {};
+  const title = typeof args.internalStep === 'string'
+    ? args.internalStep
+    : raw.title || raw.text || raw.summary || args.internalStepTitle || null;
+  return omitEmpty({
+    id: raw.id || args.internalStepId,
+    title: title ? String(title).trim() : undefined,
+    index: Number.isInteger(raw.index) ? raw.index : (Number.isInteger(args.internalStepIndex) ? args.internalStepIndex : undefined),
+    status: normalizeInternalStepStatus(raw.status || args.internalStepStatus || 'done'),
+    advance: raw.advance ?? args.advanceInternalStep
+  });
+}
+
+function findInternalStepIndex(steps, request) {
+  if (request.id) {
+    const idIndex = steps.findIndex((step) => step.id === request.id);
+    if (idIndex >= 0) return idIndex;
+  }
+  if (Number.isInteger(request.index) && request.index >= 0 && request.index < steps.length) return request.index;
+  if (request.title) {
+    const key = request.title.toLowerCase();
+    return steps.findIndex((step) => step.title.toLowerCase() === key);
+  }
+  return -1;
+}
+
+function markInternalStep(step, status) {
+  return omitEmpty({
+    ...step,
+    status: normalizeInternalStepStatus(status),
+    updatedAt: nowIso(),
+    completedAt: normalizeInternalStepStatus(status) === 'done' ? (step.completedAt || nowIso()) : step.completedAt
+  });
+}
+
+function normalizeCompletedInternalSteps(metadata = {}) {
+  const internalSteps = normalizeInternalStepList(metadata.internalSteps || []);
+  if (!internalSteps.length) return metadata || {};
+  return { ...metadata, internalSteps };
+}
+
+function assertInternalStepsComplete(metadata = {}) {
+  const internalSteps = normalizeInternalStepList(metadata.internalSteps || []);
+  if (!internalSteps.length) return;
+  const incomplete = internalSteps.filter((step) => !['done', 'skipped'].includes(step.status));
+  assertCondition(
+    incomplete.length === 0,
+    `Complete all internal steps before completing this route segment: ${incomplete.map((step) => step.title).join('; ')}`,
+    'INTERNAL_STEPS_INCOMPLETE',
+    { incompleteInternalSteps: incomplete }
+  );
 }
 
 function findRelatedOpenTask(tasks, candidate) {

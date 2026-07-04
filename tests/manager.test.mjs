@@ -41,6 +41,32 @@ async function withCapturedStdout(fn) {
   }
 }
 
+function internalStepTitles(task) {
+  return (task.metadata.internalSteps || []).map((step) => typeof step === 'string' ? step : step.title);
+}
+
+function internalStepStatuses(task) {
+  return (task.metadata.internalSteps || []).map((step) => typeof step === 'string' ? 'pending' : step.status);
+}
+
+function finishInternalSteps(manager, workspaceRoot, taskId, statusByTitle = {}) {
+  const snapshot = manager.snapshot({ workspaceRoot, write: false }).snapshot;
+  const task = snapshot.tasks.find((item) => item.id === taskId);
+  for (const step of task?.metadata?.internalSteps || []) {
+    const title = typeof step === 'string' ? step : step.title;
+    const current = typeof step === 'string' ? 'pending' : step.status;
+    if (['done', 'skipped'].includes(current)) continue;
+    manager.progress({
+      workspaceRoot,
+      taskId,
+      message: `Internal step complete: ${title}`,
+      internalStepTitle: title,
+      internalStepStatus: statusByTitle[title] || 'done',
+      evidence: { kind: 'internal_step', summary: `Internal step terminal: ${title}` }
+    });
+  }
+}
+
 test('route lifecycle requires evidence and clears after finalization', () => {
   const workspaceRoot = tempWorkspace('otm-route-');
   const manager = createTaskManager({ cwd: workspaceRoot, env: testEnv('otm-route') });
@@ -65,6 +91,7 @@ test('route lifecycle requires evidence and clears after finalization', () => {
 
   manager.markTaskActive({ workspaceRoot, taskId: first.id });
   assert.throws(() => manager.completeTask({ workspaceRoot, taskId: first.id }), /evidence is attached/);
+  finishInternalSteps(manager, workspaceRoot, first.id);
   const completedFirst = manager.completeTask({ workspaceRoot, taskId: first.id, evidence: { kind: 'manual_note', summary: 'Route created.' } });
   assert.match(completedFirst.markdown, /^### OTM Progress/);
   assert.equal(completedFirst.snapshot.lastRenderedMode, 'delta');
@@ -72,6 +99,7 @@ test('route lifecycle requires evidence and clears after finalization', () => {
   assert.equal(manager.auditStop({ workspaceRoot }).stopAllowed, false);
 
   manager.markTaskActive({ workspaceRoot, taskId: second.id });
+  finishInternalSteps(manager, workspaceRoot, second.id);
   manager.completeTask({ workspaceRoot, taskId: second.id, evidence: { kind: 'test_result', summary: 'Audit passed after both tasks.' } });
   assert.equal(manager.auditStop({ workspaceRoot }).stopAllowed, true);
 
@@ -224,6 +252,7 @@ test('reconcile preserves model task order and activates newly added work by ins
     ]
   });
 
+  finishInternalSteps(manager, workspaceRoot, started.snapshot.tasks[0].id);
   manager.completeTask({
     workspaceRoot,
     taskId: started.snapshot.tasks[0].id,
@@ -239,9 +268,11 @@ test('reconcile preserves model task order and activates newly added work by ins
     'Update README docs'
   ]);
 
+  const auditTaskId = snapshot.tasks.find((task) => task.title === 'Run final audit and clear route').id;
+  finishInternalSteps(manager, workspaceRoot, auditTaskId);
   manager.completeTask({
     workspaceRoot,
-    taskId: snapshot.tasks.find((task) => task.title === 'Run final audit and clear route').id,
+    taskId: auditTaskId,
     evidence: { kind: 'test_result', summary: 'Audit verified.' }
   });
   manager.reconcile({
@@ -341,11 +372,12 @@ test('reconcile merges related open tasks, adds distinct tasks, and stores inter
   let tasks = manager.snapshot({ workspaceRoot, write: false }).snapshot.tasks;
   assert.equal(tasks.length, 1);
   assert.deepEqual(tasks[0].acceptanceCriteria, ['Render policy is stable', 'Compact progress stays fast']);
-  assert.deepEqual(tasks[0].metadata.internalSteps, [
+  assert.deepEqual(internalStepTitles(tasks[0]), [
     'Render policy is stable',
     'Profile current render path',
     'Avoid unnecessary writes'
   ]);
+  assert.deepEqual(internalStepStatuses(tasks[0]), ['active', 'pending', 'pending']);
 
   manager.reconcile({
     workspaceRoot,
@@ -367,6 +399,7 @@ test('reconcile can explicitly reopen completed tasks without losing evidence', 
     tasks: [{ title: 'Validate docs', required: true, acceptanceCriteria: ['Docs checked'] }]
   });
   const taskId = started.snapshot.tasks[0].id;
+  finishInternalSteps(manager, workspaceRoot, taskId);
   manager.completeTask({
     workspaceRoot,
     taskId,
@@ -380,7 +413,8 @@ test('reconcile can explicitly reopen completed tasks without losing evidence', 
   });
   const reopened = manager.snapshot({ workspaceRoot, write: false }).snapshot.tasks.find((task) => task.id === taskId);
   assert.equal(reopened.status, 'active');
-  assert.equal(reopened.evidence.length, 1);
+  assert.ok(reopened.evidence.some((item) => item.summary === 'Initial docs check passed.'));
+  assert.deepEqual(reopened.metadata.internalSteps.map((step) => step.status), ['active']);
   assert.equal(reopened.metadata.reopened.at(-1).previousStatus, 'done');
   assert.equal(manager.auditStop({ workspaceRoot }).stopAllowed, false);
 });
@@ -485,19 +519,77 @@ test('model-supplied route segments from rich prompt context preserve internal s
     'Fix hidden Save button on profile screen',
     'Fix avatar/title overlap on profile screen'
   ]);
-  assert.deepEqual(started.snapshot.tasks[0].metadata.internalSteps, [
+  assert.deepEqual(internalStepTitles(started.snapshot.tasks[0]), [
     'Inspect screenshot-visible footer overlap',
     'Find profile screen layout code',
     'Adjust responsive spacing and footer constraints',
     'Verify Save button remains visible on desktop and mobile'
   ]);
-  assert.deepEqual(started.snapshot.tasks[1].metadata.internalSteps, [
+  assert.deepEqual(internalStepStatuses(started.snapshot.tasks[0]), ['active', 'pending', 'pending', 'pending']);
+  assert.deepEqual(internalStepTitles(started.snapshot.tasks[1]), [
     'Inspect model-visible screenshot guidance',
     'Locate avatar and title layout styles',
     'Repair spacing without breaking existing profile layout',
     'Verify overlap is gone'
   ]);
   assert.match(started.snapshot.tasks[0].description || '', /^$/);
+});
+
+test('internal step progress persists without completing the route gate', () => {
+  const workspaceRoot = tempWorkspace('otm-internal-steps-');
+  const manager = createTaskManager({ cwd: workspaceRoot, env: testEnv('otm-internal-steps') });
+  const started = manager.start({
+    workspaceRoot,
+    replaceExisting: true,
+    goal: 'Track internal steps',
+    tasks: [{
+      title: 'Implement tracking change',
+      required: true,
+      internalSteps: [
+        'Inspect current route state',
+        'Patch progress updates',
+        'Run regression tests'
+      ]
+    }]
+  });
+  const taskId = started.snapshot.tasks[0].id;
+
+  const progress = manager.progress({
+    workspaceRoot,
+    taskId,
+    message: 'Finished source inspection.',
+    internalStepTitle: 'Inspect current route state',
+    internalStepStatus: 'done',
+    evidence: { kind: 'manual_note', summary: 'Internal source inspection complete.' }
+  });
+
+  const task = progress.snapshot.tasks.find((item) => item.id === taskId);
+  assert.equal(task.status, 'active');
+  assert.equal(progress.snapshot.stopAllowed, false);
+  assert.equal(progress.snapshot.currentInternalStep.title, 'Patch progress updates');
+  assert.deepEqual(task.metadata.internalSteps.map((step) => step.status), ['done', 'active', 'pending']);
+  assert.match(progress.markdown, /Implement tracking change/);
+  assert.match(manager.snapshot({ workspaceRoot, write: false }).markdown, /Internal 1\/3/);
+  assert.equal(manager.auditStop({ workspaceRoot }).stopAllowed, false);
+
+  assert.throws(() => manager.completeTask({ workspaceRoot, taskId }), /evidence is attached/);
+  assert.throws(
+    () => manager.completeTask({
+      workspaceRoot,
+      taskId,
+      evidence: { kind: 'test_result', summary: 'Evidence is present but internal steps are unfinished.' }
+    }),
+    /Complete all internal steps/
+  );
+  finishInternalSteps(manager, workspaceRoot, taskId);
+  const completed = manager.completeTask({
+    workspaceRoot,
+    taskId,
+    evidence: { kind: 'test_result', summary: 'Top-level gate completed with evidence.' }
+  });
+  const completedTask = completed.snapshot.tasks.find((item) => item.id === taskId);
+  assert.equal(completed.snapshot.stopAllowed, true);
+  assert.deepEqual(completedTask.metadata.internalSteps.map((step) => step.status), ['done', 'done', 'done']);
 });
 
 test('MCP results return concise text content without structured JSON by default', () => {

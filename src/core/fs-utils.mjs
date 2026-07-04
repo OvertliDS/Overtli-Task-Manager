@@ -156,7 +156,7 @@ function cleanupTempFilesInDir(dir, { minAgeMs }) {
     if (!entry.isFile() || !isOtmAtomicTempName(entry.name)) continue;
     const filePath = path.join(dir, entry.name);
     const stat = statSafe(filePath);
-    if (!stat || now - stat.mtimeMs < minAgeMs) continue;
+    if (!stat || (minAgeMs > 0 && now - stat.mtimeMs < minAgeMs)) continue;
     try {
       fs.rmSync(filePath, { force: true });
       removed.push(filePath);
@@ -177,7 +177,7 @@ function cleanupScratchFilesInDir(dir, { maxAgeMs }) {
     if (!entry.isFile()) continue;
     const filePath = path.join(dir, entry.name);
     const stat = statSafe(filePath);
-    if (!stat || now - stat.mtimeMs < maxAgeMs) continue;
+    if (!stat || (maxAgeMs > 0 && now - stat.mtimeMs < maxAgeMs)) continue;
     try {
       fs.rmSync(filePath, { force: true });
       removed.push(filePath);
