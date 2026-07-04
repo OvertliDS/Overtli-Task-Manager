@@ -4,7 +4,7 @@ import { assertCondition, OtmError } from './errors.mjs';
 import { newId, nowIso, sha256, stableTaskKey, shortHash } from './ids.mjs';
 import { findWorkspaceRoot, workspaceStateDir, ensureDir, summariesDir, atomicWriteJson, atomicWriteText, currentJsonPath, currentMarkdownPath, removeFileIfExists } from './fs-utils.mjs';
 import { buildSnapshot, renderSnapshotMarkdown, renderSummaryMarkdown, renderDeltaMarkdown, writeCurrentFiles } from './renderer.mjs';
-import { deriveFallbackTasks } from './planner.mjs';
+import { combinePromptContext, deriveFallbackTasks } from './planner.mjs';
 import { CURRENT_SCHEMA_VERSION, MANAGER_NAME, TASK_STATUSES } from './constants.mjs';
 
 export function createTaskManager(options = {}) {
@@ -164,6 +164,12 @@ export function createTaskManager(options = {}) {
     }
 
     const prompt = String(args.prompt || args.goal || '').trim();
+    const plannerPrompt = combinePromptContext(prompt, {
+      context: args.context,
+      promptContext: args.promptContext,
+      attachments: args.attachments,
+      screenshots: args.screenshots || args.images
+    }).trim() || prompt;
     const goal = String(args.goal || prompt || 'Complete the requested Codex task').trim();
     const createdAt = nowIso();
     const run = {
@@ -171,7 +177,7 @@ export function createTaskManager(options = {}) {
       workspaceRoot,
       sessionId: args.sessionId || null,
       turnId: args.turnId || null,
-      promptHash: sha256(prompt),
+      promptHash: sha256(plannerPrompt),
       goal,
       status: 'active',
       routeRevision: 1,
@@ -182,10 +188,16 @@ export function createTaskManager(options = {}) {
       metadata: {
         gitBranch: args.gitBranch || null,
         source: args.source || 'mcp',
-        promptPreview: prompt.slice(0, 500)
+        promptPreview: plannerPrompt.slice(0, 500)
       }
     };
-    const taskInputs = Array.isArray(args.tasks) && args.tasks.length ? args.tasks : deriveFallbackTasks(prompt, { goal });
+    const taskInputs = Array.isArray(args.tasks) && args.tasks.length ? args.tasks : deriveFallbackTasks(prompt, {
+      goal,
+      context: args.context,
+      promptContext: args.promptContext,
+      attachments: args.attachments,
+      screenshots: args.screenshots || args.images
+    });
     const tasks = taskInputs.map((task, index) => normalizeTask(task, run.id, index + 1, task.createdBy || 'prompt'));
     normalizeActiveTasks(tasks);
     run.currentTaskId = tasks.find((task) => task.status === 'active')?.id || tasks[0]?.id || null;

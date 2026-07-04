@@ -1,12 +1,17 @@
 export const tools = [
   {
     name: 'otm_start',
-    description: 'Start a new Overtli Task Manager route for a non-trivial Codex task. Use before implementation work. Returns chat Markdown and writes current.json/current.md.',
+    description: 'Start a new Overtli Task Manager route for a non-trivial Codex task. The model should analyze all available prompt/context first and pass specific tasks/internalSteps when possible. Returns chat Markdown and writes current.json/current.md.',
     inputSchema: {
       type: 'object',
       properties: {
         goal: { type: 'string' },
         prompt: { type: 'string' },
+        context: { description: 'Supplemental prompt context text or structured context available to the model.', oneOf: [{ type: 'string' }, { type: 'array' }, { type: 'object' }] },
+        promptContext: { description: 'Additional prompt parts, pasted content, attachment text, OCR, or guidance the model used while deriving tasks.', oneOf: [{ type: 'string' }, { type: 'array' }, { type: 'object' }] },
+        attachments: { description: 'Attachment metadata or extracted text/OCR/description content. Binary data is stored only as metadata; model-derived tasks should carry the real inference.', oneOf: [{ type: 'string' }, { type: 'array' }, { type: 'object' }] },
+        screenshots: { description: 'Screenshot guidance, OCR, captions, or model-visible descriptions. OTM does not inspect pixels; model-derived tasks should reflect what was visible.', oneOf: [{ type: 'string' }, { type: 'array' }, { type: 'object' }] },
+        images: { description: 'Image guidance, OCR, captions, or model-visible descriptions. OTM does not inspect pixels; model-derived tasks should reflect what was visible.', oneOf: [{ type: 'string' }, { type: 'array' }, { type: 'object' }] },
         workspaceRoot: { type: 'string' },
         sessionId: { type: 'string' },
         turnId: { type: 'string' },

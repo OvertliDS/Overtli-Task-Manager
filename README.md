@@ -132,6 +132,22 @@ Route finalization: full completion summary
 `lastRenderedMode`, `lastRenderedTaskId`, and `lastRenderedHash`) so UIs and
 agents can avoid repeated full-list rendering.
 
+The model should analyze the full user request before calling `otm_start` or
+`otm_reconcile`: inline chat text, attached files, screenshots/images it can
+inspect, OCR or descriptions, IDE context, and steering within the turn. The
+model should pass a `tasks` array that maps the main current-scope phases,
+steps, issues, problems, and deliverables to separate route segments, with
+`internalSteps` or `metadata.internalSteps` for explicit, inferred, researched,
+and discovered subwork. OTM persists and normalizes those segments; it does not
+perform model-level visual or semantic inference on its own.
+
+When `otm_start` receives only a goal or prompt, a deterministic fallback
+planner acts as a safety net. It looks for obvious explicit phases, steps,
+issue lists, problem lists, and sequenced deliverables so they are not collapsed
+into one broad "fix everything" task. If the prompt is asking for a plan, spec,
+or documentation for later work, fallback segments stay
+planning/documentation-oriented rather than becoming implementation tasks.
+
 Task ordering is normalized for readability: completed work stays checked off,
 the current active segment is shown next, ordinary pending work stays ahead of
 validation/documentation, commit/push, and final audit/summary segments. When a

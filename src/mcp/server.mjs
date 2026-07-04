@@ -17,7 +17,7 @@ export async function runMcpServer({ env = process.env } = {}) {
     { name: 'overtli_task_manager', version: '0.1.0' },
     {
       capabilities: { tools: {}, resources: {} },
-      instructions: 'Overtli Task Manager keeps Codex work organized as route checklists. Use otm_start/otm_reconcile before non-trivial work, otm_progress for chat-visible step updates, otm_complete_task only with evidence, otm_audit_stop before final answers, then otm_finalize_turn and otm_clear_current.'
+      instructions: 'Overtli Task Manager keeps Codex work organized as route checklists. Before otm_start/otm_reconcile, the model should thoroughly analyze the full user request and all available context, including inline text, attachments, screenshots/images it can inspect, OCR/descriptions, and steering, then pass specific route segments with internalSteps. Use otm_progress for chat-visible updates, otm_complete_task only with evidence, otm_audit_stop before final answers, then otm_finalize_turn and otm_clear_current.'
     }
   );
 

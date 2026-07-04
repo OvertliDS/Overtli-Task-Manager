@@ -9,15 +9,19 @@ Use this skill when the user asks Codex to build, fix, refactor, research, revie
 
 ## Route protocol
 
-1. Before implementation work, call `otm_start` for a new task or `otm_reconcile` for steering/continuation. Pass the current repository root as `workspaceRoot` whenever it is known.
-2. Show the returned Markdown snapshot in chat.
-3. Keep one active route segment whenever possible by calling `otm_start_task` before focused work.
-4. Use `otm_progress` for meaningful checkpoints: route created, task started, task completed, steering change, blocker, validation start, validation result, and finalization.
-5. Complete tasks with `otm_complete_task` only when evidence is concrete: files changed, commands run, tests passed, docs reviewed, or user-confirmed decision.
-6. If the user changes direction, immediately call `otm_reconcile`; drop or supersede stale segments instead of leaving contradictory work open.
-7. Before final response, call `otm_audit_stop`.
-8. If the audit says stop is blocked, keep working on the listed required segments.
-9. When the audit passes, call `otm_finalize_turn`, then `otm_clear_current`.
+1. Before implementation work, thoroughly analyze the full user request and all context available to the model: inline chat text, attached files, screenshots/images you can inspect, OCR/descriptions, IDE context, and prior steering in the turn.
+2. Call `otm_start` for a new task or `otm_reconcile` for steering/continuation. Pass the current repository root as `workspaceRoot` whenever it is known.
+3. Build route segments from the main current-scope phases, steps, issues, problems, and deliverables you identify. Do not collapse distinct requested work into a vague task like `fix all issues`.
+4. Pass model-derived route segments in the `tasks` array whenever possible, with concise titles plus `internalSteps` or `metadata.internalSteps` for explicit, inferred, researched, and discovered subwork.
+5. If the user is asking for a phase plan, roadmap, review, or documentation rather than implementation now, make the route reflect that planning/documentation task instead of converting it into implementation work.
+6. Show the returned Markdown snapshot in chat.
+7. Keep one active route segment whenever possible by calling `otm_start_task` before focused work.
+8. Use `otm_progress` for meaningful checkpoints: route created, task started, task completed, steering change, blocker, validation start, validation result, and finalization.
+9. Complete tasks with `otm_complete_task` only when evidence is concrete: files changed, commands run, tests passed, docs reviewed, or user-confirmed decision.
+10. If the user changes direction, immediately call `otm_reconcile`; drop or supersede stale segments instead of leaving contradictory work open.
+11. Before final response, call `otm_audit_stop`.
+12. If the audit says stop is blocked, keep working on the listed required segments.
+13. When the audit passes, call `otm_finalize_turn`, then `otm_clear_current`.
 
 ## Quality bar
 

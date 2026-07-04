@@ -52,6 +52,10 @@ function handleUserPromptSubmit(manager, input, workspaceRoot) {
     'Overtli Task Manager protocol is active for this turn.',
     `Prompt classification: ${classification}.`,
     `Before editing files or running implementation commands, call ${action} with workspaceRoot set to ${workspaceRoot}.`,
+    'Before that call, thoroughly analyze the full user request and all context available to you, including inline chat text, attached files, screenshots/images you can inspect, OCR/descriptions, IDE context, and prior steering in this turn.',
+    'Create route segments from the main current-scope phases, steps, issues, problems, and deliverables the model identifies; do not collapse distinct requested work into a vague segment like "fix all issues".',
+    'Pass those model-derived route segments in the tasks array, with concise titles plus metadata.internalSteps or internalSteps for explicit, inferred, researched, and discovered subwork.',
+    'If the user is only asking for a phase plan, roadmap, review, or documentation rather than implementation now, make the route reflect that planning/documentation task instead of converting it into implementation work.',
     'Show the returned Markdown checklist snapshot in chat.',
     'Keep exactly one active route segment when possible; mark completion only with concrete evidence.',
     'If the user steers, reconcile before continuing. Before final response, call otm_audit_stop. If required tasks remain, continue working.'

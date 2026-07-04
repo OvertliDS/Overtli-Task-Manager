@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createTaskManager } from '../src/core/manager.mjs';
+import { deriveFallbackTasks } from '../src/core/planner.mjs';
 import { installWorkspace } from '../src/install/install-workspace.mjs';
 import { reviewProjectContext } from '../src/context/project-review.mjs';
 import { toMcpResult } from '../src/mcp/result.mjs';
@@ -227,6 +228,121 @@ test('reconcile can explicitly reopen completed tasks without losing evidence', 
   assert.equal(reopened.evidence.length, 1);
   assert.equal(reopened.metadata.reopened.at(-1).previousStatus, 'done');
   assert.equal(manager.auditStop({ workspaceRoot }).stopAllowed, false);
+});
+
+test('fallback planner promotes explicit phases and deliverables to route segments with internal steps', () => {
+  const prompt = `Fully implement these phases now:
+Phase 1: Fix prompt route segmentation
+Phase 2: Preserve internal task details
+Phase 3: Add regression tests
+Then git commit and push.
+Then reinstall the latest version globally.`;
+
+  const tasks = deriveFallbackTasks(prompt, { goal: 'Improve route planning' });
+  const titles = tasks.map((task) => task.title);
+
+  assert.ok(titles.includes('Fix prompt route segmentation'));
+  assert.ok(titles.includes('Resolve Preserve internal task details'));
+  assert.ok(titles.includes('Add regression tests'));
+  assert.ok(titles.includes('Commit and push changes'));
+  assert.ok(titles.includes('Reinstall the latest version globally'));
+  assert.ok(titles.includes('Validate behavior and check for regressions'));
+  assert.ok(titles.includes('Summarize outcome and clear active checklist'));
+
+  const segmentation = tasks.find((task) => task.title === 'Fix prompt route segmentation');
+  assert.deepEqual(segmentation.internalSteps, [
+    'Inspect current behavior and affected files for Fix prompt route segmentation',
+    'Identify explicit, inferred, and discovered work needed for Fix prompt route segmentation',
+    'Implement the complete fix or change for Fix prompt route segmentation',
+    'Run targeted checks and record evidence for Fix prompt route segmentation'
+  ]);
+});
+
+test('fallback planner separates plain issue bullets without collapsing them into one generic fix', () => {
+  const prompt = `Fix these issues:
+- login button does nothing
+- settings page shows stale status
+- export crashes on missing path`;
+
+  const tasks = deriveFallbackTasks(prompt);
+  const titles = tasks.map((task) => task.title);
+
+  assert.ok(titles.includes('Resolve login button does nothing'));
+  assert.ok(titles.includes('Resolve settings page shows stale status'));
+  assert.ok(titles.includes('Resolve export crashes on missing path'));
+  assert.equal(titles.includes('Implement the requested change set'), false);
+});
+
+test('fallback planner treats planning-only phase lists as documentation or planning work', () => {
+  const prompt = `Create a phase plan for later implementation:
+1. Runtime install lane
+2. Model manager UX
+3. Diagnostics repair flow`;
+
+  const tasks = deriveFallbackTasks(prompt);
+  const titles = tasks.map((task) => task.title);
+
+  assert.ok(titles.includes('Plan Runtime install lane'));
+  assert.ok(titles.includes('Plan Model manager UX'));
+  assert.ok(titles.includes('Plan Diagnostics repair flow'));
+  assert.equal(titles.includes('Validate behavior and check for regressions'), false);
+  assert.match(tasks.find((task) => task.title === 'Plan Runtime install lane').internalSteps[2], /Draft or update/);
+});
+
+test('model-supplied route segments from rich prompt context preserve internal steps', () => {
+  const workspaceRoot = tempWorkspace('otm-model-route-');
+  const manager = createTaskManager({ cwd: workspaceRoot, env: testEnv('otm-model-route') });
+  const started = manager.start({
+    workspaceRoot,
+    replaceExisting: true,
+    goal: 'Fix UI issues from prompt and screenshot',
+    prompt: 'Fix the profile screen issues shown in chat and screenshot.',
+    screenshots: [{ description: 'Screenshot shows Save button hidden behind footer and profile avatar overlapping the title.' }],
+    tasks: [
+      {
+        title: 'Fix hidden Save button on profile screen',
+        required: true,
+        internalSteps: [
+          'Inspect screenshot-visible footer overlap',
+          'Find profile screen layout code',
+          'Adjust responsive spacing and footer constraints',
+          'Verify Save button remains visible on desktop and mobile'
+        ],
+        acceptanceCriteria: ['Save button is visible and usable in the affected profile screen state']
+      },
+      {
+        title: 'Fix avatar/title overlap on profile screen',
+        required: true,
+        metadata: {
+          internalSteps: [
+            'Inspect model-visible screenshot guidance',
+            'Locate avatar and title layout styles',
+            'Repair spacing without breaking existing profile layout',
+            'Verify overlap is gone'
+          ]
+        },
+        acceptanceCriteria: ['Avatar and title no longer overlap']
+      }
+    ]
+  });
+
+  assert.deepEqual(started.snapshot.tasks.map((task) => task.title), [
+    'Fix hidden Save button on profile screen',
+    'Fix avatar/title overlap on profile screen'
+  ]);
+  assert.deepEqual(started.snapshot.tasks[0].metadata.internalSteps, [
+    'Inspect screenshot-visible footer overlap',
+    'Find profile screen layout code',
+    'Adjust responsive spacing and footer constraints',
+    'Verify Save button remains visible on desktop and mobile'
+  ]);
+  assert.deepEqual(started.snapshot.tasks[1].metadata.internalSteps, [
+    'Inspect model-visible screenshot guidance',
+    'Locate avatar and title layout styles',
+    'Repair spacing without breaking existing profile layout',
+    'Verify overlap is gone'
+  ]);
+  assert.match(started.snapshot.tasks[0].description || '', /^$/);
 });
 
 test('MCP results return concise text content without structured JSON by default', () => {
