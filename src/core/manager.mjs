@@ -216,6 +216,7 @@ export function createTaskManager(options = {}) {
     const tasks = store.getTasks(run.id);
     let changed = 0;
     let preferredCurrentId = run.currentTaskId;
+    let forcePreferredCurrent = false;
 
     if (mode === 'replace') {
       for (const task of tasks) {
@@ -236,12 +237,14 @@ export function createTaskManager(options = {}) {
       } else if (change.action === 'activate') {
         markTaskActive({ runId: run.id, taskId: change.taskId, note: change.reason || 'Activated by reconciliation', silent: true });
         preferredCurrentId = change.taskId;
+        forcePreferredCurrent = true;
         changed += 1;
       } else if (change.action === 'reopen') {
         const task = resolveTaskForReopen(change, store.getTasks(run.id));
         if (task) {
           reopenTask(task, change.title ? normalizeTask(change, run.id, task.sortOrder, 'steering') : null, change.reason || args.prompt || 'change:reopen');
           preferredCurrentId = task.id;
+          forcePreferredCurrent = true;
           changed += 1;
         }
       } else if (change.action === 'add') {
@@ -260,7 +263,7 @@ export function createTaskManager(options = {}) {
     }
 
     const refreshedTasks = store.getTasks(run.id);
-    const current = chooseCurrentTask(refreshedTasks, preferredCurrentId);
+    const current = chooseCurrentTask(refreshedTasks, preferredCurrentId, { forcePreferred: forcePreferredCurrent });
     activateCurrentTask(run.id, current);
     run = store.updateRun(run.id, {
       routeRevision: (run.routeRevision || 1) + (changed ? 1 : 0),
@@ -610,19 +613,15 @@ function findRelatedReopenableTask(tasks, candidate) {
     || null;
 }
 
-function chooseCurrentTask(tasks, previousCurrentId = null) {
+function chooseCurrentTask(tasks, previousCurrentId = null, options = {}) {
   const open = tasks.filter((task) => task.required && !['done', 'dropped', 'superseded'].includes(task.status));
   if (!open.length) return null;
-  const ordered = [...open].sort((a, b) => {
-    const rank = workflowRank(a.title) - workflowRank(b.title);
-    if (rank !== 0) return rank;
-    return Number(a.sortOrder || 0) - Number(b.sortOrder || 0);
-  });
   const previous = open.find((task) => task.id === previousCurrentId);
-  if (previous && workflowRank(previous.title) <= workflowRank(ordered[0].title)) return previous;
+  if (options.forcePreferred && previous) return previous;
   const active = open.find((task) => task.status === 'active');
-  if (active && workflowRank(active.title) <= workflowRank(ordered[0].title)) return active;
-  return ordered[0];
+  if (active) return active;
+  if (previous) return previous;
+  return [...open].sort((a, b) => Number(a.sortOrder || 0) - Number(b.sortOrder || 0))[0];
 }
 
 function assertCanSwitchTask(tasks, targetTask, args = {}) {
@@ -633,14 +632,6 @@ function assertCanSwitchTask(tasks, targetTask, args = {}) {
     `Complete or explicitly reconcile the active task before moving on: ${active?.title}`,
     'ACTIVE_TASK_INCOMPLETE'
   );
-}
-
-function workflowRank(title) {
-  const text = String(title || '').toLowerCase();
-  if (/\b(final|finalize|audit|stop|clear|summary|summarize)\b/.test(text)) return 40;
-  if (/\b(commit|push|publish|release)\b/.test(text)) return 30;
-  if (/\b(test|check|validate|verify|docs|documentation|readme)\b/.test(text)) return 20;
-  return 10;
 }
 
 function resolveTaskForReopen(change, tasks) {

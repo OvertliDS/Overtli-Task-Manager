@@ -250,17 +250,9 @@ function displayPhaseRank(task, currentTask) {
   if (currentTask && task.id === currentTask.id) return 20;
   if (task.status === 'active') return 20;
   if (task.status === 'blocked') return 30;
-  if (task.status === 'pending') return 40 + pendingTaskRank(task.title);
+  if (task.status === 'pending') return 40;
   if (task.status === 'dropped' || task.status === 'superseded') return 90;
   return 50;
-}
-
-function pendingTaskRank(title) {
-  const text = String(title || '').toLowerCase();
-  if (/\b(final|finalize|audit|stop|clear|summary|summarize)\b/.test(text)) return 40;
-  if (/\b(commit|push|publish|release)\b/.test(text)) return 30;
-  if (/\b(test|check|validate|verify|docs|documentation|readme)\b/.test(text)) return 20;
-  return 10;
 }
 
 function derivePhase(tasks) {

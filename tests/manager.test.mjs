@@ -79,16 +79,17 @@ test('read-only snapshots do not rewrite current state files', async () => {
   assert.equal(after, before);
 });
 
-test('reconcile keeps workflow order stable and chooses newly added work before final tasks', () => {
+test('reconcile preserves model task order and activates newly added work by insertion order', () => {
   const workspaceRoot = tempWorkspace('otm-order-');
   const manager = createTaskManager({ cwd: workspaceRoot, env: testEnv('otm-order') });
   const started = manager.start({
     workspaceRoot,
     replaceExisting: true,
-    goal: 'Validate workflow ordering',
+    goal: 'Validate model ordering',
     tasks: [
       { title: 'Implement route feature', required: true },
-      { title: 'Run final audit and clear route', required: true }
+      { title: 'Run final audit and clear route', required: true },
+      { title: 'Update README docs', required: true }
     ]
   });
 
@@ -97,25 +98,20 @@ test('reconcile keeps workflow order stable and chooses newly added work before 
     taskId: started.snapshot.tasks[0].id,
     evidence: { kind: 'file_change', summary: 'Feature implemented.' }
   });
-  manager.reconcile({
-    workspaceRoot,
-    mode: 'steer',
-    tasks: [{ title: 'Update README docs', required: true, acceptanceCriteria: ['Docs describe behavior'] }]
-  });
 
   const snapshot = manager.snapshot({ workspaceRoot, write: false }).snapshot;
-  assert.equal(snapshot.currentTaskTitle, 'Update README docs');
-  assert.equal(snapshot.tasks.find((task) => task.title === 'Update README docs').status, 'active');
+  assert.equal(snapshot.currentTaskTitle, 'Run final audit and clear route');
+  assert.equal(snapshot.tasks.find((task) => task.title === 'Run final audit and clear route').status, 'active');
   assert.deepEqual(snapshot.tasks.map((task) => task.title), [
     'Implement route feature',
-    'Update README docs',
-    'Run final audit and clear route'
+    'Run final audit and clear route',
+    'Update README docs'
   ]);
 
   manager.completeTask({
     workspaceRoot,
-    taskId: snapshot.tasks.find((task) => task.title === 'Update README docs').id,
-    evidence: { kind: 'test_result', summary: 'Docs verified.' }
+    taskId: snapshot.tasks.find((task) => task.title === 'Run final audit and clear route').id,
+    evidence: { kind: 'test_result', summary: 'Audit verified.' }
   });
   manager.reconcile({
     workspaceRoot,
@@ -123,10 +119,10 @@ test('reconcile keeps workflow order stable and chooses newly added work before 
     tasks: [{ title: 'Fix status accuracy', required: true, acceptanceCriteria: ['Current task table matches header'] }]
   });
 
-  const afterDocs = manager.snapshot({ workspaceRoot, write: false }).snapshot;
-  assert.equal(afterDocs.currentTaskTitle, 'Fix status accuracy');
-  assert.equal(afterDocs.tasks.find((task) => task.title === 'Fix status accuracy').status, 'active');
-  assert.equal(afterDocs.tasks.find((task) => task.title === 'Run final audit and clear route').status, 'pending');
+  const afterAudit = manager.snapshot({ workspaceRoot, write: false }).snapshot;
+  assert.equal(afterAudit.currentTaskTitle, 'Update README docs');
+  assert.equal(afterAudit.tasks.find((task) => task.title === 'Update README docs').status, 'active');
+  assert.equal(afterAudit.tasks.find((task) => task.title === 'Fix status accuracy').status, 'pending');
 });
 
 test('manual task switching is blocked until the active task is completed or reconciled', () => {
@@ -162,6 +158,34 @@ test('manual task switching is blocked until the active task is completed or rec
   assert.equal(switched.currentTaskId, second.id);
   assert.equal(switched.tasks.find((task) => task.id === second.id).status, 'active');
   assert.equal(switched.tasks.find((task) => task.id === first.id).status, 'pending');
+});
+
+test('explicit reconcile activation overrides current model order when the model steers route focus', () => {
+  const workspaceRoot = tempWorkspace('otm-activate-rank-');
+  const manager = createTaskManager({ cwd: workspaceRoot, env: testEnv('otm-activate-rank') });
+  const started = manager.start({
+    workspaceRoot,
+    replaceExisting: true,
+    goal: 'Validate explicit route steering',
+    tasks: [
+      { title: 'Globally reinstall latest package and hooks', required: true },
+      { title: 'Update docs for route behavior', required: true }
+    ]
+  });
+  const docsTask = started.snapshot.tasks.find((task) => task.title === 'Update docs for route behavior');
+
+  assert.equal(started.snapshot.currentTaskTitle, 'Globally reinstall latest package and hooks');
+
+  manager.reconcile({
+    workspaceRoot,
+    mode: 'steer',
+    changes: [{ action: 'activate', taskId: docsTask.id, reason: 'Model identified docs work before reinstall' }]
+  });
+
+  const steered = manager.snapshot({ workspaceRoot, write: false }).snapshot;
+  assert.equal(steered.currentTaskTitle, 'Update docs for route behavior');
+  assert.equal(steered.tasks.find((task) => task.id === docsTask.id).status, 'active');
+  assert.equal(steered.tasks.find((task) => task.title === 'Globally reinstall latest package and hooks').status, 'pending');
 });
 
 test('reconcile merges related open tasks, adds distinct tasks, and stores internal substeps', () => {
