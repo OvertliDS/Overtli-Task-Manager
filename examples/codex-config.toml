@@ -1,0 +1,9 @@
+[mcp_servers.overtli_task_manager]
+command = "node"
+args = ["/absolute/path/to/Overtli-Task-Manager/bin/otm-mcp.mjs"]
+enabled = true
+tool_timeout_sec = 45
+startup_timeout_sec = 20
+
+[mcp_servers.overtli_task_manager.env]
+OTM_STORAGE = "auto"

@@ -1,0 +1,65 @@
+{
+  "name": "@overtli/task-manager",
+  "version": "0.1.0",
+  "description": "Codex-first MCP task manager with route checklists, checkpoint summaries, project memory, hooks, skills, and AGENTS.md integration.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OvertliDS/Overtli-Task-Manager.git"
+  },
+  "homepage": "https://github.com/OvertliDS/Overtli-Task-Manager#readme",
+  "bugs": {
+    "url": "https://github.com/OvertliDS/Overtli-Task-Manager/issues"
+  },
+  "keywords": [
+    "codex",
+    "mcp",
+    "task-manager",
+    "agent-skills",
+    "checklist",
+    "project-memory",
+    "hooks"
+  ],
+  "engines": {
+    "node": ">=20.10"
+  },
+  "bin": {
+    "otm": "./bin/otm.mjs",
+    "otm-mcp": "./bin/otm-mcp.mjs",
+    "overtli-task-manager": "./bin/otm.mjs"
+  },
+  "exports": {
+    ".": "./src/index.mjs",
+    "./mcp": "./src/mcp/server.mjs",
+    "./hooks": "./src/hooks/runner.mjs"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "hooks/",
+    "skills/",
+    ".codex-plugin/",
+    ".mcp.json",
+    "README.md",
+    "LICENSE",
+    "scripts/",
+    "docs/",
+    "examples/",
+    "tests/"
+  ],
+  "scripts": {
+    "start:mcp": "node ./bin/otm-mcp.mjs",
+    "install:workspace": "node ./bin/otm.mjs install",
+    "doctor": "node ./bin/otm.mjs doctor",
+    "snapshot": "node ./bin/otm.mjs snapshot",
+    "test": "node --test",
+    "syntax:check": "node ./scripts/syntax-check.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^11.9.1"
+  }
+}

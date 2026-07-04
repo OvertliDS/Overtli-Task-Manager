@@ -1,0 +1,156 @@
+import { CURRENT_SCHEMA_VERSION, MANAGER_NAME } from './constants.mjs';
+import { markdownEscapeCell, compactOneLine } from './text-utils.mjs';
+import { currentJsonPath, currentMarkdownPath, relativeToWorkspace, atomicWriteJson, atomicWriteText } from './fs-utils.mjs';
+
+export function buildSnapshot({ run, tasks, workspaceRoot, storageKind = 'unknown', lastUpdate = null }) {
+  const required = tasks.filter((task) => task.required && !['dropped', 'superseded'].includes(task.status));
+  const optional = tasks.filter((task) => !task.required && !['dropped', 'superseded'].includes(task.status));
+  const requiredDone = required.filter((task) => task.status === 'done').length;
+  const optionalDone = optional.filter((task) => task.status === 'done').length;
+  const remainingRequired = required.filter((task) => !['done'].includes(task.status));
+  const currentTask = tasks.find((task) => task.id === run.currentTaskId) || tasks.find((task) => task.status === 'active') || remainingRequired[0] || null;
+  const stopAllowed = remainingRequired.length === 0;
+
+  return {
+    schemaVersion: CURRENT_SCHEMA_VERSION,
+    manager: MANAGER_NAME,
+    status: run.status,
+    runId: run.id,
+    sessionId: run.sessionId || null,
+    turnId: run.turnId || null,
+    workspaceRoot,
+    gitBranch: run.metadata?.gitBranch || null,
+    goal: run.goal,
+    routeRevision: run.routeRevision || 1,
+    phase: derivePhase(tasks),
+    currentTaskId: currentTask?.id || null,
+    currentTaskTitle: currentTask?.title || null,
+    stopAllowed,
+    stopReason: stopAllowed ? 'All required route segments are complete.' : `${remainingRequired.length} required route segment${remainingRequired.length === 1 ? '' : 's'} remain open.`,
+    progress: {
+      requiredDone,
+      requiredTotal: required.length,
+      optionalDone,
+      optionalTotal: optional.length,
+      percentRequired: required.length ? Math.round((requiredDone / required.length) * 100) : 100
+    },
+    tasks: tasks.map((task) => ({
+      id: task.id,
+      title: task.title,
+      description: task.description || null,
+      status: task.status,
+      required: Boolean(task.required),
+      priority: task.priority,
+      sortOrder: task.sortOrder,
+      acceptanceCriteria: task.acceptanceCriteria || [],
+      evidence: task.evidence || [],
+      createdBy: task.createdBy,
+      updatedAt: task.updatedAt,
+      completedAt: task.completedAt || null,
+      metadata: task.metadata || {}
+    })),
+    lastUpdate,
+    storage: { kind: storageKind },
+    paths: {
+      currentJson: relativeToWorkspace(workspaceRoot, currentJsonPath(workspaceRoot)),
+      currentMarkdown: relativeToWorkspace(workspaceRoot, currentMarkdownPath(workspaceRoot))
+    },
+    updatedAt: new Date().toISOString()
+  };
+}
+
+export function renderSnapshotMarkdown(snapshot, options = {}) {
+  const title = options.title || 'Overtli Task Manager';
+  const active = snapshot.status === 'active' || snapshot.status === 'blocked' || snapshot.status === 'paused';
+  const statusIcon = snapshot.stopAllowed ? '✅' : '🧭';
+  const current = snapshot.currentTaskTitle ? `**Current:** ${snapshot.currentTaskTitle}` : '**Current:** no active route segment';
+  const stop = snapshot.stopAllowed ? 'Stop allowed' : `Stop blocked — ${snapshot.stopReason}`;
+  const lines = [];
+  lines.push(`## ${statusIcon} ${title}`);
+  lines.push('');
+  lines.push(`**Goal:** ${snapshot.goal || 'No active goal'}`);
+  lines.push(`**Progress:** ${snapshot.progress.requiredDone}/${snapshot.progress.requiredTotal} required complete (${snapshot.progress.percentRequired}%)`);
+  lines.push(`${current}`);
+  lines.push(`**Gate:** ${stop}`);
+  lines.push('');
+  if (snapshot.lastUpdate?.message) {
+    lines.push(`> ${snapshot.lastUpdate.message}`);
+    lines.push('');
+  }
+  lines.push('| State | Task | Evidence |');
+  lines.push('|---|---|---|');
+  for (const task of snapshot.tasks) {
+    lines.push(`| ${taskIcon(task.status)} | ${markdownEscapeCell(task.title)}${task.required ? '' : ' _(optional)_'} | ${markdownEscapeCell(renderEvidenceBrief(task.evidence))} |`);
+  }
+  if (!snapshot.tasks.length) {
+    lines.push('| — | No tasks are active. | — |');
+  }
+  lines.push('');
+  if (active) lines.push(`_Route revision ${snapshot.routeRevision}. State file: \`${snapshot.paths.currentJson}\`._`);
+  else lines.push(`_No active route. Last state file: \`${snapshot.paths.currentJson}\`._`);
+  return `${lines.join('\n')}\n`;
+}
+
+export function writeCurrentFiles(workspaceRoot, snapshot) {
+  atomicWriteJson(currentJsonPath(workspaceRoot), snapshot);
+  atomicWriteText(currentMarkdownPath(workspaceRoot), renderSnapshotMarkdown(snapshot));
+}
+
+export function renderSummaryMarkdown(summary) {
+  const lines = [];
+  lines.push('## ✅ Overtli Task Manager summary');
+  lines.push('');
+  lines.push(`**Goal:** ${summary.goal}`);
+  lines.push(`**Outcome:** ${summary.outcome}`);
+  lines.push('');
+  lines.push('### Completed');
+  for (const item of summary.completed) lines.push(`- ${item}`);
+  if (!summary.completed.length) lines.push('- No required tasks were marked complete.');
+  lines.push('');
+  if (summary.blocked?.length) {
+    lines.push('### Blocked');
+    for (const item of summary.blocked) lines.push(`- ${item}`);
+    lines.push('');
+  }
+  if (summary.dropped?.length) {
+    lines.push('### Dropped or superseded');
+    for (const item of summary.dropped) lines.push(`- ${item}`);
+    lines.push('');
+  }
+  if (summary.evidence?.length) {
+    lines.push('### Evidence');
+    for (const item of summary.evidence.slice(0, 12)) lines.push(`- ${item}`);
+    lines.push('');
+  }
+  if (summary.nextSteps?.length) {
+    lines.push('### Next route');
+    for (const item of summary.nextSteps) lines.push(`- ${item}`);
+    lines.push('');
+  }
+  lines.push(`_Summary saved at ${summary.createdAt}._`);
+  return `${lines.join('\n')}\n`;
+}
+
+function renderEvidenceBrief(evidence = []) {
+  if (!evidence.length) return '—';
+  return compactOneLine(evidence[evidence.length - 1].summary || evidence[evidence.length - 1].kind || 'captured', 80);
+}
+
+function taskIcon(status) {
+  switch (status) {
+    case 'done': return '✅ done';
+    case 'active': return '▶ active';
+    case 'blocked': return '⛔ blocked';
+    case 'dropped': return '↘ dropped';
+    case 'superseded': return '↪ superseded';
+    default: return '○ pending';
+  }
+}
+
+function derivePhase(tasks) {
+  if (!tasks.length) return 'idle';
+  if (tasks.some((task) => task.status === 'active')) return 'execution';
+  if (tasks.every((task) => ['done', 'dropped', 'superseded'].includes(task.status))) return 'complete';
+  if (tasks.some((task) => task.status === 'blocked')) return 'blocked';
+  return 'planning';
+}

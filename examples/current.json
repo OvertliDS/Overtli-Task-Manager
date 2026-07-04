@@ -1,0 +1,50 @@
+{
+  "schemaVersion": "otm.current.v1",
+  "manager": "Overtli Task Manager",
+  "status": "active",
+  "runId": "run_example",
+  "goal": "Ship a Codex-first task manager",
+  "routeRevision": 2,
+  "currentTaskId": "task_003",
+  "currentTaskTitle": "Validate install flow",
+  "stopAllowed": false,
+  "stopReason": "1 required route segment remains open.",
+  "progress": {
+    "requiredDone": 2,
+    "requiredTotal": 3,
+    "percentRequired": 67
+  },
+  "tasks": [
+    {
+      "id": "task_001",
+      "title": "Create route",
+      "status": "done",
+      "required": true,
+      "evidence": [
+        {
+          "kind": "manual_note",
+          "summary": "Route created"
+        }
+      ]
+    },
+    {
+      "id": "task_002",
+      "title": "Implement tools",
+      "status": "done",
+      "required": true,
+      "evidence": [
+        {
+          "kind": "file_change",
+          "summary": "MCP tools implemented"
+        }
+      ]
+    },
+    {
+      "id": "task_003",
+      "title": "Validate install flow",
+      "status": "active",
+      "required": true,
+      "evidence": []
+    }
+  ]
+}

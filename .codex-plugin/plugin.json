@@ -1,0 +1,40 @@
+{
+  "name": "overtli-task-manager",
+  "version": "0.1.0",
+  "description": "Codex-first task management with route checklists, chat progress, current.json state, checkpoint memory, hooks, skills, and stop audits.",
+  "author": {
+    "name": "OvertliDS",
+    "url": "https://github.com/OvertliDS"
+  },
+  "homepage": "https://github.com/OvertliDS/Overtli-Task-Manager",
+  "repository": "https://github.com/OvertliDS/Overtli-Task-Manager",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "mcp",
+    "checklist",
+    "task-manager",
+    "hooks",
+    "skills"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Overtli Task Manager",
+    "shortDescription": "Route checklists and checkpoint memory for Codex.",
+    "longDescription": "Keep Codex organized with evidence-backed route segments, chat-visible progress, project-specific context cache, lifecycle hooks, and stop-audit enforcement.",
+    "developerName": "OvertliDS",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/OvertliDS/Overtli-Task-Manager",
+    "brandColor": "#111827",
+    "defaultPrompt": [
+      "Use Overtli Task Manager to plan, execute, validate, summarize, and clear this task.",
+      "Install Overtli Task Manager in this repository."
+    ]
+  }
+}
