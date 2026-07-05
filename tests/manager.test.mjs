@@ -9,6 +9,7 @@ import { deriveFallbackTasks } from '../src/core/planner.mjs';
 import { findWorkspaceRoot, workspaceScratchDir, workspaceTempDir } from '../src/core/fs-utils.mjs';
 import { loadBetterSqlite3 } from '../src/storage/sqlite-store.mjs';
 import { installWorkspace } from '../src/install/install-workspace.mjs';
+import { installGlobal } from '../src/install/install-global.mjs';
 import { reviewProjectContext } from '../src/context/project-review.mjs';
 import { toMcpResult } from '../src/mcp/result.mjs';
 import { runHookScript } from '../src/hooks/runner.mjs';
@@ -785,6 +786,10 @@ test('workspace installer is idempotent and preserves existing guidance', () => 
   assert.equal(hooks.PostToolUse.at(-1).matcher, 'Bash|apply_patch');
   assert.equal(hooks.PreToolUse.at(-1).hooks[0].timeout, 8);
   assert.equal(hooks.Stop.at(-1).hooks[0].timeout, 45);
+  const expectedCli = path.join(packageRoot, 'bin', 'otm.mjs');
+  assert.equal(hooks.SessionStart.at(-1).hooks[0].command, `node "${expectedCli}" hook session-start`);
+  assert.equal(hooks.UserPromptSubmit.at(-1).hooks[0].command, `node "${expectedCli}" hook user-prompt-submit`);
+  assert.doesNotMatch(hooks.SessionStart.at(-1).hooks[0].command, /\\\\/);
 });
 
 test('workspace installer patches AGENTS.md by default and only patches override explicitly', () => {
@@ -805,6 +810,23 @@ test('workspace installer patches AGENTS.md by default and only patches override
   assert.equal(explicitAgents.ok, true);
   assert.equal(explicitAgents.warning, undefined);
   assert.match(fs.readFileSync(path.join(workspaceRoot, 'AGENTS.override.md'), 'utf8'), /OVERTLI-TASK-MANAGER:BEGIN/);
+});
+
+test('global installer preserves unrelated hooks and installs discoverable skills', () => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'otm-global-install-'));
+  const packageRoot = fileURLToPath(new URL('..', import.meta.url));
+  fs.writeFileSync(path.join(codexHome, 'hooks.json'), `${JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'keep-existing-hook' }] }] } }, null, 2)}\n`, 'utf8');
+
+  const first = installGlobal({ codexHome, packageRoot });
+  const second = installGlobal({ codexHome, packageRoot });
+  assert.equal(first.ok, true);
+  assert.equal(second.results.find((item) => item.step === 'hooks').action, 'unchanged');
+  assert.equal(second.results.find((item) => item.step === 'skills').action, 'unchanged');
+
+  const hooks = JSON.parse(fs.readFileSync(path.join(codexHome, 'hooks.json'), 'utf8')).hooks;
+  assert.equal(hooks.Stop[0].hooks[0].command, 'keep-existing-hook');
+  assert.equal(hooks.Stop.at(-1).hooks[0].command, `node "${path.join(packageRoot, 'bin', 'otm.mjs')}" hook stop`);
+  assert.ok(fs.existsSync(path.join(codexHome, 'skills', 'overtli-task-manager', 'SKILL.md')));
 });
 
 test('workspace discovery prefers the enclosing git root over nested package manifests', () => {

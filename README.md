@@ -61,6 +61,14 @@ Initialize OTM in any target repository to patch its `AGENTS.md`, hooks, skills,
 node ~/.codex/plugins/overtli-task-manager/bin/otm.mjs install
 ```
 
+Install or refresh OTM hooks and skills globally for every Codex workspace:
+
+```bash
+node ~/.codex/plugins/overtli-task-manager/bin/otm.mjs install-global
+```
+
+This idempotently merges OTM lifecycle hooks into `~/.codex/hooks.json` without removing unrelated hooks and copies the packaged skills into `~/.codex/skills`. Use `--codex-home PATH` for a non-default Codex home.
+
 `otm install` patches root `AGENTS.md` by default. If a repository has `AGENTS.override.md`, the installer reports a warning and leaves it untouched unless you explicitly run:
 
 ```bash
@@ -105,6 +113,7 @@ node ~/.codex/plugins/overtli-task-manager/bin/otm.mjs doctor
 ```bash
 otm install [--workspace PATH] [--dry-run] [--with-project-mcp-config]
             [--agents-file AGENTS.override.md]
+otm install-global [--codex-home PATH] [--dry-run]
 otm doctor [--workspace PATH]
 otm snapshot [--workspace PATH]
 otm review-project [--workspace PATH] [--max-files N]

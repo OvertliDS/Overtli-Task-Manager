@@ -2,6 +2,7 @@ import path from 'node:path';
 import { createTaskManager } from '../core/manager.mjs';
 import { findWorkspaceRoot, currentJsonPath, readJson, pathExists, readText } from '../core/fs-utils.mjs';
 import { installWorkspace, renderInstallResult } from '../install/install-workspace.mjs';
+import { installGlobal, renderGlobalInstallResult } from '../install/install-global.mjs';
 import { reviewProjectContext } from '../context/project-review.mjs';
 import { runHookScript } from '../hooks/runner.mjs';
 
@@ -26,6 +27,17 @@ export async function handleCli({ argv, cwd, stdin, packageRoot, env }) {
       targetAgentsFile: flags.agentsFile || null
     });
     console.log(renderInstallResult(result));
+    return;
+  }
+
+  if (command === 'install-global') {
+    const result = installGlobal({
+      codexHome: flags.codexHome || env.CODEX_HOME || null,
+      packageRoot,
+      dryRun: Boolean(flags.dryRun),
+      env
+    });
+    console.log(renderGlobalInstallResult(result));
     return;
   }
 
@@ -141,6 +153,7 @@ function helpText() {
 
 Commands:
   otm install [--workspace PATH] [--dry-run] [--with-project-mcp-config] [--agents-file AGENTS.override.md]
+  otm install-global [--codex-home PATH] [--dry-run]
   otm doctor [--workspace PATH]
   otm snapshot [--workspace PATH]
   otm review-project [--workspace PATH] [--max-files N]

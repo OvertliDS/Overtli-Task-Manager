@@ -12,12 +12,12 @@ const EVENT_COMMANDS = {
   Stop: { statusMessage: 'Auditing completion', event: 'stop', timeout: 45 }
 };
 
-export function patchHooksJson({ workspaceRoot, packageRoot, dryRun = false } = {}) {
-  const filePath = path.join(workspaceRoot, '.codex', 'hooks.json');
+export function patchHooksJson({ workspaceRoot, packageRoot, targetFile = null, dryRun = false } = {}) {
+  const filePath = targetFile ? path.resolve(targetFile) : path.join(workspaceRoot, '.codex', 'hooks.json');
   const doc = readJson(filePath, { hooks: {} }) || { hooks: {} };
   if (!doc.hooks || typeof doc.hooks !== 'object') doc.hooks = {};
   for (const [eventName, spec] of Object.entries(EVENT_COMMANDS)) {
-    const command = `node ${JSON.stringify(path.join(packageRoot, 'bin', 'otm.mjs'))} hook ${spec.event}`;
+    const command = `node ${quoteCommandArg(path.join(packageRoot, 'bin', 'otm.mjs'))} hook ${spec.event}`;
     const entry = {
       ...(spec.matcher ? { matcher: spec.matcher } : {}),
       hooks: [{ type: 'command', command, ...(spec.timeout ? { timeout: spec.timeout } : {}), ...(spec.statusMessage ? { statusMessage: spec.statusMessage } : {}) }]
@@ -35,6 +35,10 @@ export function patchHooksJson({ workspaceRoot, packageRoot, dryRun = false } = 
     atomicWriteText(filePath, after);
   }
   return { ok: true, filePath, dryRun, action: changed ? 'updated' : 'unchanged', changed, hooksInstalled: Object.keys(EVENT_COMMANDS), preview: dryRun ? doc : undefined };
+}
+
+function quoteCommandArg(value) {
+  return `"${String(value).replace(/"/g, '\\"')}"`;
 }
 
 function entryHasOtmCommand(entry) {

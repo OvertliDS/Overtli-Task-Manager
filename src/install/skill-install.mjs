@@ -2,14 +2,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { atomicWriteText, readText } from '../core/fs-utils.mjs';
 
-export function installRepoSkills({ workspaceRoot, packageRoot, dryRun = false } = {}) {
+export function installRepoSkills({ workspaceRoot, packageRoot, targetRoot = null, dryRun = false } = {}) {
   const source = path.join(packageRoot, 'skills');
-  const targetRoot = path.join(workspaceRoot, '.agents', 'skills');
+  const skillRoot = targetRoot ? path.resolve(targetRoot) : path.join(workspaceRoot, '.agents', 'skills');
   const installed = [];
   for (const skillName of fs.readdirSync(source)) {
     const srcSkill = path.join(source, skillName, 'SKILL.md');
     if (!fs.existsSync(srcSkill)) continue;
-    const targetSkillDir = path.join(targetRoot, skillName);
+    const targetSkillDir = path.join(skillRoot, skillName);
     const targetSkill = path.join(targetSkillDir, 'SKILL.md');
     const content = readText(srcSkill, '');
     const existing = readText(targetSkill, null);
