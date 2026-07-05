@@ -4,6 +4,10 @@
 
 Overtli Task Manager (OTM) structures AI coding sessions into evidence-backed routes. It enforces a strict, checklist-driven development flow to ensure complete, verified implementations without premature session stops.
 
+[![Sponsor on GitHub](https://img.shields.io/badge/Sponsor-OvertliDS-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/OvertliDS)
+[![Support on Ko-fi](https://img.shields.io/badge/Ko--fi-overtlids-5F7FFF?logo=kofi&logoColor=white)](https://ko-fi.com/overtlids)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-overtlids-FFDD00?logo=buymeacoffee&logoColor=000000)](https://www.buymeacoffee.com/overtlids)
+
 ---
 
 ## Key Capabilities
