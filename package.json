@@ -49,6 +49,7 @@
     "tests/"
   ],
   "scripts": {
+    "postinstall": "node ./scripts/postinstall.mjs",
     "start:mcp": "node ./bin/otm-mcp.mjs",
     "install:workspace": "node ./bin/otm.mjs install",
     "doctor": "node ./bin/otm.mjs doctor",

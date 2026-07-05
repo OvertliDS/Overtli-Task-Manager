@@ -13,6 +13,7 @@ import { installGlobal } from '../src/install/install-global.mjs';
 import { reviewProjectContext } from '../src/context/project-review.mjs';
 import { toMcpResult } from '../src/mcp/result.mjs';
 import { runHookScript } from '../src/hooks/runner.mjs';
+import { runPostinstall, shouldAutoInstallGlobal } from '../scripts/postinstall.mjs';
 
 function tempWorkspace(prefix = 'otm-test-') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -817,15 +818,37 @@ test('global installer preserves unrelated hooks and installs discoverable skill
   const packageRoot = fileURLToPath(new URL('..', import.meta.url));
   fs.writeFileSync(path.join(codexHome, 'hooks.json'), `${JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'keep-existing-hook' }] }] } }, null, 2)}\n`, 'utf8');
 
-  const first = installGlobal({ codexHome, packageRoot });
+  const first = installGlobal({ codexHome, packageRoot, now: () => new Date('2026-07-04T12:00:00.000Z') });
   const second = installGlobal({ codexHome, packageRoot });
   assert.equal(first.ok, true);
+  assert.equal(first.backupPath, path.join(codexHome, 'hooks.json.before-otm-global-2026-07-04T12-00-00-000Z.bak'));
+  assert.ok(fs.existsSync(first.backupPath));
   assert.equal(second.results.find((item) => item.step === 'hooks').action, 'unchanged');
   assert.equal(second.results.find((item) => item.step === 'skills').action, 'unchanged');
 
   const hooks = JSON.parse(fs.readFileSync(path.join(codexHome, 'hooks.json'), 'utf8')).hooks;
   assert.equal(hooks.Stop[0].hooks[0].command, 'keep-existing-hook');
   assert.equal(hooks.Stop.at(-1).hooks[0].command, `node "${path.join(packageRoot, 'bin', 'otm.mjs')}" hook stop`);
+  assert.ok(fs.existsSync(path.join(codexHome, 'skills', 'overtli-task-manager', 'SKILL.md')));
+});
+
+test('postinstall auto-installs only for the active Codex plugin path unless explicitly overridden', () => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'otm-postinstall-home-'));
+  const packageRoot = fileURLToPath(new URL('..', import.meta.url));
+  const activePluginRoot = path.join(codexHome, 'plugins', 'overtli-task-manager');
+  assert.equal(shouldAutoInstallGlobal({ packageRoot: activePluginRoot, codexHome, env: {} }), true);
+  assert.equal(shouldAutoInstallGlobal({ packageRoot, codexHome, env: {} }), false);
+  assert.equal(shouldAutoInstallGlobal({ packageRoot: activePluginRoot, codexHome, env: { CI: '1' } }), false);
+  assert.equal(shouldAutoInstallGlobal({ packageRoot, codexHome, env: { OTM_AUTO_INSTALL_GLOBAL: '1' } }), true);
+  assert.equal(shouldAutoInstallGlobal({ packageRoot: activePluginRoot, codexHome, env: { OTM_AUTO_INSTALL_GLOBAL: '0' } }), false);
+
+  const skipped = runPostinstall({ packageRoot, env: { CODEX_HOME: codexHome } });
+  assert.equal(skipped.installed, false);
+  assert.equal(fs.existsSync(path.join(codexHome, 'hooks.json')), false);
+
+  const installed = runPostinstall({ packageRoot, env: { CODEX_HOME: codexHome, OTM_AUTO_INSTALL_GLOBAL: '1' } });
+  assert.equal(installed.installed, true);
+  assert.ok(fs.existsSync(path.join(codexHome, 'hooks.json')));
   assert.ok(fs.existsSync(path.join(codexHome, 'skills', 'overtli-task-manager', 'SKILL.md')));
 });
 

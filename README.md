@@ -40,6 +40,8 @@ cd ~/.codex/plugins/overtli-task-manager
 npm install
 ```
 
+When run from that standard plugin path, `npm install` automatically merges OTM hooks into `~/.codex/hooks.json` and refreshes OTM skills under `~/.codex/skills`. Existing global hooks are backed up and unrelated entries are preserved. Development checkouts and CI skip global changes; set `OTM_AUTO_INSTALL_GLOBAL=0` to opt out or `OTM_AUTO_INSTALL_GLOBAL=1` to allow a custom plugin path.
+
 > [!NOTE]
 > On Windows, the standard path is `%USERPROFILE%\.codex\plugins\overtli-task-manager`.
 
