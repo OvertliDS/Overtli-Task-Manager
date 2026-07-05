@@ -12,7 +12,6 @@ coverage/
 .codex/hooks.json
 
 # OVERTLI-TASK-MANAGER:GITIGNORE:BEGIN v1
-.codex/overtli-task-manager/
 .codex/overtli-task-manager/current.json
 .codex/overtli-task-manager/current.md
 .codex/overtli-task-manager/summaries/

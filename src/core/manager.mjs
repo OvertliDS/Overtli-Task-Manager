@@ -680,12 +680,65 @@ function normalizeInternalSteps(input, acceptanceCriteria = []) {
   if (criteriaSteps.length) return normalizeInternalStepList(criteriaSteps);
 
   const title = String(input.title || 'route segment').trim();
-  return normalizeInternalStepList([
-    `Clarify scope for ${title}`,
-    `Implement or inspect the required change for ${title}`,
-    `Run relevant checks for ${title}`,
-    `Record evidence for ${title}`
-  ]);
+  return normalizeInternalStepList(defaultInternalStepsForTask(input, title));
+}
+
+function defaultInternalStepsForTask(input, title) {
+  const category = inferTaskCategory(input, title);
+  if (category === 'summary') {
+    return [
+      `Reconcile route evidence for ${title}`,
+      `Write or present the final summary for ${title}`,
+      `Clear active route state only after the stop audit passes for ${title}`,
+      `Record finalization evidence for ${title}`
+    ];
+  }
+  if (category === 'validation') {
+    return [
+      `Identify the relevant checks for ${title}`,
+      `Run targeted checks for ${title}`,
+      `Inspect failures or regressions for ${title}`,
+      `Record validation evidence for ${title}`
+    ];
+  }
+  if (category === 'install') {
+    return [
+      `Inspect target install state for ${title}`,
+      `Run the install or configuration command for ${title}`,
+      `Verify install or doctor output for ${title}`,
+      `Record install evidence for ${title}`
+    ];
+  }
+  if (category === 'docs') {
+    return [
+      `Inspect source-of-truth material for ${title}`,
+      `Draft or update documentation for ${title}`,
+      `Verify commands, paths, and status claims for ${title}`,
+      `Record documentation evidence for ${title}`
+    ];
+  }
+  return [
+    `Inspect affected code and existing patterns for ${title}`,
+    `Implement the complete requested change for ${title}`,
+    `Update related tests, docs, or configuration for ${title}`,
+    `Run relevant checks and record evidence for ${title}`
+  ];
+}
+
+function inferTaskCategory(input, title) {
+  const text = [
+    input.category,
+    input.kind,
+    input.type,
+    input.metadata?.category,
+    input.description,
+    title
+  ].filter(Boolean).join(' ').toLowerCase();
+  if (/\b(finali[sz]e|final summary|summari[sz]e|summary|clear active|checkpoint|closeout)\b/.test(text)) return 'summary';
+  if (/\b(validate|validation|test|tests|check|checks|lint|typecheck|build|smoke|regression)\b/.test(text)) return 'validation';
+  if (/\b(install|reinstall|setup|configure|configuration|doctor|hook|mcp config)\b/.test(text)) return 'install';
+  if (/\b(doc|docs|documentation|readme|review|audit|plan|planning|roadmap|spec|gdd)\b/.test(text)) return 'docs';
+  return 'implementation';
 }
 
 function normalizeInternalStepList(steps = []) {

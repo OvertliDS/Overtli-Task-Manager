@@ -16,12 +16,13 @@ Use this skill when the user asks Codex to build, fix, refactor, research, revie
 5. If the user is asking for a phase plan, roadmap, review, or documentation rather than implementation now, make the route reflect that planning/documentation task instead of converting it into implementation work.
 6. Show the returned Markdown snapshot in chat.
 7. Keep one active route segment whenever possible by calling `otm_start_task` before focused work.
-8. Use `otm_progress` for meaningful checkpoints: route created, task started, task completed, steering change, blocker, validation start, validation result, and finalization.
-9. Complete tasks with `otm_complete_task` only when evidence is concrete: files changed, commands run, tests passed, docs reviewed, or user-confirmed decision.
-10. If the user changes direction, immediately call `otm_reconcile`; drop or supersede stale segments instead of leaving contradictory work open.
-11. Before final response, call `otm_audit_stop`.
-12. If the audit says stop is blocked, keep working on the listed required segments.
-13. When the audit passes, call `otm_finalize_turn`, then `otm_clear_current`.
+8. Use `otm_progress` for meaningful checkpoints: route created, task started, each internal step completed, steering change, blocker, validation start, validation result, and finalization.
+9. Mark internal steps complete as soon as their evidence exists. Do not finish the project and then backfill the internal checklist.
+10. Complete tasks with `otm_complete_task` only when evidence is concrete and every required internal step is terminal (`done` or intentionally `skipped`): files changed, commands run, tests passed, docs reviewed, or user-confirmed decision.
+11. If the user changes direction, immediately call `otm_reconcile`; drop or supersede stale segments instead of leaving contradictory work open.
+12. Before final response, call `otm_audit_stop`.
+13. If the audit says stop is blocked, keep working on the listed required segments.
+14. When the audit passes, call `otm_finalize_turn`, show its Markdown summary to the user, then call `otm_clear_current`.
 
 ## Quality bar
 

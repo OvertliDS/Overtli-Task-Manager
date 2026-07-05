@@ -646,6 +646,55 @@ test('model-supplied route segments from rich prompt context preserve internal s
   assert.match(started.snapshot.tasks[0].description || '', /^$/);
 });
 
+test('model-supplied route segments without internal steps get category-aware defaults', () => {
+  const workspaceRoot = tempWorkspace('otm-category-steps-');
+  const manager = createTaskManager({ cwd: workspaceRoot, env: testEnv('otm-category-steps') });
+  const started = manager.start({
+    workspaceRoot,
+    replaceExisting: true,
+    goal: 'Check generated default steps',
+    tasks: [
+      { title: 'Summarize outcome and clear active checklist' },
+      { title: 'Validate behavior and check for regressions' },
+      { title: 'Reinstall the latest version globally' },
+      { title: 'Update README documentation' },
+      { title: 'Implement prompt route segmentation fix' }
+    ]
+  });
+
+  const byTitle = new Map(started.snapshot.tasks.map((task) => [task.title, internalStepTitles(task)]));
+  assert.deepEqual(byTitle.get('Summarize outcome and clear active checklist'), [
+    'Reconcile route evidence for Summarize outcome and clear active checklist',
+    'Write or present the final summary for Summarize outcome and clear active checklist',
+    'Clear active route state only after the stop audit passes for Summarize outcome and clear active checklist',
+    'Record finalization evidence for Summarize outcome and clear active checklist'
+  ]);
+  assert.deepEqual(byTitle.get('Validate behavior and check for regressions'), [
+    'Identify the relevant checks for Validate behavior and check for regressions',
+    'Run targeted checks for Validate behavior and check for regressions',
+    'Inspect failures or regressions for Validate behavior and check for regressions',
+    'Record validation evidence for Validate behavior and check for regressions'
+  ]);
+  assert.deepEqual(byTitle.get('Reinstall the latest version globally'), [
+    'Inspect target install state for Reinstall the latest version globally',
+    'Run the install or configuration command for Reinstall the latest version globally',
+    'Verify install or doctor output for Reinstall the latest version globally',
+    'Record install evidence for Reinstall the latest version globally'
+  ]);
+  assert.deepEqual(byTitle.get('Update README documentation'), [
+    'Inspect source-of-truth material for Update README documentation',
+    'Draft or update documentation for Update README documentation',
+    'Verify commands, paths, and status claims for Update README documentation',
+    'Record documentation evidence for Update README documentation'
+  ]);
+  assert.deepEqual(byTitle.get('Implement prompt route segmentation fix'), [
+    'Inspect affected code and existing patterns for Implement prompt route segmentation fix',
+    'Implement the complete requested change for Implement prompt route segmentation fix',
+    'Update related tests, docs, or configuration for Implement prompt route segmentation fix',
+    'Run relevant checks and record evidence for Implement prompt route segmentation fix'
+  ]);
+});
+
 test('internal step progress persists without completing the route gate', () => {
   const workspaceRoot = tempWorkspace('otm-internal-steps-');
   const manager = createTaskManager({ cwd: workspaceRoot, env: testEnv('otm-internal-steps') });
@@ -738,6 +787,26 @@ test('workspace installer is idempotent and preserves existing guidance', () => 
   assert.equal(hooks.Stop.at(-1).hooks[0].timeout, 45);
 });
 
+test('workspace installer patches AGENTS.md by default and only patches override explicitly', () => {
+  const workspaceRoot = tempWorkspace('otm-install-override-');
+  fs.writeFileSync(path.join(workspaceRoot, 'AGENTS.md'), '# Root Guidance\n', 'utf8');
+  fs.writeFileSync(path.join(workspaceRoot, 'AGENTS.override.md'), '# Override Guidance\n\nTemporary local rule.\n', 'utf8');
+  const packageRoot = fileURLToPath(new URL('..', import.meta.url));
+
+  const first = installWorkspace({ workspaceRoot, packageRoot, dryRun: false });
+  const firstAgents = first.results.find((item) => item.step === 'agents');
+  assert.equal(firstAgents.ok, true);
+  assert.match(firstAgents.warning, /AGENTS\.override\.md exists and was not patched/);
+  assert.match(fs.readFileSync(path.join(workspaceRoot, 'AGENTS.md'), 'utf8'), /OVERTLI-TASK-MANAGER:BEGIN/);
+  assert.doesNotMatch(fs.readFileSync(path.join(workspaceRoot, 'AGENTS.override.md'), 'utf8'), /OVERTLI-TASK-MANAGER:BEGIN/);
+
+  const explicit = installWorkspace({ workspaceRoot, packageRoot, targetAgentsFile: 'AGENTS.override.md', dryRun: false });
+  const explicitAgents = explicit.results.find((item) => item.step === 'agents');
+  assert.equal(explicitAgents.ok, true);
+  assert.equal(explicitAgents.warning, undefined);
+  assert.match(fs.readFileSync(path.join(workspaceRoot, 'AGENTS.override.md'), 'utf8'), /OVERTLI-TASK-MANAGER:BEGIN/);
+});
+
 test('project review scans memory-bank / memory_bank and indexes overview files', () => {
   const workspaceRoot = tempWorkspace('otm-review-');
   
@@ -761,4 +830,64 @@ test('project review scans memory-bank / memory_bank and indexes overview files'
   assert.ok(contextSource);
   assert.match(review.summary, /memory_bank/);
   assert.match(review.summary, /memory-bank/);
+});
+
+test('project review reuses unchanged cache without rewriting files', () => {
+  const workspaceRoot = tempWorkspace('otm-review-cache-');
+  const first = reviewProjectContext({ workspaceRoot });
+  const cacheRoot = path.join(workspaceRoot, '.codex', 'overtli-task-manager', 'cache');
+  const jsonPath = path.join(cacheRoot, 'project-review.json');
+  const mdPath = path.join(cacheRoot, 'project-review.md');
+  const oldTime = new Date('2024-01-01T00:00:00.000Z');
+  fs.utimesSync(jsonPath, oldTime, oldTime);
+  fs.utimesSync(mdPath, oldTime, oldTime);
+  fs.utimesSync(path.join(workspaceRoot, 'README.md'), new Date('2025-01-01T00:00:00.000Z'), new Date('2025-01-01T00:00:00.000Z'));
+
+  const second = reviewProjectContext({ workspaceRoot });
+  const jsonAfter = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+  assert.equal(second.unchanged, true);
+  assert.equal(second.cacheStatus, 'unchanged');
+  assert.equal(second.fingerprint, first.fingerprint);
+  assert.equal(jsonAfter.createdAt, first.createdAt);
+  assert.equal(fs.statSync(jsonPath).mtimeMs, oldTime.getTime());
+  assert.equal(fs.statSync(mdPath).mtimeMs, oldTime.getTime());
+});
+
+test('stop hook requires model-visible finalization before clearing current state by default', async () => {
+  const workspaceRoot = tempWorkspace('otm-stop-finalize-');
+  const env = testEnv('otm-stop-finalize');
+  const manager = createTaskManager({ cwd: workspaceRoot, env });
+  const started = manager.start({
+    workspaceRoot,
+    replaceExisting: true,
+    goal: 'Complete route',
+    tasks: [{ title: 'Finish one task', internalSteps: ['Inspect', 'Validate'] }]
+  });
+  const taskId = started.snapshot.tasks[0].id;
+  finishInternalSteps(manager, workspaceRoot, taskId);
+  manager.completeTask({
+    workspaceRoot,
+    taskId,
+    evidence: { kind: 'test_result', summary: 'Route task passed.' }
+  });
+
+  const blocked = await withCapturedStdout(() => runHookScript('stop', {
+    cwd: workspaceRoot,
+    env,
+    stdin: JSON.stringify({ cwd: workspaceRoot, hook_event_name: 'Stop', turn_id: 'turn-stop' })
+  }));
+  assert.equal(blocked.result.decision, 'block');
+  assert.match(blocked.result.reason, /visible finalization must be model-driven/);
+  assert.equal(manager.snapshot({ workspaceRoot, write: false }).run.status, 'active');
+
+  manager.finalizeTurn({ workspaceRoot, outcome: 'completed' });
+  manager.clearCurrent({ workspaceRoot });
+
+  const allowed = await withCapturedStdout(() => runHookScript('stop', {
+    cwd: workspaceRoot,
+    env,
+    stdin: JSON.stringify({ cwd: workspaceRoot, hook_event_name: 'Stop', turn_id: 'turn-stop' })
+  }));
+  assert.equal(allowed.result.continue, true);
+  assert.doesNotMatch(allowed.captured, /visible finalization must be model-driven/);
 });

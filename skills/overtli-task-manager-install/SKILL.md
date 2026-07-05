@@ -12,7 +12,7 @@ Use this skill when the user asks to install, initialize, repair, configure, or 
 1. Run `otm_install_workspace` with the current repository root as `workspaceRoot`; use `dryRun=true` if the user wants a preview.
 2. Run `otm_install_workspace` with `dryRun=false` when applying.
 3. Do not duplicate AGENTS.md content. The installer owns only the block between OTM markers.
-4. If `AGENTS.override.md` exists at the repository root, patch it because Codex reads it before `AGENTS.md` at the same scope.
+4. Patch root `AGENTS.md` by default. If `AGENTS.override.md` exists, report that it was not patched; pass `targetAgentsFile: "AGENTS.override.md"` only when the user explicitly wants the override file patched.
 5. Install repo skills into `.agents/skills` so Codex can discover them from the repository root.
 6. Install hooks into `.codex/hooks.json` without removing unrelated hooks.
 7. Add only narrow OTM runtime paths to `.gitignore`.

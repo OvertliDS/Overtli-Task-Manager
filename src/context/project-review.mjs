@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { findWorkspaceRoot, readText, statSafe, hashFile, atomicWriteJson, atomicWriteText, cacheDir, ensureDir, relativeToWorkspace, workspaceTempDir } from '../core/fs-utils.mjs';
+import { findWorkspaceRoot, readText, readJson, statSafe, hashFile, atomicWriteJson, atomicWriteText, cacheDir, ensureDir, relativeToWorkspace, workspaceTempDir } from '../core/fs-utils.mjs';
 import { nowIso, shortHash } from '../core/ids.mjs';
 import { clampText, compactOneLine } from '../core/text-utils.mjs';
 
@@ -29,6 +29,17 @@ export function reviewProjectContext({ cwd = process.cwd(), workspaceRoot = null
     sections.push(body);
   }
 
+  const fingerprint = shortHash(JSON.stringify(sources.map((src) => [src.path, src.hash])));
+  const reviewJsonPath = path.join(cacheDir(root), 'project-review.json');
+  const existing = readJson(reviewJsonPath, null);
+  if (existing?.schemaVersion === 'otm.project-review.v1' && existing.fingerprint === fingerprint) {
+    return {
+      ...existing,
+      cacheStatus: 'unchanged',
+      unchanged: true
+    };
+  }
+
   const summary = renderProjectSummary(root, sources, sections);
   const payload = {
     schemaVersion: 'otm.project-review.v1',
@@ -37,11 +48,13 @@ export function reviewProjectContext({ cwd = process.cwd(), workspaceRoot = null
     sources,
     summary,
     createdAt: nowIso(),
-    fingerprint: shortHash(JSON.stringify(sources.map((src) => [src.path, src.hash, src.mtimeMs])))
+    fingerprint,
+    cacheStatus: 'refreshed',
+    unchanged: false
   };
   ensureDir(cacheDir(root));
   const tempDir = workspaceTempDir(root);
-  atomicWriteJson(path.join(cacheDir(root), 'project-review.json'), payload, { tempDir });
+  atomicWriteJson(reviewJsonPath, payload, { tempDir });
   atomicWriteText(path.join(cacheDir(root), 'project-review.md'), summary, { tempDir });
   return payload;
 }

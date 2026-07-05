@@ -35,12 +35,14 @@ function handleSessionStart(manager, input, workspaceRoot) {
   let projectReview = null;
   try {
     projectReview = reviewProjectContext({ workspaceRoot, maxFiles: Number(process.env.OTM_PROJECT_REVIEW_MAX_FILES || 20) });
-    manager.upsertMemory({ workspaceRoot, kind: 'project_overview', title: 'Project overview cache', body: projectReview.summary, tags: ['project-overview', 'auto-review'], source: { fingerprint: projectReview.fingerprint, sourceCount: projectReview.sourceCount } });
+    if (!projectReview.unchanged) {
+      manager.upsertMemory({ workspaceRoot, kind: 'project_overview', title: 'Project overview cache', body: projectReview.summary, tags: ['project-overview', 'auto-review'], source: { fingerprint: projectReview.fingerprint, sourceCount: projectReview.sourceCount } });
+    }
   } catch {}
   const snap = manager.snapshot({ workspaceRoot, lastUpdate: { kind: 'session_start', message: 'Session loaded OTM state.', at: new Date().toISOString() } });
   const context = snap.run
     ? `Overtli Task Manager loaded an active route. Continue using OTM tools and keep current.json updated.\n\n${snap.markdown}`
-    : `Overtli Task Manager is available. For non-trivial work, call otm_start or otm_reconcile before implementation. Project awareness cache ${projectReview ? 'was refreshed' : 'was not refreshed'}.`;
+    : `Overtli Task Manager is available. For non-trivial work, call otm_start or otm_reconcile before implementation. Project awareness cache ${projectReview ? (projectReview.unchanged ? 'is current' : 'was refreshed') : 'was not refreshed'}.`;
   return { continue: true, suppressOutput: true, systemMessage: context };
 }
 
@@ -61,7 +63,9 @@ function handleUserPromptSubmit(manager, input, workspaceRoot) {
     'If the user is only asking for a phase plan, roadmap, review, or documentation rather than implementation now, make the route reflect that planning/documentation task instead of converting it into implementation work.',
     'Show the returned Markdown checklist snapshot in chat.',
     'Keep exactly one active route segment when possible; mark completion only with concrete evidence.',
-    'If the user steers, reconcile before continuing. Before final response, call otm_audit_stop. If required tasks remain, continue working.'
+    'Mark internal steps complete with otm_progress as the work happens; complete the parent task only after all required internal steps are terminal and segment-level evidence exists.',
+    'If the user steers, reconcile before continuing. Before final response, call otm_audit_stop. If required tasks remain, continue working.',
+    'When the audit passes, call otm_finalize_turn, show the returned Markdown summary to the user, then call otm_clear_current.'
   ].join('\n');
   return { continue: true, suppressOutput: true, hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext } };
 }
@@ -115,6 +119,12 @@ function handleStop(manager, input, workspaceRoot) {
     return {
       decision: 'block',
       reason: `Overtli Task Manager audit blocked the stop. Continue the route until required segments are complete:\n${remaining}\n\nUse OTM progress updates, complete tasks only with evidence, then run otm_audit_stop again.`
+    };
+  }
+  if (process.env.OTM_STOP_AUTO_FINALIZE !== '1') {
+    return {
+      decision: 'block',
+      reason: 'Overtli Task Manager audit passed, but visible finalization must be model-driven. Call otm_finalize_turn, show its Markdown summary to the user, then call otm_clear_current before sending the final response. Set OTM_STOP_AUTO_FINALIZE=1 only when you intentionally want the Stop hook to auto-finalize as a fallback.'
     };
   }
   try {

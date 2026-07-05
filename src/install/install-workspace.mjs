@@ -37,7 +37,8 @@ function buildInstallManifest({ root, packageRoot, dryRun, results }) {
       ok: item.ok !== false,
       action: item.action || (item.changed ? 'updated' : 'unchanged'),
       filePath: item.filePath || null,
-      changed: Boolean(item.changed)
+      changed: Boolean(item.changed),
+      warning: item.warning || null
     }))
   };
 }
@@ -52,7 +53,7 @@ export function renderInstallResult(result) {
   lines.push('| Step | Result | Path |');
   lines.push('|---|---|---|');
   for (const item of result.results) {
-    const status = item.ok === false ? `⚠ ${item.reason || item.action || 'needs attention'}` : `✅ ${item.action || 'ok'}`;
+    const status = item.ok === false ? `⚠ ${item.reason || item.action || 'needs attention'}` : `✅ ${item.action || 'ok'}${item.warning ? `; warning: ${item.warning}` : ''}`;
     const file = item.filePath || (item.installed ? `${item.installed.length} skill(s)` : '—');
     lines.push(`| ${item.step} | ${status} | ${file} |`);
   }

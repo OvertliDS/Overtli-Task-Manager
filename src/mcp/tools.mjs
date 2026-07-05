@@ -51,7 +51,7 @@ export const tools = [
   },
   {
     name: 'otm_progress',
-    description: 'Record a progress checkpoint and return a Markdown status update. May also update one internal step, but route gates still require otm_complete_task evidence.',
+    description: 'Record a progress checkpoint and return a Markdown status update. Use this to mark one internal step done/active as work happens; route gates still require otm_complete_task evidence after internal steps are terminal.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -72,7 +72,7 @@ export const tools = [
   },
   {
     name: 'otm_complete_task',
-    description: 'Mark a route segment complete. Requires concrete evidence unless force=true is explicitly supplied.',
+    description: 'Mark a route segment complete. Requires concrete segment-level evidence and all required internal steps must already be done or skipped unless force=true is explicitly supplied.',
     inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, runId: { type: 'string' }, taskId: { type: 'string' }, evidence: { type: 'object', additionalProperties: true }, force: { type: 'boolean' } }, required: ['taskId', 'evidence'] }
   },
   {
@@ -92,7 +92,7 @@ export const tools = [
   },
   {
     name: 'otm_finalize_turn',
-    description: 'Write a turn summary and checkpoint memory. Use after otm_audit_stop passes.',
+    description: 'Write a turn summary and checkpoint memory. Use after otm_audit_stop passes, show the returned Markdown summary to the user, then call otm_clear_current.',
     inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, runId: { type: 'string' }, outcome: { type: 'string' }, nextSteps: { type: 'array', items: { type: 'string' } }, allowIncomplete: { type: 'boolean' }, clearCurrent: { type: 'boolean' }, clear: { type: 'boolean' }, deleteFiles: { type: 'boolean' } } }
   },
   {

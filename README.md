@@ -15,6 +15,7 @@ Overtli Task Manager (OTM) structures AI coding sessions into evidence-backed ro
 *   **Durable State Cache:** Syncs active routes to `.codex/overtli-task-manager/current.json` and `current.md` without rewriting unchanged files.
 *   **Optimized Rendering:** Shows a full checklist at route start and finalization, then compact progress cards during routine work.
 *   **Task Normalization:** Keeps one active route segment where possible, blocks manual jumps until the active task is handled, and lets reconciliation intentionally add, merge, reopen, or reorder work.
+*   **Internal Step Gates:** Keeps each route segment honest by requiring internal steps to be checked off as work happens before the parent segment can be completed.
 *   **Lifecycle Hooks:** Intercepts sessions, prompts, tools, and stops to enforce task completion and audit progress.
 *   **Workspace Memory:** Keeps a lightweight, high-signal index of project guides (`AGENTS.md`), memory banks, and schemas.
 
@@ -38,22 +39,14 @@ npm install
 > On Windows, the standard path is `%USERPROFILE%\.codex\plugins\overtli-task-manager`.
 
 ### 2. Configure Codex
-Add the MCP server to your global configuration in `~/.codex/config.toml`:
+Generate the MCP server block with the installed copy of OTM, then paste the absolute-path output into your global configuration at `~/.codex/config.toml`:
 
-```toml
-[mcp_servers.overtli_task_manager]
-command = "node"
-args = ["~/.codex/plugins/overtli-task-manager/bin/otm-mcp.mjs"]
-enabled = true
-tool_timeout_sec = 45
-startup_timeout_sec = 20
-
-[mcp_servers.overtli_task_manager.env]
-OTM_STORAGE = "auto"
+```bash
+node ./bin/otm.mjs mcp-config
 ```
 
 > [!TIP]
-> On Windows, replace `~/.codex/plugins/` with the absolute path to your `%USERPROFILE%\.codex\plugins\` folder.
+> Run that command from the OTM installation directory. The generated TOML uses the absolute `bin/otm-mcp.mjs` path so Codex does not depend on `~` expansion.
 
 ### 3. Install in Target Workspace
 Initialize OTM in any target repository to patch its `AGENTS.md`, hooks, skills, and `.gitignore`:
@@ -61,6 +54,12 @@ Initialize OTM in any target repository to patch its `AGENTS.md`, hooks, skills,
 ```bash
 # From target repository root
 node ~/.codex/plugins/overtli-task-manager/bin/otm.mjs install
+```
+
+`otm install` patches root `AGENTS.md` by default. If a repository has `AGENTS.override.md`, the installer reports a warning and leaves it untouched unless you explicitly run:
+
+```bash
+node ~/.codex/plugins/overtli-task-manager/bin/otm.mjs install --agents-file AGENTS.override.md
 ```
 
 To verify the setup:
@@ -90,10 +89,15 @@ node ~/.codex/plugins/overtli-task-manager/bin/otm.mjs doctor
 | `otm_prune_history` | Completion | Prune durable run/task/event/summary/cache history older than retention |
 | `otm_project_review`| Memory | Index high-signal repository context |
 | `otm_memory_search` | Memory | Search stored checkpoints and decision records |
+| `otm_memory_upsert` | Admin / Memory Maintenance | Create or update concise project memory entries |
+| `otm_memory_delete` | Admin / Memory Maintenance | Delete stale project memory entries by id, kind, or tag |
+| `otm_install_workspace` | Admin / Install | Idempotently install OTM into a repository |
+| `otm_doctor` | Admin / Diagnostics | Diagnose OTM storage, active route state, current files, and install state |
 
 ### CLI Interface
 ```bash
 otm install [--workspace PATH] [--dry-run] [--with-project-mcp-config]
+            [--agents-file AGENTS.override.md]
 otm doctor [--workspace PATH]
 otm snapshot [--workspace PATH]
 otm review-project [--workspace PATH] [--max-files N]
@@ -191,12 +195,21 @@ String inputs remain accepted, but OTM normalizes them into small records with
 `id`, `title`, and `status` so `current.json` can show which internal checkpoint
 is pending, active, done, blocked, or skipped after compaction or handoff.
 `otm_progress` can update one internal step by id, title, index, or object.
+Models should update internal steps as soon as the corresponding work is done
+and evidence exists. They should not finish the whole project and then backfill
+internal step status, because that removes the checklist's value as a live
+coordination surface.
 Internal steps are prerequisites for the parent route segment: a route gate
 cannot be completed while any internal step is pending, active, or blocked.
 `done` and `skipped` are terminal internal states. Internal steps still do not
 complete the parent route segment or open the stop gate by themselves; the model
 must also call `otm_complete_task` with concrete evidence when a top-level route
 checkpoint/gate is actually complete.
+
+When a model-supplied task has no explicit internal steps, OTM creates
+category-aware defaults for implementation, documentation/review, validation,
+install/setup, and final-summary tasks. Fallback-planner tasks still carry their
+own actionable internal steps.
 
 MCP tool results are Markdown/plain-text first. Full machine-readable route
 state remains available through the `otm://current` resource, while normal tool
@@ -211,6 +224,13 @@ observations, or `OTM_TRACK_MCP_EVIDENCE=1` to opt into broad MCP evidence.
 Default hook timeouts are capped but not brittle on Windows: SessionStart 15s,
 UserPromptSubmit 12s, PreToolUse 8s, PostToolUse 12s, PreCompact/PostCompact
 15s, and Stop 45s.
+
+The normal completion path is model-visible: call `otm_audit_stop`, then
+`otm_finalize_turn`, show the returned Markdown summary in chat, and finally
+call `otm_clear_current`. The Stop hook blocks incomplete routes and, by
+default, also blocks an already-complete active route once so the model can
+perform that visible finalization path. Set `OTM_STOP_AUTO_FINALIZE=1` only when
+you intentionally want the Stop hook to auto-finalize as a fallback.
 
 ---
 

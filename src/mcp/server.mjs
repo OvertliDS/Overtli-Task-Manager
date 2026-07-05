@@ -17,7 +17,7 @@ export async function runMcpServer({ env = process.env } = {}) {
     { name: 'overtli_task_manager', version: '0.1.0' },
     {
       capabilities: { tools: {}, resources: {} },
-      instructions: 'Overtli Task Manager keeps Codex work organized as route checklists. Before otm_start/otm_reconcile, the model should thoroughly analyze the full user request and all available context, including inline text, attachments, screenshots/images it can inspect, OCR/descriptions, and steering, then pass specific route segments with internalSteps. Use otm_progress for chat-visible updates, otm_complete_task only with evidence, otm_audit_stop before final answers, then otm_finalize_turn and otm_clear_current.'
+      instructions: 'Overtli Task Manager keeps Codex work organized as route checklists. Before otm_start/otm_reconcile, thoroughly analyze the full user request and pass specific route segments with internalSteps. Use otm_progress to mark internal steps complete as work happens, use otm_complete_task only after internal steps are terminal and segment-level evidence exists, call otm_audit_stop before final answers, then call otm_finalize_turn, show its Markdown summary, and call otm_clear_current.'
     }
   );
 
@@ -77,7 +77,9 @@ async function dispatchTool({ name, args, manager, packageRoot }) {
     case 'otm_memory_delete': return { ...manager.deleteMemory(args), markdown: '## ✅ OTM memory cleanup\n\nRequested memory entries were removed when matched.\n' };
     case 'otm_project_review': {
       const review = reviewProjectContext(args);
-      manager.upsertMemory({ workspaceRoot: review.workspaceRoot, kind: 'project_overview', title: 'Project overview cache', body: review.summary, tags: ['project-overview'], source: { fingerprint: review.fingerprint, sourceCount: review.sourceCount } });
+      if (!review.unchanged) {
+        manager.upsertMemory({ workspaceRoot: review.workspaceRoot, kind: 'project_overview', title: 'Project overview cache', body: review.summary, tags: ['project-overview'], source: { fingerprint: review.fingerprint, sourceCount: review.sourceCount } });
+      }
       return { review, markdown: review.summary };
     }
     case 'otm_install_workspace': {

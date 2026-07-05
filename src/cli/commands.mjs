@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { createTaskManager } from '../core/manager.mjs';
-import { findWorkspaceRoot, currentJsonPath, readJson } from '../core/fs-utils.mjs';
+import { findWorkspaceRoot, currentJsonPath, readJson, pathExists, readText } from '../core/fs-utils.mjs';
 import { installWorkspace, renderInstallResult } from '../install/install-workspace.mjs';
 import { reviewProjectContext } from '../context/project-review.mjs';
 import { runHookScript } from '../hooks/runner.mjs';
@@ -42,7 +42,9 @@ export async function handleCli({ argv, cwd, stdin, packageRoot, env }) {
 
   if (command === 'review-project') {
     const review = reviewProjectContext({ workspaceRoot, maxFiles: Number(flags.maxFiles || 30) });
-    manager.upsertMemory({ workspaceRoot, kind: 'project_overview', title: 'Project overview cache', body: review.summary, tags: ['project-overview', 'manual-review'], source: { fingerprint: review.fingerprint } });
+    if (!review.unchanged) {
+      manager.upsertMemory({ workspaceRoot, kind: 'project_overview', title: 'Project overview cache', body: review.summary, tags: ['project-overview', 'manual-review'], source: { fingerprint: review.fingerprint } });
+    }
     console.log(review.summary);
     return;
   }
@@ -111,6 +113,10 @@ function renderDoctor({ workspaceRoot, packageRoot, manager }) {
   lines.push(`Storage: \`${manager.store.kind}\``);
   lines.push(`Active route: ${active ? `yes — ${active.id}` : 'no'}`);
   lines.push(`current.json: ${current ? 'present' : 'not present'}`);
+  const overridePath = path.join(workspaceRoot, 'AGENTS.override.md');
+  if (pathExists(overridePath) && readText(overridePath, '').trim()) {
+    lines.push('AGENTS override: present; `otm install` patches root `AGENTS.md` by default. Use `--agents-file AGENTS.override.md` only when you explicitly want to patch the override file.');
+  }
   lines.push('');
   lines.push('Run `otm install` from the target repository to patch AGENTS.md, repo skills, hooks, and gitignore idempotently. Add `--with-project-mcp-config` only when you want a project-scoped MCP config block.');
   return `${lines.join('\n')}\n`;
@@ -134,7 +140,7 @@ function helpText() {
   return `Overtli Task Manager
 
 Commands:
-  otm install [--workspace PATH] [--dry-run] [--with-project-mcp-config]
+  otm install [--workspace PATH] [--dry-run] [--with-project-mcp-config] [--agents-file AGENTS.override.md]
   otm doctor [--workspace PATH]
   otm snapshot [--workspace PATH]
   otm review-project [--workspace PATH] [--max-files N]
