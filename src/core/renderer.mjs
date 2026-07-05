@@ -1,7 +1,9 @@
 import crypto from 'node:crypto';
-import { CURRENT_SCHEMA_VERSION, MANAGER_NAME } from './constants.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+import { CURRENT_INDEX_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION, MANAGER_NAME } from './constants.mjs';
 import { markdownEscapeCell, compactOneLine } from './text-utils.mjs';
-import { cleanupWorkspaceStateTempFiles, currentJsonPath, currentMarkdownPath, relativeToWorkspace, atomicWriteJson, atomicWriteText, workspaceTempDir } from './fs-utils.mjs';
+import { cleanupWorkspaceStateTempFiles, currentJsonPath, currentMarkdownPath, relativeToWorkspace, atomicWriteJson, atomicWriteText, workspaceStateDir, workspaceTempDir, readJson } from './fs-utils.mjs';
 
 export const DEFAULT_RENDER_POLICY = {
   mode: 'start_end_delta',
@@ -94,8 +96,8 @@ export function buildSnapshot({ run, tasks, workspaceRoot, storageKind = 'unknow
     lastUpdate: lastUpdate || undefined,
     storage: { kind: storageKind },
     paths: {
-      currentJson: relativeToWorkspace(workspaceRoot, currentJsonPath(workspaceRoot)),
-      currentMarkdown: relativeToWorkspace(workspaceRoot, currentMarkdownPath(workspaceRoot))
+      currentJson: relativeToWorkspace(workspaceRoot, currentJsonPath(workspaceRoot, run.sessionId)),
+      currentMarkdown: relativeToWorkspace(workspaceRoot, currentMarkdownPath(workspaceRoot, run.sessionId))
     },
     updatedAt: new Date().toISOString()
   });
@@ -151,10 +153,97 @@ export function renderDeltaMarkdown(snapshot, options = {}) {
 export function writeCurrentFiles(workspaceRoot, snapshot) {
   cleanupWorkspaceStateTempFiles(workspaceRoot);
   const tempDir = workspaceTempDir(workspaceRoot);
-  const jsonChanged = atomicWriteJson(currentJsonPath(workspaceRoot), snapshot, { tempDir });
-  const markdownChanged = atomicWriteText(currentMarkdownPath(workspaceRoot), renderSnapshotMarkdown(snapshot), { tempDir });
+  const jsonChanged = atomicWriteJson(currentJsonPath(workspaceRoot, snapshot.sessionId), snapshot, { tempDir });
+  const markdownChanged = atomicWriteText(currentMarkdownPath(workspaceRoot, snapshot.sessionId), renderSnapshotMarkdown(snapshot), { tempDir });
+  const indexChanged = snapshot.sessionId ? writeWorkspaceCurrentIndex(workspaceRoot, { tempDir }) : { jsonChanged: false, markdownChanged: false };
   cleanupWorkspaceStateTempFiles(workspaceRoot);
-  return { jsonChanged, markdownChanged };
+  return { jsonChanged, markdownChanged, indexChanged };
+}
+
+export function writeWorkspaceCurrentIndex(workspaceRoot, options = {}) {
+  return withWorkspaceIndexLock(workspaceRoot, () => writeWorkspaceCurrentIndexUnlocked(workspaceRoot, options));
+}
+
+function writeWorkspaceCurrentIndexUnlocked(workspaceRoot, options = {}) {
+  const tempDir = options.tempDir || workspaceTempDir(workspaceRoot);
+  const sessionsRoot = path.join(workspaceStateDir(workspaceRoot), 'sessions');
+  const sessions = [];
+  if (fs.existsSync(sessionsRoot)) {
+    for (const entry of fs.readdirSync(sessionsRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const snapshot = readJson(path.join(sessionsRoot, entry.name, 'current.json'), null);
+      if (!snapshot || !['active', 'blocked', 'paused'].includes(snapshot.status)) continue;
+      sessions.push({
+        sessionKey: entry.name,
+        runId: snapshot.runId,
+        goal: snapshot.goal,
+        status: snapshot.status,
+        currentTaskId: snapshot.currentTaskId,
+        currentTaskTitle: snapshot.currentTaskTitle,
+        stopAllowed: snapshot.stopAllowed,
+        updatedAt: snapshot.updatedAt,
+        paths: snapshot.paths
+      });
+    }
+  }
+  sessions.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+  const index = {
+    schemaVersion: CURRENT_INDEX_SCHEMA_VERSION,
+    manager: MANAGER_NAME,
+    status: sessions.length ? (sessions.length === 1 ? sessions[0].status : 'multi_session') : 'cleared',
+    workspaceRoot,
+    activeSessionCount: sessions.length,
+    sessions,
+    updatedAt: new Date().toISOString()
+  };
+  const markdown = renderWorkspaceCurrentIndexMarkdown(index);
+  return {
+    jsonChanged: atomicWriteJson(currentJsonPath(workspaceRoot), index, { tempDir }),
+    markdownChanged: atomicWriteText(currentMarkdownPath(workspaceRoot), markdown, { tempDir }),
+    index
+  };
+}
+
+function withWorkspaceIndexLock(workspaceRoot, fn) {
+  const lockPath = path.join(workspaceTempDir(workspaceRoot), 'current-index.lock');
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  const deadline = Date.now() + 5_000;
+  while (true) {
+    let handle = null;
+    try {
+      handle = fs.openSync(lockPath, 'wx');
+      fs.writeFileSync(handle, `${process.pid}\n${new Date().toISOString()}\n`, 'utf8');
+      return fn();
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      let stale = false;
+      try { stale = Date.now() - fs.statSync(lockPath).mtimeMs > 30_000; } catch {}
+      if (stale) {
+        try { fs.rmSync(lockPath, { force: true }); } catch {}
+        continue;
+      }
+      if (Date.now() >= deadline) throw new Error(`Timed out waiting for OTM workspace index lock: ${lockPath}`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    } finally {
+      if (handle !== null) {
+        try { fs.closeSync(handle); } catch {}
+        try { fs.rmSync(lockPath, { force: true }); } catch {}
+      }
+    }
+  }
+}
+
+function renderWorkspaceCurrentIndexMarkdown(index) {
+  const lines = ['# Overtli Task Manager sessions', '', `Active sessions: ${index.activeSessionCount}`, ''];
+  if (!index.sessions.length) lines.push('No active session-scoped routes.');
+  else {
+    lines.push('| Session | Route | Current | State file |', '|---|---|---|---|');
+    for (const item of index.sessions) {
+      lines.push(`| \`${item.sessionKey}\` | ${markdownEscapeCell(item.goal || item.runId)} | ${markdownEscapeCell(item.currentTaskTitle || '—')} | \`${item.paths?.currentJson || '—'}\` |`);
+    }
+  }
+  lines.push('', '_Use the session-scoped state path returned by OTM tools; this workspace file is an index, not a mutable route._');
+  return `${lines.join('\n')}\n`;
 }
 
 export function renderSummaryMarkdown(summary) {

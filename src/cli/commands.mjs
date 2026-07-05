@@ -115,16 +115,18 @@ function parseFlags(items) {
 }
 
 function renderDoctor({ workspaceRoot, packageRoot, manager }) {
-  const current = readJson(currentJsonPath(workspaceRoot), null);
   const active = manager.snapshot({ workspaceRoot }).run;
+  const current = readJson(currentJsonPath(workspaceRoot, active?.sessionId), null);
+  const index = readJson(currentJsonPath(workspaceRoot), null);
   const lines = [];
   lines.push('## Overtli Task Manager doctor');
   lines.push('');
   lines.push(`Workspace: \`${workspaceRoot}\``);
   lines.push(`Package: \`${packageRoot}\``);
   lines.push(`Storage: \`${manager.store.kind}\``);
-  lines.push(`Active route: ${active ? `yes — ${active.id}` : 'no'}`);
-  lines.push(`current.json: ${current ? 'present' : 'not present'}`);
+  lines.push(`Active route for session: ${active ? `yes — ${active.id}` : 'no'}`);
+  lines.push(`Session current.json: ${current ? 'present' : 'not present'}`);
+  lines.push(`Active workspace sessions: ${index?.activeSessionCount ?? manager.store.listActiveRuns(workspaceRoot).length}`);
   const overridePath = path.join(workspaceRoot, 'AGENTS.override.md');
   if (pathExists(overridePath) && readText(overridePath, '').trim()) {
     lines.push('AGENTS override: present; `otm install` patches root `AGENTS.md` by default. Use `--agents-file AGENTS.override.md` only when you explicitly want to patch the override file.');

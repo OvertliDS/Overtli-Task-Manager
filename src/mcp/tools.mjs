@@ -1,7 +1,7 @@
 export const tools = [
   {
     name: 'otm_start',
-    description: 'Start a new Overtli Task Manager route for a non-trivial Codex task. The model should analyze all available prompt/context first and pass specific tasks/internalSteps when possible. Returns chat Markdown and writes current.json/current.md.',
+    description: 'Start a new session-scoped Overtli Task Manager route for a non-trivial Codex task. Routes are isolated by workspace plus CODEX_THREAD_ID unless sessionId is explicit. Returns chat Markdown and writes canonical session current files plus the workspace session index.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -31,6 +31,7 @@ export const tools = [
       type: 'object',
       properties: {
         workspaceRoot: { type: 'string' },
+        sessionId: { type: 'string', description: 'Optional explicit session scope. Defaults to OTM_SESSION_ID or CODEX_THREAD_ID.' },
         runId: { type: 'string' },
         prompt: { type: 'string' },
         mode: { type: 'string', enum: ['append', 'steer', 'continue', 'replace'] },
@@ -42,12 +43,12 @@ export const tools = [
   {
     name: 'otm_snapshot',
     description: 'Return the current route snapshot as Markdown and structured JSON. Use for chat-visible status updates.',
-    inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, runId: { type: 'string' } } }
+    inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, sessionId: { type: 'string' }, runId: { type: 'string' } } }
   },
   {
     name: 'otm_start_task',
-    description: 'Mark one route segment active before doing related work. Use an exact taskId from the latest OTM snapshot/current.json; do not guess ids from task titles.',
-    inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, runId: { type: 'string' }, taskId: { type: 'string' }, note: { type: 'string' } }, required: ['taskId'] }
+    description: 'Mark one route segment active before doing related work. Use an exact taskId from the latest OTM snapshot or session-scoped current.json; do not copy ids from another chat or the workspace index.',
+    inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, sessionId: { type: 'string' }, runId: { type: 'string' }, taskId: { type: 'string' }, note: { type: 'string' } }, required: ['taskId'] }
   },
   {
     name: 'otm_progress',
@@ -56,6 +57,7 @@ export const tools = [
       type: 'object',
       properties: {
         workspaceRoot: { type: 'string' },
+        sessionId: { type: 'string' },
         runId: { type: 'string' },
         taskId: { type: 'string' },
         message: { type: 'string' },
@@ -73,32 +75,32 @@ export const tools = [
   {
     name: 'otm_complete_task',
     description: 'Mark a route segment complete using an exact taskId from the latest snapshot/current.json. Requires concrete segment-level evidence and all required internal steps must already be done or skipped unless force=true is explicitly supplied.',
-    inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, runId: { type: 'string' }, taskId: { type: 'string' }, evidence: { type: 'object', additionalProperties: true }, force: { type: 'boolean' } }, required: ['taskId', 'evidence'] }
+    inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, sessionId: { type: 'string' }, runId: { type: 'string' }, taskId: { type: 'string' }, evidence: { type: 'object', additionalProperties: true }, force: { type: 'boolean' } }, required: ['taskId', 'evidence'] }
   },
   {
     name: 'otm_block_task',
     description: 'Mark a route segment blocked with blocker evidence. Use when completion is impossible without repair or user input.',
-    inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, runId: { type: 'string' }, taskId: { type: 'string' }, reason: { type: 'string' }, requiresUser: { type: 'boolean' }, evidence: { type: 'object', additionalProperties: true } }, required: ['taskId', 'reason'] }
+    inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, sessionId: { type: 'string' }, runId: { type: 'string' }, taskId: { type: 'string' }, reason: { type: 'string' }, requiresUser: { type: 'boolean' }, evidence: { type: 'object', additionalProperties: true } }, required: ['taskId', 'reason'] }
   },
   {
     name: 'otm_drop_task',
     description: 'Drop or supersede a route segment when user steering makes it unnecessary.',
-    inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, runId: { type: 'string' }, taskId: { type: 'string' }, reason: { type: 'string' }, supersede: { type: 'boolean' } }, required: ['taskId', 'reason'] }
+    inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, sessionId: { type: 'string' }, runId: { type: 'string' }, taskId: { type: 'string' }, reason: { type: 'string' }, supersede: { type: 'boolean' } }, required: ['taskId', 'reason'] }
   },
   {
     name: 'otm_audit_stop',
     description: 'Audit whether Codex may stop. If required segments remain, continue instead of finalizing.',
-    inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, runId: { type: 'string' } } }
+    inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, sessionId: { type: 'string' }, runId: { type: 'string' } } }
   },
   {
     name: 'otm_finalize_turn',
     description: 'Write a turn summary and checkpoint memory. Use after otm_audit_stop passes, show the returned Markdown summary to the user, then call otm_clear_current.',
-    inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, runId: { type: 'string' }, outcome: { type: 'string' }, nextSteps: { type: 'array', items: { type: 'string' } }, allowIncomplete: { type: 'boolean' }, clearCurrent: { type: 'boolean' }, clear: { type: 'boolean' }, deleteFiles: { type: 'boolean' } } }
+    inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, sessionId: { type: 'string' }, runId: { type: 'string' }, outcome: { type: 'string' }, nextSteps: { type: 'array', items: { type: 'string' } }, allowIncomplete: { type: 'boolean' }, clearCurrent: { type: 'boolean' }, clear: { type: 'boolean' }, deleteFiles: { type: 'boolean' } } }
   },
   {
     name: 'otm_clear_current',
     description: 'Clear active current.json/current.md after summary is saved. Defaults to a tombstone instead of deleting files.',
-    inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, runId: { type: 'string' }, deleteFiles: { type: 'boolean' } } }
+    inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, sessionId: { type: 'string' }, runId: { type: 'string' }, deleteFiles: { type: 'boolean' } } }
   },
   {
     name: 'otm_cleanup_workspace',
@@ -138,6 +140,6 @@ export const tools = [
   {
     name: 'otm_doctor',
     description: 'Diagnose OTM storage, active route, current.json, and install state.',
-    inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' } } }
+    inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, sessionId: { type: 'string' } } }
   }
 ];

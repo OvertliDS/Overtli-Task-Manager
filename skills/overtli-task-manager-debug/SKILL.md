@@ -6,7 +6,7 @@ description: Diagnose Overtli Task Manager problems including stale current.json
 # Debug Overtli Task Manager
 
 1. Run `otm_doctor`.
-2. Inspect `.codex/overtli-task-manager/current.json` if present.
+2. Inspect `.codex/overtli-task-manager/current.json` as the workspace session index, then inspect the current chat's session-scoped state path under `.codex/overtli-task-manager/sessions/` as reported by `otm_snapshot` or `otm_doctor`.
 3. Check that the repository contains a single OTM AGENTS block.
 4. Check `.codex/hooks.json` for one OTM command per supported event.
 5. Check `.agents/skills` for the OTM skills.

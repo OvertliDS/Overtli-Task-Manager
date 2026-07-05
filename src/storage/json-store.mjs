@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { ensureDir, readJson, atomicWriteJson } from '../core/fs-utils.mjs';
 import { nowIso } from '../core/ids.mjs';
@@ -7,11 +8,12 @@ export class JsonStore {
     this.kind = 'json';
     this.stateDir = stateDir;
     this.filePath = path.join(stateDir, 'state.json');
+    this.lockPath = path.join(stateDir, 'state.lock');
     ensureDir(stateDir);
   }
 
   init() {
-    this.#write(this.#read());
+    this.#withLock(() => this.#write(this.#read()));
   }
 
   #empty() {
@@ -36,10 +38,38 @@ export class JsonStore {
   }
 
   transaction(fn) {
-    const data = this.#read();
-    const result = fn(data);
-    this.#write(data);
-    return result;
+    return this.#withLock(() => {
+      const data = this.#read();
+      const result = fn(data);
+      this.#write(data);
+      return result;
+    });
+  }
+
+  #withLock(fn) {
+    const deadline = Date.now() + 5_000;
+    while (true) {
+      let handle = null;
+      try {
+        handle = fs.openSync(this.lockPath, 'wx');
+        fs.writeFileSync(handle, `${process.pid}\n${new Date().toISOString()}\n`, 'utf8');
+        return fn();
+      } catch (error) {
+        if (error?.code !== 'EEXIST') throw error;
+        const stat = statSafe(this.lockPath);
+        if (stat && Date.now() - stat.mtimeMs > 30_000) {
+          try { fs.rmSync(this.lockPath, { force: true }); } catch {}
+          continue;
+        }
+        if (Date.now() >= deadline) throw new Error(`Timed out waiting for OTM JSON store lock: ${this.lockPath}`);
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+      } finally {
+        if (handle !== null) {
+          try { fs.closeSync(handle); } catch {}
+          try { fs.rmSync(this.lockPath, { force: true }); } catch {}
+        }
+      }
+    }
   }
 
   createRun(run) {
@@ -62,11 +92,33 @@ export class JsonStore {
     return this.#read().runs.find((item) => item.id === id) || null;
   }
 
-  getActiveRun(workspaceRoot) {
+  getActiveRun(workspaceRoot, sessionId) {
+    const scoped = arguments.length >= 2;
     const runs = this.#read().runs
-      .filter((run) => run.workspaceRoot === workspaceRoot && ['active', 'blocked', 'paused'].includes(run.status))
+      .filter((run) => run.workspaceRoot === workspaceRoot
+        && (!scoped || (run.sessionId || null) === (sessionId || null))
+        && ['active', 'blocked', 'paused'].includes(run.status))
       .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
     return runs[0] || null;
+  }
+
+  listActiveRuns(workspaceRoot) {
+    return this.#read().runs
+      .filter((run) => run.workspaceRoot === workspaceRoot && ['active', 'blocked', 'paused'].includes(run.status))
+      .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+  }
+
+  claimLegacyActiveRun(workspaceRoot, sessionId, metadata = {}) {
+    return this.transaction((data) => {
+      const run = data.runs
+        .filter((item) => item.workspaceRoot === workspaceRoot && !item.sessionId && ['active', 'blocked', 'paused'].includes(item.status))
+        .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))[0];
+      if (!run) return null;
+      run.sessionId = sessionId;
+      run.metadata = { ...(run.metadata || {}), ...metadata };
+      run.updatedAt = nowIso();
+      return run;
+    });
   }
 
   listRuns(workspaceRoot, limit = 20) {
@@ -202,4 +254,8 @@ export class JsonStore {
       };
     });
   }
+}
+
+function statSafe(filePath) {
+  try { return fs.statSync(filePath); } catch { return null; }
 }

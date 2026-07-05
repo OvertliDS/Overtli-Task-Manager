@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createTaskManager } from '../src/core/manager.mjs';
 import { deriveFallbackTasks } from '../src/core/planner.mjs';
-import { findWorkspaceRoot, workspaceScratchDir, workspaceTempDir } from '../src/core/fs-utils.mjs';
+import { currentJsonPath, findWorkspaceRoot, workspaceScratchDir, workspaceTempDir } from '../src/core/fs-utils.mjs';
 import { loadBetterSqlite3 } from '../src/storage/sqlite-store.mjs';
 import { installWorkspace } from '../src/install/install-workspace.mjs';
 import { installGlobal } from '../src/install/install-global.mjs';
@@ -24,12 +25,18 @@ function tempWorkspace(prefix = 'otm-test-') {
 
 function testEnv(name) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), `${name}-state-`));
-  return { ...process.env, OTM_STORAGE: 'json', OTM_STATE_DIR: stateDir };
+  const env = { ...process.env, OTM_STORAGE: 'json', OTM_STATE_DIR: stateDir };
+  delete env.CODEX_THREAD_ID;
+  delete env.OTM_SESSION_ID;
+  return env;
 }
 
 function sqliteTestEnv(name) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), `${name}-sqlite-state-`));
-  return { ...process.env, OTM_STORAGE: 'sqlite', OTM_STATE_DIR: stateDir };
+  const env = { ...process.env, OTM_STORAGE: 'sqlite', OTM_STATE_DIR: stateDir };
+  delete env.CODEX_THREAD_ID;
+  delete env.OTM_SESSION_ID;
+  return env;
 }
 
 async function withCapturedStdout(fn) {
@@ -121,6 +128,110 @@ test('route lifecycle requires evidence and clears after finalization', () => {
   assert.doesNotMatch(JSON.stringify(finalized.summaryJson), /:null/);
   assert.ok(fs.existsSync(path.join(workspaceRoot, '.codex/overtli-task-manager/current.json')));
   assert.equal(fs.existsSync(scratchFile), false);
+});
+
+test('concurrent Codex sessions keep independent routes and current files in one workspace', () => {
+  const workspaceRoot = tempWorkspace('otm-session-isolation-');
+  const baseEnv = testEnv('otm-session-isolation');
+  const sessionA = 'thread-session-a';
+  const sessionB = 'thread-session-b';
+  const managerA = createTaskManager({ cwd: workspaceRoot, env: { ...baseEnv, CODEX_THREAD_ID: sessionA } });
+  const managerB = createTaskManager({ cwd: workspaceRoot, env: { ...baseEnv, CODEX_THREAD_ID: sessionB } });
+
+  const startedA = managerA.start({ workspaceRoot, goal: 'Route A', tasks: [{ title: 'Task A' }] });
+  const startedB = managerB.start({ workspaceRoot, replaceExisting: true, goal: 'Route B', tasks: [{ title: 'Task B' }] });
+
+  assert.equal(managerA.store.getRun(startedA.run.id).status, 'active');
+  assert.equal(managerB.store.getRun(startedB.run.id).status, 'active');
+  assert.equal(managerA.snapshot({ workspaceRoot, write: false }).run.id, startedA.run.id);
+  assert.equal(managerB.snapshot({ workspaceRoot, write: false }).run.id, startedB.run.id);
+  assert.notEqual(startedA.snapshot.paths.currentJson, startedB.snapshot.paths.currentJson);
+  assert.ok(fs.existsSync(path.join(workspaceRoot, startedA.snapshot.paths.currentJson)));
+  assert.ok(fs.existsSync(path.join(workspaceRoot, startedB.snapshot.paths.currentJson)));
+
+  const index = JSON.parse(fs.readFileSync(currentJsonPath(workspaceRoot), 'utf8'));
+  assert.equal(index.schemaVersion, 'otm.current-index.v1');
+  assert.equal(index.activeSessionCount, 2);
+  assert.throws(
+    () => managerA.snapshot({ workspaceRoot, runId: startedB.run.id, write: false }),
+    /different Codex session/
+  );
+
+  const scratchA = workspaceScratchDir(workspaceRoot, sessionA);
+  const scratchB = workspaceScratchDir(workspaceRoot, sessionB);
+  fs.mkdirSync(scratchA, { recursive: true });
+  fs.mkdirSync(scratchB, { recursive: true });
+  fs.writeFileSync(path.join(scratchA, 'a.txt'), 'a', 'utf8');
+  fs.writeFileSync(path.join(scratchB, 'b.txt'), 'b', 'utf8');
+  managerA.clearCurrent({ workspaceRoot, runId: startedA.run.id });
+  assert.equal(fs.existsSync(path.join(scratchA, 'a.txt')), false);
+  assert.equal(fs.existsSync(path.join(scratchB, 'b.txt')), true);
+  assert.equal(managerB.snapshot({ workspaceRoot, write: false }).run.id, startedB.run.id);
+  assert.equal(JSON.parse(fs.readFileSync(currentJsonPath(workspaceRoot), 'utf8')).activeSessionCount, 1);
+});
+
+test('separate OTM processes preserve JSON runs and the workspace session index', async () => {
+  const workspaceRoot = tempWorkspace('otm-process-isolation-');
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'otm-process-state-'));
+  const packageRoot = fileURLToPath(new URL('..', import.meta.url));
+  const script = `
+    import { createTaskManager } from './src/core/manager.mjs';
+    const workspaceRoot = process.env.OTM_TEST_WORKSPACE;
+    const manager = createTaskManager({ cwd: workspaceRoot, env: process.env });
+    manager.start({ workspaceRoot, goal: process.env.CODEX_THREAD_ID, tasks: [{ title: 'Concurrent child task' }] });
+  `;
+  const runChild = (sessionId) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+      cwd: packageRoot,
+      env: { ...process.env, OTM_STORAGE: 'json', OTM_STATE_DIR: stateDir, OTM_TEST_WORKSPACE: workspaceRoot, CODEX_THREAD_ID: sessionId },
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    let stderr = '';
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('exit', (code) => code === 0 ? resolve() : reject(new Error(`Child ${sessionId} exited ${code}: ${stderr}`)));
+  });
+
+  await Promise.all([runChild('process-session-a'), runChild('process-session-b')]);
+
+  const state = JSON.parse(fs.readFileSync(path.join(stateDir, 'json', 'state.json'), 'utf8'));
+  assert.equal(state.runs.length, 2);
+  assert.deepEqual(new Set(state.runs.map((run) => run.sessionId)), new Set(['process-session-a', 'process-session-b']));
+  const index = JSON.parse(fs.readFileSync(currentJsonPath(workspaceRoot), 'utf8'));
+  assert.equal(index.activeSessionCount, 2);
+  assert.equal(index.sessions.length, 2);
+});
+
+test('the same Codex session keeps routes independent across workspaces', () => {
+  const workspaceA = tempWorkspace('otm-workspace-a-');
+  const workspaceB = tempWorkspace('otm-workspace-b-');
+  const env = { ...testEnv('otm-workspace-isolation'), CODEX_THREAD_ID: 'shared-thread' };
+  const manager = createTaskManager({ cwd: workspaceA, env });
+  const routeA = manager.start({ workspaceRoot: workspaceA, goal: 'Workspace A', tasks: [{ title: 'A' }] });
+  const routeB = manager.start({ workspaceRoot: workspaceB, replaceExisting: true, goal: 'Workspace B', tasks: [{ title: 'B' }] });
+
+  assert.equal(manager.store.getRun(routeA.run.id).status, 'active');
+  assert.equal(manager.store.getRun(routeB.run.id).status, 'active');
+  assert.equal(manager.snapshot({ workspaceRoot: workspaceA, write: false }).run.id, routeA.run.id);
+  assert.equal(manager.snapshot({ workspaceRoot: workspaceB, write: false }).run.id, routeB.run.id);
+});
+
+test('a legacy unscoped active route is claimed once by the first scoped session', () => {
+  const workspaceRoot = tempWorkspace('otm-legacy-claim-');
+  const baseEnv = testEnv('otm-legacy-claim');
+  delete baseEnv.CODEX_THREAD_ID;
+  delete baseEnv.OTM_SESSION_ID;
+  const legacyManager = createTaskManager({ cwd: workspaceRoot, env: baseEnv });
+  const legacy = legacyManager.start({ workspaceRoot, goal: 'Legacy route', tasks: [{ title: 'Legacy task' }] });
+
+  const managerA = createTaskManager({ cwd: workspaceRoot, env: { ...baseEnv, CODEX_THREAD_ID: 'claiming-thread' } });
+  assert.equal(managerA.snapshot({ workspaceRoot, write: false }).run.id, legacy.run.id);
+  assert.equal(managerA.store.getRun(legacy.run.id).sessionId, 'claiming-thread');
+
+  const managerB = createTaskManager({ cwd: workspaceRoot, env: { ...baseEnv, CODEX_THREAD_ID: 'other-thread' } });
+  const routeB = managerB.start({ workspaceRoot, goal: 'Other route', tasks: [{ title: 'Other task' }] });
+  assert.notEqual(routeB.run.id, legacy.run.id);
+  assert.equal(managerA.store.getRun(legacy.run.id).status, 'active');
 });
 
 test('read-only snapshots do not rewrite current state files', async () => {

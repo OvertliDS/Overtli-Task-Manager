@@ -16,7 +16,7 @@ Use this skill when the user asks Codex to build, fix, refactor, research, revie
 5. If the user is asking for a phase plan, roadmap, review, or documentation rather than implementation now, make the route reflect that planning/documentation task instead of converting it into implementation work.
 6. Show the returned Markdown snapshot in chat.
 7. Keep one active route segment whenever possible by calling `otm_start_task` before focused work.
-8. Before calling task-scoped OTM tools, use exact task ids from the latest OTM snapshot or `.codex/overtli-task-manager/current.json`. Never guess ids from titles, memory, or prior route state.
+8. OTM automatically scopes routes by the current workspace and `CODEX_THREAD_ID` (or explicit `sessionId`). Before task-scoped calls, use exact task ids from the latest OTM snapshot or the session-scoped `current.json` path it returns. The top-level `current.json` is a workspace session index; never copy ids from another chat, the index, memory, or prior route state.
 9. Use `otm_progress` for meaningful checkpoints: route created, task started, each internal step completed, steering change, blocker, validation start, validation result, and finalization.
 10. Mark internal steps complete as soon as their evidence exists. Do not finish the project and then backfill the internal checklist.
 11. Complete tasks with `otm_complete_task` only when evidence is concrete and every required internal step is terminal (`done` or intentionally `skipped`): files changed, commands run, tests passed, docs reviewed, or user-confirmed decision.

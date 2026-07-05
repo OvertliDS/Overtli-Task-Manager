@@ -10,6 +10,7 @@ export function patchGitignore({ workspaceRoot, dryRun = false } = {}) {
   const block = `${BLOCK_BEGIN}
 .codex/overtli-task-manager/current.json
 .codex/overtli-task-manager/current.md
+.codex/overtli-task-manager/sessions/
 .codex/overtli-task-manager/summaries/
 .codex/overtli-task-manager/cache/
 .codex/overtli-task-manager/*.tmp

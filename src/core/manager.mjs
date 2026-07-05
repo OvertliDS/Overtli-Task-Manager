@@ -3,9 +3,10 @@ import { createStore } from '../storage/store.mjs';
 import { assertCondition, OtmError } from './errors.mjs';
 import { newId, nowIso, sha256, stableTaskKey, shortHash } from './ids.mjs';
 import { cleanupWorkspaceStateTempFiles, findWorkspaceRoot, workspaceStateDir, ensureDir, summariesDir, atomicWriteJson, atomicWriteText, currentJsonPath, currentMarkdownPath, removeFileIfExists, workspaceTempDir } from './fs-utils.mjs';
-import { buildSnapshot, renderSnapshotMarkdown, renderSummaryMarkdown, renderDeltaMarkdown, writeCurrentFiles } from './renderer.mjs';
+import { buildSnapshot, renderSnapshotMarkdown, renderSummaryMarkdown, renderDeltaMarkdown, writeCurrentFiles, writeWorkspaceCurrentIndex } from './renderer.mjs';
 import { combinePromptContext, deriveFallbackTasks } from './planner.mjs';
 import { CURRENT_SCHEMA_VERSION, MANAGER_NAME, TASK_STATUSES } from './constants.mjs';
+import { resolveSessionId } from './session-scope.mjs';
 
 const DEFAULT_HISTORY_RETENTION_DAYS = 7;
 
@@ -32,14 +33,28 @@ export function createTaskManager(options = {}) {
     return event;
   }
 
-  function getRunOrActive({ runId, workspaceRoot }) {
+  function getScopedActiveRun(workspaceRoot, sessionId, { claimLegacy = true } = {}) {
+    let run = store.getActiveRun(workspaceRoot, sessionId);
+    if (!run && sessionId && claimLegacy) {
+      run = store.claimLegacyActiveRun(workspaceRoot, sessionId, { legacySessionClaimedAt: nowIso() });
+      if (run) {
+        recordEvent(run.id, 'legacy_session_claimed', { sessionId }, { sessionId });
+      }
+    }
+    return run;
+  }
+
+  function getRunOrActive({ runId, workspaceRoot, sessionId }) {
     if (runId) {
-      const run = store.getRun(runId);
+      let run = store.getRun(runId);
       assertCondition(run, `Run not found: ${runId}`, 'RUN_NOT_FOUND');
+      assertCondition(sameWorkspace(run.workspaceRoot, workspaceRoot), 'Run belongs to a different workspace.', 'WORKSPACE_SCOPE_MISMATCH');
+      assertCondition(!sessionId || !run.sessionId || run.sessionId === sessionId, 'Run belongs to a different Codex session.', 'SESSION_SCOPE_MISMATCH');
+      if (sessionId && !run.sessionId) run = store.updateRun(run.id, { sessionId, metadata: { ...(run.metadata || {}), legacySessionClaimedAt: nowIso() } });
       return run;
     }
-    const run = store.getActiveRun(workspaceRoot);
-    assertCondition(run, 'No active Overtli Task Manager route exists for this workspace.', 'NO_ACTIVE_RUN');
+    const run = getScopedActiveRun(workspaceRoot, sessionId);
+    assertCondition(run, 'No active Overtli Task Manager route exists for this workspace and Codex session.', 'NO_ACTIVE_RUN');
     return run;
   }
 
@@ -158,8 +173,9 @@ export function createTaskManager(options = {}) {
 
   function start(args = {}) {
     const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
+    const sessionId = resolveSessionId(args, env);
     ensureDir(workspaceStateDir(workspaceRoot));
-    const active = store.getActiveRun(workspaceRoot);
+    const active = getScopedActiveRun(workspaceRoot, sessionId);
     if (active && args.replaceExisting !== true) {
       const snapshot = snapshotForRun(active, { kind: 'reuse_active', message: 'An active route already exists. Use reconcile to update it or pass replaceExisting=true to replace it.', at: nowIso() });
       return { run: active, snapshot, markdown: renderSnapshotMarkdown(snapshot), reused: true };
@@ -182,7 +198,7 @@ export function createTaskManager(options = {}) {
     const run = {
       id: args.runId || newId('run'),
       workspaceRoot,
-      sessionId: args.sessionId || null,
+      sessionId,
       turnId: args.turnId || null,
       promptHash: sha256(plannerPrompt),
       goal,
@@ -217,7 +233,8 @@ export function createTaskManager(options = {}) {
 
   function reconcile(args = {}) {
     const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
-    let run = getRunOrActive({ runId: args.runId, workspaceRoot });
+    const sessionId = resolveSessionId(args, env);
+    let run = getRunOrActive({ runId: args.runId, workspaceRoot, sessionId });
     const mode = args.mode || 'append';
     const now = nowIso();
     const tasks = store.getTasks(run.id);
@@ -242,7 +259,7 @@ export function createTaskManager(options = {}) {
           changed += 1;
         }
       } else if (change.action === 'activate') {
-        markTaskActive({ runId: run.id, taskId: change.taskId, note: change.reason || 'Activated by reconciliation', silent: true });
+        markTaskActive({ workspaceRoot, sessionId, runId: run.id, taskId: change.taskId, note: change.reason || 'Activated by reconciliation', silent: true });
         preferredCurrentId = change.taskId;
         forcePreferredCurrent = true;
         changed += 1;
@@ -285,7 +302,8 @@ export function createTaskManager(options = {}) {
 
   function markTaskActive(args = {}) {
     const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
-    let run = getRunOrActive({ runId: args.runId, workspaceRoot });
+    const sessionId = resolveSessionId(args, env);
+    let run = getRunOrActive({ runId: args.runId, workspaceRoot, sessionId });
     const task = store.getTask(args.taskId || run.currentTaskId);
     assertCondition(task && task.runId === run.id, 'Task not found in active route.', 'TASK_NOT_FOUND');
     assertCondition(!['done', 'dropped', 'superseded'].includes(task.status), `Cannot activate task in status ${task.status}.`, 'INVALID_TRANSITION');
@@ -303,7 +321,8 @@ export function createTaskManager(options = {}) {
 
   function progress(args = {}) {
     const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
-    let run = getRunOrActive({ runId: args.runId, workspaceRoot });
+    const sessionId = resolveSessionId(args, env);
+    let run = getRunOrActive({ runId: args.runId, workspaceRoot, sessionId });
     const targetTaskId = args.taskId || (hasInternalStepUpdate(args) ? run.currentTaskId : null);
     if (targetTaskId) {
       const task = store.getTask(targetTaskId);
@@ -322,7 +341,8 @@ export function createTaskManager(options = {}) {
 
   function completeTask(args = {}) {
     const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
-    let run = getRunOrActive({ runId: args.runId, workspaceRoot });
+    const sessionId = resolveSessionId(args, env);
+    let run = getRunOrActive({ runId: args.runId, workspaceRoot, sessionId });
     const taskId = args.taskId || run.currentTaskId;
     const task = store.getTask(taskId);
     assertCondition(task && task.runId === run.id, 'Task not found in active route.', 'TASK_NOT_FOUND');
@@ -341,7 +361,8 @@ export function createTaskManager(options = {}) {
 
   function blockTask(args = {}) {
     const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
-    let run = getRunOrActive({ runId: args.runId, workspaceRoot });
+    const sessionId = resolveSessionId(args, env);
+    let run = getRunOrActive({ runId: args.runId, workspaceRoot, sessionId });
     const task = store.getTask(args.taskId || run.currentTaskId);
     assertCondition(task && task.runId === run.id, 'Task not found in active route.', 'TASK_NOT_FOUND');
     const evidence = evidenceFromArgs(args.evidence || { kind: 'blocker', summary: args.reason || 'Task blocked' });
@@ -358,7 +379,8 @@ export function createTaskManager(options = {}) {
 
   function dropTask(args = {}) {
     const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
-    let run = getRunOrActive({ runId: args.runId, workspaceRoot });
+    const sessionId = resolveSessionId(args, env);
+    let run = getRunOrActive({ runId: args.runId, workspaceRoot, sessionId });
     const task = store.getTask(args.taskId);
     assertCondition(task && task.runId === run.id, 'Task not found in active route.', 'TASK_NOT_FOUND');
     store.updateTask(task.id, { status: args.supersede ? 'superseded' : 'dropped', metadata: { ...(task.metadata || {}), reason: args.reason || null } });
@@ -371,9 +393,13 @@ export function createTaskManager(options = {}) {
 
   function auditStop(args = {}) {
     const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
-    const run = args.runId ? store.getRun(args.runId) : store.getActiveRun(workspaceRoot);
+    const sessionId = resolveSessionId(args, env);
+    let run = null;
+    try { run = getRunOrActive({ runId: args.runId, workspaceRoot, sessionId }); } catch (error) {
+      if (error?.code !== 'NO_ACTIVE_RUN') throw error;
+    }
     if (!run) {
-      const snapshot = clearedSnapshot(workspaceRoot, { message: 'No active route. Stop is allowed.' });
+      const snapshot = clearedSnapshot(workspaceRoot, { message: 'No active route. Stop is allowed.' }, null, sessionId);
       return { stopAllowed: true, run: null, snapshot, markdown: renderSnapshotMarkdown(snapshot) };
     }
     const tasks = store.getTasks(run.id);
@@ -391,8 +417,9 @@ export function createTaskManager(options = {}) {
 
   function finalizeTurn(args = {}) {
     const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
-    let run = getRunOrActive({ runId: args.runId, workspaceRoot });
-    const audit = auditStop({ workspaceRoot, runId: run.id });
+    const sessionId = resolveSessionId(args, env);
+    let run = getRunOrActive({ runId: args.runId, workspaceRoot, sessionId });
+    const audit = auditStop({ workspaceRoot, runId: run.id, sessionId });
     if (!audit.stopAllowed && args.allowIncomplete !== true) {
       throw new OtmError('Cannot finalize while required route segments remain open.', { code: 'STOP_AUDIT_FAILED', details: audit.remainingRequired });
     }
@@ -414,7 +441,7 @@ export function createTaskManager(options = {}) {
     recordEvent(run.id, 'turn_finalized', { summaryId, complete: audit.stopAllowed }, args);
     const snapshot = snapshotForRun(run, { kind: 'turn_finalized', message: 'Turn summary written. Active route can now be cleared.', at: createdAt });
     if (args.clear === true || args.clearCurrent === true) {
-      const cleared = clearCurrent({ workspaceRoot, runId: run.id, deleteFiles: Boolean(args.deleteFiles) });
+      const cleared = clearCurrent({ workspaceRoot, runId: run.id, sessionId, deleteFiles: Boolean(args.deleteFiles) });
       return { run, summary, summaryJson, summaryMd, snapshot: cleared.snapshot || snapshot, cleared, markdown: `${summaryMd}
 ${cleared.markdown || ''}` };
     }
@@ -423,21 +450,26 @@ ${cleared.markdown || ''}` };
 
   function clearCurrent(args = {}) {
     const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
-    const run = args.runId ? store.getRun(args.runId) : store.getActiveRun(workspaceRoot);
+    const sessionId = resolveSessionId(args, env);
+    let run = null;
+    try { run = getRunOrActive({ runId: args.runId, workspaceRoot, sessionId }); } catch (error) {
+      if (error?.code !== 'NO_ACTIVE_RUN') throw error;
+    }
     if (run) {
       store.updateRun(run.id, { status: args.status || 'cleared', finalizedAt: run.finalizedAt || nowIso() });
       recordEvent(run.id, 'current_cleared', { mode: args.deleteFiles ? 'delete' : 'tombstone' }, args);
     }
     if (args.deleteFiles) {
-      removeFileIfExists(currentJsonPath(workspaceRoot));
-      removeFileIfExists(currentMarkdownPath(workspaceRoot));
-      cleanupWorkspaceStateTempFiles(workspaceRoot, { minAgeMs: 0, scratchMaxAgeMs: 0 });
+      removeFileIfExists(currentJsonPath(workspaceRoot, sessionId));
+      removeFileIfExists(currentMarkdownPath(workspaceRoot, sessionId));
+      if (sessionId) writeWorkspaceCurrentIndex(workspaceRoot);
+      cleanupWorkspaceStateTempFiles(workspaceRoot, { sessionId, minAgeMs: 0, scratchMaxAgeMs: 0 });
       pruneHistoryQuietly(workspaceRoot);
       return { cleared: true, deleted: true, markdown: '## ✅ Overtli Task Manager\n\nActive route cleared.\n' };
     }
-    const tombstone = clearedSnapshot(workspaceRoot, { message: 'Active route cleared after summary.' }, run?.id || null);
+    const tombstone = clearedSnapshot(workspaceRoot, { message: 'Active route cleared after summary.' }, run?.id || null, sessionId || run?.sessionId || null);
     writeCurrentFiles(workspaceRoot, tombstone);
-    cleanupWorkspaceStateTempFiles(workspaceRoot, { minAgeMs: 0, scratchMaxAgeMs: 0 });
+    cleanupWorkspaceStateTempFiles(workspaceRoot, { sessionId, minAgeMs: 0, scratchMaxAgeMs: 0 });
     pruneHistoryQuietly(workspaceRoot);
     return { cleared: true, deleted: false, snapshot: tombstone, markdown: renderSnapshotMarkdown(tombstone) };
   }
@@ -478,9 +510,13 @@ ${cleared.markdown || ''}` };
 
   function snapshot(args = {}) {
     const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
-    const run = args.runId ? store.getRun(args.runId) : store.getActiveRun(workspaceRoot);
+    const sessionId = resolveSessionId(args, env);
+    let run = null;
+    try { run = getRunOrActive({ runId: args.runId, workspaceRoot, sessionId }); } catch (error) {
+      if (error?.code !== 'NO_ACTIVE_RUN') throw error;
+    }
     if (!run) {
-      const empty = clearedSnapshot(workspaceRoot, { message: 'No active route.' });
+      const empty = clearedSnapshot(workspaceRoot, { message: 'No active route.' }, null, sessionId);
       if (args.write !== false) writeCurrentFiles(workspaceRoot, empty);
       return { run: null, snapshot: empty, markdown: renderSnapshotMarkdown(empty) };
     }
@@ -625,12 +661,13 @@ function renderPruneHistoryMarkdown(result = {}) {
   return `${lines.join('\n')}\n`;
 }
 
-function clearedSnapshot(workspaceRoot, lastUpdate = null, lastRunId = null) {
+function clearedSnapshot(workspaceRoot, lastUpdate = null, lastRunId = null, sessionId = null) {
   return omitEmpty({
     schemaVersion: CURRENT_SCHEMA_VERSION,
     manager: MANAGER_NAME,
     status: 'cleared',
     lastRunId: lastRunId || undefined,
+    sessionId: sessionId || undefined,
     workspaceRoot,
     goal: 'No active route',
     routeRevision: 0,
@@ -643,8 +680,8 @@ function clearedSnapshot(workspaceRoot, lastUpdate = null, lastRunId = null) {
     lastUpdate: lastUpdate || undefined,
     storage: { kind: 'unknown' },
     paths: {
-      currentJson: '.codex/overtli-task-manager/current.json',
-      currentMarkdown: '.codex/overtli-task-manager/current.md'
+      currentJson: path.relative(workspaceRoot, currentJsonPath(workspaceRoot, sessionId)).split(path.sep).join('/'),
+      currentMarkdown: path.relative(workspaceRoot, currentMarkdownPath(workspaceRoot, sessionId)).split(path.sep).join('/')
     },
     updatedAt: nowIso()
   });
@@ -652,6 +689,14 @@ function clearedSnapshot(workspaceRoot, lastUpdate = null, lastRunId = null) {
 
 function omitEmpty(value) {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined && item !== null));
+}
+
+function sameWorkspace(left, right) {
+  const normalize = (value) => {
+    const resolved = path.resolve(value);
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  };
+  return normalize(left) === normalize(right);
 }
 
 function normalizeTaskMetadata(input, acceptanceCriteria) {

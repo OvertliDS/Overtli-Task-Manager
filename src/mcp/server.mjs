@@ -9,6 +9,7 @@ import { installWorkspace, renderInstallResult } from '../install/install-worksp
 import { reviewProjectContext } from '../context/project-review.mjs';
 import { tools } from './tools.mjs';
 import { toMcpResult } from './result.mjs';
+import { resolveSessionId } from '../core/session-scope.mjs';
 
 export async function runMcpServer({ env = process.env } = {}) {
   const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -17,7 +18,7 @@ export async function runMcpServer({ env = process.env } = {}) {
     { name: 'overtli_task_manager', version: '0.1.0' },
     {
       capabilities: { tools: {}, resources: {} },
-      instructions: 'Overtli Task Manager keeps Codex work organized as route checklists. Before otm_start/otm_reconcile, thoroughly analyze the full user request and pass specific route segments with internalSteps. Before task-scoped OTM calls, use exact task ids from the latest snapshot/current.json; never guess ids from titles, memory, or prior route state. Use otm_progress to mark internal steps complete as work happens, use otm_complete_task only after internal steps are terminal and segment-level evidence exists, call otm_audit_stop before final answers, then call otm_finalize_turn, show its Markdown summary, and call otm_clear_current.'
+      instructions: 'Overtli Task Manager keeps Codex work organized as route checklists and automatically isolates routes by workspace plus CODEX_THREAD_ID. Before otm_start/otm_reconcile, thoroughly analyze the full user request and pass specific route segments with internalSteps. Before task-scoped OTM calls, use exact task ids from the latest snapshot or its session-scoped current.json; never copy ids from another chat, the workspace index, memory, or prior route state. Use otm_progress to mark internal steps complete as work happens, use otm_complete_task only after internal steps are terminal and segment-level evidence exists, call otm_audit_stop before final answers, then call otm_finalize_turn, show its Markdown summary, and call otm_clear_current.'
     }
   );
 
@@ -26,25 +27,26 @@ export async function runMcpServer({ env = process.env } = {}) {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const name = request.params.name;
     const args = request.params.arguments || {};
-    const result = await dispatchTool({ name, args, manager, packageRoot });
+    const result = await dispatchTool({ name, args, manager, packageRoot, env });
     return toMcpResult(result);
   });
 
   server.setRequestHandler(ListResourcesRequestSchema, async () => ({
     resources: [
-      { uri: 'otm://current', name: 'OTM current JSON', mimeType: 'application/json', description: 'Active OTM route state for the current workspace.' },
-      { uri: 'otm://current.md', name: 'OTM current Markdown', mimeType: 'text/markdown', description: 'Chat-friendly OTM route state for the current workspace.' },
+      { uri: 'otm://current', name: 'OTM current JSON', mimeType: 'application/json', description: 'Active OTM route state for the current workspace and Codex session.' },
+      { uri: 'otm://current.md', name: 'OTM current Markdown', mimeType: 'text/markdown', description: 'Chat-friendly OTM route state for the current workspace and Codex session.' },
       { uri: 'otm://project-review', name: 'OTM project review', mimeType: 'text/markdown', description: 'Lightweight project awareness cache.' }
     ]
   }));
 
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
     const workspaceRoot = findWorkspaceRoot(process.cwd());
+    const sessionId = resolveSessionId({}, env);
     if (request.params.uri === 'otm://current') {
-      return { contents: [{ uri: request.params.uri, mimeType: 'application/json', text: JSON.stringify(readJson(currentJsonPath(workspaceRoot), null) || {}, null, 2) }] };
+      return { contents: [{ uri: request.params.uri, mimeType: 'application/json', text: JSON.stringify(readJson(currentJsonPath(workspaceRoot, sessionId), null) || {}, null, 2) }] };
     }
     if (request.params.uri === 'otm://current.md') {
-      return { contents: [{ uri: request.params.uri, mimeType: 'text/markdown', text: readText(currentMarkdownPath(workspaceRoot), 'No active OTM route.\n') }] };
+      return { contents: [{ uri: request.params.uri, mimeType: 'text/markdown', text: readText(currentMarkdownPath(workspaceRoot, sessionId), 'No active OTM route for this Codex session.\n') }] };
     }
     if (request.params.uri === 'otm://project-review') {
       const review = reviewProjectContext({ workspaceRoot });
@@ -57,7 +59,7 @@ export async function runMcpServer({ env = process.env } = {}) {
   await server.connect(transport);
 }
 
-async function dispatchTool({ name, args, manager, packageRoot }) {
+async function dispatchTool({ name, args, manager, packageRoot, env }) {
   switch (name) {
     case 'otm_start': return manager.start(args);
     case 'otm_reconcile': return manager.reconcile(args);
@@ -88,8 +90,10 @@ async function dispatchTool({ name, args, manager, packageRoot }) {
     }
     case 'otm_doctor': {
       const workspaceRoot = args.workspaceRoot || findWorkspaceRoot(process.cwd());
-      const snap = manager.snapshot({ workspaceRoot });
-      return { snapshot: snap.snapshot, markdown: `## OTM doctor\n\nStorage: \`${manager.store.kind}\`\nActive route: ${snap.run ? `yes — ${snap.run.id}` : 'no'}\ncurrent.json: \`${currentJsonPath(workspaceRoot)}\`\n` };
+      const sessionId = resolveSessionId(args, env);
+      const snap = manager.snapshot({ workspaceRoot, sessionId });
+      const activeSessions = manager.store.listActiveRuns(workspaceRoot).length;
+      return { snapshot: snap.snapshot, markdown: `## OTM doctor\n\nStorage: \`${manager.store.kind}\`\nSession: \`${sessionId || 'unscoped'}\`\nActive route for session: ${snap.run ? `yes — ${snap.run.id}` : 'no'}\nActive workspace sessions: ${activeSessions}\nSession current.json: \`${currentJsonPath(workspaceRoot, sessionId)}\`\nWorkspace index: \`${currentJsonPath(workspaceRoot)}\`\n` };
     }
     default:
       throw new Error(`Unknown tool: ${name}`);

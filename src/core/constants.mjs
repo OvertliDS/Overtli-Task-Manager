@@ -2,6 +2,7 @@ export const MANAGER_NAME = 'Overtli Task Manager';
 export const SERVER_NAME = 'overtli_task_manager';
 export const VERSION = '0.1.0';
 export const CURRENT_SCHEMA_VERSION = 'otm.current.v1';
+export const CURRENT_INDEX_SCHEMA_VERSION = 'otm.current-index.v1';
 export const PROJECT_SCHEMA_VERSION = 'otm.project.v1';
 export const CHECKPOINT_SCHEMA_VERSION = 'otm.checkpoint.v1';
 export const WORKSPACE_DIR = '.codex/overtli-task-manager';

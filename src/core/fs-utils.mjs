@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import { sessionScopeKey } from './session-scope.mjs';
 
 const DEFAULT_TEMP_MIN_AGE_MS = 60_000;
 const DEFAULT_SCRATCH_MAX_AGE_MS = 30 * 60 * 1000;
@@ -64,14 +65,16 @@ export function cleanupWorkspaceStateTempFiles(workspaceRoot, options = {}) {
   const stateDir = workspaceStateDir(workspaceRoot);
   const projectCacheDir = cacheDir(workspaceRoot);
   const tempDir = workspaceTempDir(workspaceRoot);
-  const scratchDir = workspaceScratchDir(workspaceRoot);
+  const scratchDirs = options.sessionId
+    ? [workspaceScratchDir(workspaceRoot, options.sessionId)]
+    : workspaceScratchDirs(workspaceRoot);
   const minAgeMs = Number.isFinite(Number(options.minAgeMs)) ? Number(options.minAgeMs) : DEFAULT_TEMP_MIN_AGE_MS;
   const scratchMaxAgeMs = Number.isFinite(Number(options.scratchMaxAgeMs)) ? Number(options.scratchMaxAgeMs) : DEFAULT_SCRATCH_MAX_AGE_MS;
   return [
     ...cleanupTempFilesInDir(stateDir, { minAgeMs }),
     ...cleanupTempFilesInDir(projectCacheDir, { minAgeMs }),
     ...cleanupTempFilesInDir(tempDir, { minAgeMs }),
-    ...cleanupScratchFilesInDir(scratchDir, { maxAgeMs: scratchMaxAgeMs })
+    ...scratchDirs.flatMap((scratchDir) => cleanupScratchFilesInDir(scratchDir, { maxAgeMs: scratchMaxAgeMs }))
   ];
 }
 
@@ -106,16 +109,21 @@ export function workspaceTempDir(workspaceRoot) {
   return path.join(workspaceStateDir(workspaceRoot), 'cache', 'tmp');
 }
 
-export function workspaceScratchDir(workspaceRoot) {
-  return path.join(workspaceStateDir(workspaceRoot), 'cache', 'scratch');
+export function workspaceScratchDir(workspaceRoot, sessionId = null) {
+  return path.join(sessionStateDir(workspaceRoot, sessionId), 'cache', 'scratch');
 }
 
-export function currentJsonPath(workspaceRoot) {
-  return path.join(workspaceStateDir(workspaceRoot), 'current.json');
+export function sessionStateDir(workspaceRoot, sessionId) {
+  const key = sessionScopeKey(sessionId);
+  return key ? path.join(workspaceStateDir(workspaceRoot), 'sessions', key) : workspaceStateDir(workspaceRoot);
 }
 
-export function currentMarkdownPath(workspaceRoot) {
-  return path.join(workspaceStateDir(workspaceRoot), 'current.md');
+export function currentJsonPath(workspaceRoot, sessionId = null) {
+  return path.join(sessionStateDir(workspaceRoot, sessionId), 'current.json');
+}
+
+export function currentMarkdownPath(workspaceRoot, sessionId = null) {
+  return path.join(sessionStateDir(workspaceRoot, sessionId), 'current.md');
 }
 
 export function summariesDir(workspaceRoot) {
@@ -183,4 +191,14 @@ function cleanupScratchFilesInDir(dir, { maxAgeMs }) {
     } catch {}
   }
   return removed;
+}
+
+function workspaceScratchDirs(workspaceRoot) {
+  const dirs = [workspaceScratchDir(workspaceRoot)];
+  const sessionsRoot = path.join(workspaceStateDir(workspaceRoot), 'sessions');
+  if (!pathExists(sessionsRoot)) return dirs;
+  for (const entry of fs.readdirSync(sessionsRoot, { withFileTypes: true })) {
+    if (entry.isDirectory()) dirs.push(path.join(sessionsRoot, entry.name, 'cache', 'scratch'));
+  }
+  return dirs;
 }

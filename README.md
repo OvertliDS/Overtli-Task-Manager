@@ -15,8 +15,9 @@ Overtli Task Manager (OTM) structures AI coding sessions into evidence-backed ro
 *   **Route Checklists:** Deconstruct complex goals into discrete segments (`pending` ➔ `active` ➔ `done` / `blocked`).
 *   **Evidence Enforcement:** Tasks can only be marked complete once concrete proof (changed files, test results, command outputs) is provided.
 *   **Chat Integration:** Renders real-time, user-friendly Markdown progress dashboards directly in your Codex chat.
-*   **Persistent Task List:** Keeps a full checked-off task list in both chat Markdown and `current.json.checklist`.
-*   **Durable State Cache:** Syncs active routes to `.codex/overtli-task-manager/current.json` and `current.md` without rewriting unchanged files.
+*   **Persistent Task List:** Keeps a full checked-off task list in chat Markdown and the current chat's session-scoped `current.json.checklist`.
+*   **Concurrent Session Isolation:** Keys routes by normalized workspace plus `CODEX_THREAD_ID` (or explicit `sessionId`), so separate chats and VS Code windows cannot replace each other's work.
+*   **Durable State Cache:** Syncs canonical routes under `.codex/overtli-task-manager/sessions/<session-key>/`; top-level `current.json` and `current.md` provide a workspace-wide session index.
 *   **Optimized Rendering:** Shows a full checklist at route start and finalization, then compact progress cards during routine work.
 *   **Task Normalization:** Keeps one active route segment where possible, blocks manual jumps until the active task is handled, and lets reconciliation intentionally add, merge, reopen, or reorder work.
 *   **Internal Step Gates:** Keeps each route segment honest by requiring internal steps to be checked off as work happens before the parent segment can be completed.
@@ -39,6 +40,45 @@ git clone https://github.com/OvertliDS/Overtli-Task-Manager.git ~/.codex/plugins
 cd ~/.codex/plugins/overtli-task-manager
 npm install
 ```
+
+#### Verify the SQLite backend
+
+`better-sqlite3` is an optional dependency so OTM can fall back to JSON on
+machines where a native addon cannot be installed. That also means npm may
+finish successfully while omitting SQLite. After `npm install`, verify the
+actual native module instead of relying on the declaration in `package.json`:
+
+```bash
+npm ls better-sqlite3 --depth=0
+node -e "const Database=require('better-sqlite3'); const db=new Database(':memory:'); console.log(db.prepare('select sqlite_version() version').get()); db.close()"
+node ./bin/otm.mjs doctor
+```
+
+`otm doctor` should report `Storage: sqlite`. To make a missing native module a
+hard error during diagnosis instead of allowing the JSON fallback:
+
+```powershell
+$env:OTM_STORAGE = 'sqlite'
+node ./bin/otm.mjs doctor
+```
+
+If `npm ls` is empty, reinstall the version range declared by this project and
+show native install output:
+
+```bash
+npm install better-sqlite3@^11.9.1 --save-optional --foreground-scripts
+```
+
+Use a supported Node.js release (this project requires Node 20.10 or newer;
+the currently tested Windows setup uses Node 24). `better-sqlite3` normally
+downloads a prebuilt binary for supported LTS releases. If no prebuilt binary
+exists for the selected Node/architecture combination, Windows source builds
+require Python plus Visual Studio Build Tools with the **Desktop development
+with C++** workload. Re-run the install after those prerequisites are active,
+then repeat the load test above. The upstream package's
+[compilation](https://github.com/WiseLibs/better-sqlite3/blob/master/docs/compilation.md)
+and [troubleshooting](https://github.com/WiseLibs/better-sqlite3/blob/master/docs/troubleshooting.md)
+guides are the authoritative reference for uncommon toolchain failures.
 
 When run from that standard plugin path, `npm install` automatically merges OTM hooks into `~/.codex/hooks.json` and refreshes OTM skills under `~/.codex/skills`. Existing global hooks are backed up and unrelated entries are preserved. Development checkouts and CI skip global changes; set `OTM_AUTO_INSTALL_GLOBAL=0` to opt out or `OTM_AUTO_INSTALL_GLOBAL=1` to allow a custom plugin path.
 
@@ -136,7 +176,10 @@ Global Durable Store (~/.codex/overtli-task-manager/)
  └── state.sqlite (SQLite with WAL mode; falls back to JSON if sqlite3 is missing)
 
 Workspace State (.codex/overtli-task-manager/)
- ├── current.json / current.md (Active route, checklist, and checkpoint status)
+ ├── current.json / current.md (Workspace index of active Codex sessions)
+ ├── sessions/<session-key>/
+ │   ├── current.json / current.md (Canonical route for one Codex chat)
+ │   └── cache/scratch/ (Session-owned raw hook/tool payloads)
  ├── cache/ (Lightweight context and review caches)
  │   ├── tmp/ (Atomic write staging; stale OTM temp files are cleaned automatically)
  │   └── scratch/ (Raw hook/tool payloads kept out of user-facing Markdown)
@@ -147,8 +190,9 @@ Workspace State (.codex/overtli-task-manager/)
 
 | File / Folder | Purpose |
 |---|---|
-| `current.md` | Chat-friendly route checklist for humans and follow-on agents |
-| `current.json.checklist` | Compact machine-readable checklist for UIs and hooks |
+| `current.json` / `current.md` | Workspace-wide index; never use it as a mutable route when session scoping is active |
+| `sessions/<session-key>/current.md` | Chat-friendly canonical route checklist for one Codex session |
+| `sessions/<session-key>/current.json.checklist` | Compact machine-readable checklist for that session's UIs and hooks |
 | `cache/tmp` | Atomic write staging and stale `current.*.tmp` cleanup |
 | `cache/scratch` | Short-lived raw tool payloads referenced by route evidence |
 | `summaries/` | Historical turn summaries |
@@ -168,9 +212,24 @@ preserving active, blocked, and paused routes.
 | Steering or manual status | Full snapshot |
 | Finalization | Full completion summary |
 
-`current.json` tracks render metadata (`renderRevision`, `lastRenderedMode`,
+Each session-scoped `current.json` tracks render metadata (`renderRevision`, `lastRenderedMode`,
 `lastRenderedTaskId`, `lastRenderedHash`) so agents and UIs can avoid repeating
 the full checklist unnecessarily.
+
+### Concurrent chats and windows
+
+OTM resolves a session in this order: explicit `sessionId`, `OTM_SESSION_ID`,
+then `CODEX_THREAD_ID`. Active-run lookup always includes both the workspace and
+that session. `replaceExisting=true` therefore replaces only the current
+session's route. An older unscoped active route is claimed atomically by the
+first scoped session that resumes it; later sessions receive independent
+routes. Explicit `runId` calls are rejected when the run belongs to another
+workspace or session.
+
+SQLite uses WAL mode and a workspace/session index. The JSON fallback uses a
+cross-process lock for mutations so concurrent Codex processes do not lose one
+another's runs. Session-owned scratch cleanup does not delete another active
+chat's evidence.
 
 ### Route Planning
 

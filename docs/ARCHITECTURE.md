@@ -4,13 +4,23 @@ Overtli Task Manager is built around a shared core library used by both MCP tool
 
 ```text
 Codex MCP tools ─┐
-                 ├─ OTM core state machine ── storage ── current.json/current.md
-Codex hooks    ──┘
+                 ├─ OTM core state machine ── durable store
+Codex hooks    ──┘                          ├─ session current.json/current.md
+                                            └─ workspace current index
 ```
 
 ## State
 
 The durable store tracks runs, tasks, events, summaries, and cache entries. SQLite is preferred; JSON is a fallback for machines that cannot install native dependencies.
+
+Active routes are selected by `(normalized workspaceRoot, sessionId)`. The
+session id resolves from an explicit tool/hook argument, `OTM_SESSION_ID`, or
+`CODEX_THREAD_ID`, in that order. A supplied `runId` is still validated against
+the current workspace and session. This makes separate chats and VS Code
+windows independent even when they share one repository and global store.
+Legacy active rows with no session id are claimed atomically once. SQLite uses
+WAL mode and a composite workspace/session/status index; the JSON fallback
+serializes mutations through a short-lived cross-process lock file.
 
 Tasks are the stop-gated route checkpoints. Each task may also carry
 `metadata.internalSteps`, which are normalized from model-supplied strings or
@@ -30,6 +40,9 @@ Workspace state is intentionally small and inspectable:
 ```text
 .codex/overtli-task-manager/current.json
 .codex/overtli-task-manager/current.md
+.codex/overtli-task-manager/sessions/<session-key>/current.json
+.codex/overtli-task-manager/sessions/<session-key>/current.md
+.codex/overtli-task-manager/sessions/<session-key>/cache/scratch/
 .codex/overtli-task-manager/summaries/
 .codex/overtli-task-manager/cache/
 .codex/overtli-task-manager/cache/tmp/
@@ -44,6 +57,12 @@ Long raw hook/tool payloads that would make route Markdown noisy are stored in
 `cache/scratch/` and referenced from evidence with a short path. Workflow
 cleanup removes scratch dumps after roughly 30 minutes; atomic temp cleanup uses
 a shorter concurrency guard so active writes are not deleted.
+The top-level current files are a workspace-wide index when session scoping is
+active. Canonical route state lives under the hashed session key returned in
+each snapshot's `paths`; raw session ids are not exposed by the index. Clearing
+one route updates its canonical files and index entry while leaving other
+sessions and their scratch evidence intact. Index rebuilds use a short-lived
+workspace lock so separate OTM processes cannot publish a lost-update view.
 At route completion, `otm_clear_current` runs immediate OTM-owned temp/scratch
 cleanup. `otm_cleanup_workspace` and `otm cleanup` expose the same cleanup path
 for explicit maintenance.

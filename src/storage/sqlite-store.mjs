@@ -97,6 +97,7 @@ export class SqliteStore {
         expires_at TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_runs_workspace_status ON runs(workspace_root, status);
+      CREATE INDEX IF NOT EXISTS idx_runs_workspace_session_status ON runs(workspace_root, session_id, status);
       CREATE INDEX IF NOT EXISTS idx_runs_session_turn ON runs(session_id, turn_id);
       CREATE INDEX IF NOT EXISTS idx_tasks_run_status ON tasks(run_id, status);
       CREATE INDEX IF NOT EXISTS idx_events_run_created ON events(run_id, created_at);
@@ -128,9 +129,27 @@ export class SqliteStore {
     return row ? fromRunRow(row) : null;
   }
 
-  getActiveRun(workspaceRoot) {
-    const row = this.db.prepare(`SELECT * FROM runs WHERE workspace_root = ? AND status IN ('active','blocked','paused') ORDER BY updated_at DESC LIMIT 1`).get(workspaceRoot);
+  getActiveRun(workspaceRoot, sessionId) {
+    const scoped = arguments.length >= 2;
+    const row = scoped
+      ? this.db.prepare(`SELECT * FROM runs WHERE workspace_root = ? AND session_id IS ? AND status IN ('active','blocked','paused') ORDER BY updated_at DESC LIMIT 1`).get(workspaceRoot, sessionId || null)
+      : this.db.prepare(`SELECT * FROM runs WHERE workspace_root = ? AND status IN ('active','blocked','paused') ORDER BY updated_at DESC LIMIT 1`).get(workspaceRoot);
     return row ? fromRunRow(row) : null;
+  }
+
+  listActiveRuns(workspaceRoot) {
+    return this.db.prepare(`SELECT * FROM runs WHERE workspace_root = ? AND status IN ('active','blocked','paused') ORDER BY updated_at DESC`).all(workspaceRoot).map(fromRunRow);
+  }
+
+  claimLegacyActiveRun(workspaceRoot, sessionId, metadata = {}) {
+    return this.transaction(() => {
+      const row = this.db.prepare(`SELECT * FROM runs WHERE workspace_root = ? AND session_id IS NULL AND status IN ('active','blocked','paused') ORDER BY updated_at DESC LIMIT 1`).get(workspaceRoot);
+      if (!row) return null;
+      const run = fromRunRow(row);
+      const result = this.db.prepare(`UPDATE runs SET session_id = ?, metadata_json = ?, updated_at = ? WHERE id = ? AND session_id IS NULL`)
+        .run(sessionId, JSON.stringify({ ...(run.metadata || {}), ...metadata }), nowIso(), run.id);
+      return result.changes ? this.getRun(run.id) : null;
+    });
   }
 
   listRuns(workspaceRoot, limit = 20) {
