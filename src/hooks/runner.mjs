@@ -4,6 +4,7 @@ import { createTaskManager } from '../core/manager.mjs';
 import { classifyPrompt } from '../core/planner.mjs';
 import { atomicWriteText, cleanupWorkspaceStateTempFiles, ensureDir, findWorkspaceRoot, relativeToWorkspace, workspaceScratchDir, workspaceTempDir } from '../core/fs-utils.mjs';
 import { reviewProjectContext } from '../context/project-review.mjs';
+import { patchAgentsFile } from '../install/agent-block.mjs';
 
 export async function runHookScript(eventName, { stdin = '', cwd = process.cwd(), env = process.env } = {}) {
   const input = parseJson(stdin, {});
@@ -13,7 +14,7 @@ export async function runHookScript(eventName, { stdin = '', cwd = process.cwd()
 
   switch (eventName) {
     case 'session-start':
-      return emitJson(handleSessionStart(manager, input, workspaceRoot));
+      return emitJson(handleSessionStart(manager, input, workspaceRoot, env));
     case 'user-prompt-submit':
       return emitJson(handleUserPromptSubmit(manager, input, workspaceRoot));
     case 'pre-tool-use':
@@ -31,10 +32,11 @@ export async function runHookScript(eventName, { stdin = '', cwd = process.cwd()
   }
 }
 
-function handleSessionStart(manager, input, workspaceRoot) {
+function handleSessionStart(manager, input, workspaceRoot, env) {
+  const agentsSync = syncAgentsInstructions(workspaceRoot, env);
   let projectReview = null;
   try {
-    projectReview = reviewProjectContext({ workspaceRoot, maxFiles: Number(process.env.OTM_PROJECT_REVIEW_MAX_FILES || 20) });
+    projectReview = reviewProjectContext({ workspaceRoot, maxFiles: Number(env.OTM_PROJECT_REVIEW_MAX_FILES || 20) });
     if (!projectReview.unchanged) {
       manager.upsertMemory({ workspaceRoot, kind: 'project_overview', title: 'Project overview cache', body: projectReview.summary, tags: ['project-overview', 'auto-review'], source: { fingerprint: projectReview.fingerprint, sourceCount: projectReview.sourceCount } });
     }
@@ -43,7 +45,21 @@ function handleSessionStart(manager, input, workspaceRoot) {
   const context = snap.run
     ? `Overtli Task Manager loaded an active route. Continue using OTM tools and keep current.json updated.\n\n${snap.markdown}`
     : `Overtli Task Manager is available. For non-trivial work, call otm_start or otm_reconcile before implementation. Project awareness cache ${projectReview ? (projectReview.unchanged ? 'is current' : 'was refreshed') : 'was not refreshed'}.`;
-  return { continue: true, suppressOutput: true, systemMessage: context };
+  const syncMessage = agentsSync.ok
+    ? `AGENTS.md managed instructions: ${agentsSync.action}.`
+    : `AGENTS.md managed instructions were not synchronized: ${agentsSync.reason}`;
+  return { continue: true, suppressOutput: true, systemMessage: `${context}\n${syncMessage}` };
+}
+
+function syncAgentsInstructions(workspaceRoot, env) {
+  if (env.OTM_AUTO_SYNC_AGENTS === '0') {
+    return { ok: true, action: 'disabled by OTM_AUTO_SYNC_AGENTS=0' };
+  }
+  try {
+    return patchAgentsFile({ workspaceRoot });
+  } catch (error) {
+    return { ok: false, reason: error?.message || String(error) };
+  }
 }
 
 function handleUserPromptSubmit(manager, input, workspaceRoot) {

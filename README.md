@@ -22,6 +22,7 @@ Overtli Task Manager (OTM) structures AI coding sessions into evidence-backed ro
 *   **Internal Step Gates:** Keeps each route segment honest by requiring internal steps to be checked off as work happens before the parent segment can be completed.
 *   **Lifecycle Hooks:** Intercepts sessions, prompts, tools, and stops to enforce task completion and audit progress.
 *   **Workspace Memory:** Keeps a lightweight, high-signal index of project guides (`AGENTS.md`), memory banks, and schemas.
+*   **Managed Instruction Sync:** Detects the enclosing Git workspace and creates or refreshes only OTM's marked `AGENTS.md` block at session start.
 
 ---
 
@@ -65,6 +66,8 @@ node ~/.codex/plugins/overtli-task-manager/bin/otm.mjs install
 ```bash
 node ~/.codex/plugins/overtli-task-manager/bin/otm.mjs install --agents-file AGENTS.override.md
 ```
+
+When the plugin's `SessionStart` hook is active, OTM also creates or refreshes its managed block in the enclosing Git workspace automatically. Existing content outside the markers is preserved, incomplete marker pairs are reported without being overwritten, and `OTM_AUTO_SYNC_AGENTS=0` disables this synchronization. Nested package manifests do not shadow the enclosing Git root.
 
 To verify the setup:
 ```bash

@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createTaskManager } from '../src/core/manager.mjs';
 import { deriveFallbackTasks } from '../src/core/planner.mjs';
-import { workspaceScratchDir, workspaceTempDir } from '../src/core/fs-utils.mjs';
+import { findWorkspaceRoot, workspaceScratchDir, workspaceTempDir } from '../src/core/fs-utils.mjs';
 import { loadBetterSqlite3 } from '../src/storage/sqlite-store.mjs';
 import { installWorkspace } from '../src/install/install-workspace.mjs';
 import { reviewProjectContext } from '../src/context/project-review.mjs';
@@ -805,6 +805,57 @@ test('workspace installer patches AGENTS.md by default and only patches override
   assert.equal(explicitAgents.ok, true);
   assert.equal(explicitAgents.warning, undefined);
   assert.match(fs.readFileSync(path.join(workspaceRoot, 'AGENTS.override.md'), 'utf8'), /OVERTLI-TASK-MANAGER:BEGIN/);
+});
+
+test('workspace discovery prefers the enclosing git root over nested package manifests', () => {
+  const workspaceRoot = tempWorkspace('otm-root-detection-');
+  const nestedRoot = path.join(workspaceRoot, 'packages', 'app');
+  const nestedCwd = path.join(nestedRoot, 'src');
+  fs.mkdirSync(nestedCwd, { recursive: true });
+  fs.writeFileSync(path.join(workspaceRoot, 'AGENTS.md'), '# Root guidance\n', 'utf8');
+  fs.writeFileSync(path.join(nestedRoot, 'package.json'), '{}\n', 'utf8');
+
+  assert.equal(findWorkspaceRoot(nestedCwd), workspaceRoot);
+});
+
+test('session start creates and refreshes only the managed AGENTS.md block', async () => {
+  const emptyWorkspace = tempWorkspace('otm-session-agents-create-');
+  const env = testEnv('session-agents');
+  const created = await withCapturedStdout(() => runHookScript('session-start', {
+    cwd: emptyWorkspace,
+    env,
+    stdin: JSON.stringify({ cwd: emptyWorkspace, hook_event_name: 'SessionStart' })
+  }));
+  assert.match(fs.readFileSync(path.join(emptyWorkspace, 'AGENTS.md'), 'utf8'), /OVERTLI-TASK-MANAGER:BEGIN/);
+  assert.match(created.result.systemMessage, /AGENTS\.md managed instructions: created/);
+
+  const workspaceRoot = tempWorkspace('otm-session-agents-');
+  const agentsPath = path.join(workspaceRoot, 'AGENTS.md');
+  fs.writeFileSync(agentsPath, '# Project guidance\n\nKeep this content.\n', 'utf8');
+
+  const first = await withCapturedStdout(() => runHookScript('session-start', {
+    cwd: workspaceRoot,
+    env,
+    stdin: JSON.stringify({ cwd: workspaceRoot, hook_event_name: 'SessionStart' })
+  }));
+  const firstAgents = fs.readFileSync(agentsPath, 'utf8');
+  assert.match(firstAgents, /Keep this content/);
+  assert.equal((firstAgents.match(/OVERTLI-TASK-MANAGER:BEGIN/g) || []).length, 1);
+  assert.match(first.result.systemMessage, /AGENTS\.md managed instructions: appended/);
+
+  const outdated = firstAgents.replace('Prefer thorough completion over shallow progress.', 'Outdated managed instruction.');
+  fs.writeFileSync(agentsPath, outdated, 'utf8');
+  const second = await withCapturedStdout(() => runHookScript('session-start', {
+    cwd: workspaceRoot,
+    env,
+    stdin: JSON.stringify({ cwd: workspaceRoot, hook_event_name: 'SessionStart' })
+  }));
+  const refreshed = fs.readFileSync(agentsPath, 'utf8');
+  assert.match(refreshed, /Prefer thorough completion over shallow progress/);
+  assert.doesNotMatch(refreshed, /Outdated managed instruction/);
+  assert.match(refreshed, /Keep this content/);
+  assert.equal((refreshed.match(/OVERTLI-TASK-MANAGER:BEGIN/g) || []).length, 1);
+  assert.match(second.result.systemMessage, /AGENTS\.md managed instructions: updated/);
 });
 
 test('project review scans memory-bank / memory_bank and indexes overview files', () => {

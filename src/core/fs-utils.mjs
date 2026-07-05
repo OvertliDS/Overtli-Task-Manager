@@ -81,20 +81,19 @@ export function getHomeDir(env = process.env) {
 
 export function findWorkspaceRoot(startCwd = process.cwd()) {
   let current = path.resolve(startCwd);
+  let fallback = null;
   while (true) {
-    if (
-      pathExists(path.join(current, '.git')) ||
+    if (pathExists(path.join(current, '.git'))) return current;
+    if (!fallback && (
       pathExists(path.join(current, 'AGENTS.md')) ||
       pathExists(path.join(current, 'AGENTS.override.md')) ||
       pathExists(path.join(current, 'package.json')) ||
       pathExists(path.join(current, 'pyproject.toml')) ||
       pathExists(path.join(current, 'Cargo.toml')) ||
       pathExists(path.join(current, 'go.mod'))
-    ) {
-      return current;
-    }
+    )) fallback = current;
     const parent = path.dirname(current);
-    if (parent === current) return path.resolve(startCwd);
+    if (parent === current) return fallback || path.resolve(startCwd);
     current = parent;
   }
 }
