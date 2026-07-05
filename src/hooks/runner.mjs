@@ -63,6 +63,7 @@ function handleUserPromptSubmit(manager, input, workspaceRoot) {
     'If the user is only asking for a phase plan, roadmap, review, or documentation rather than implementation now, make the route reflect that planning/documentation task instead of converting it into implementation work.',
     'Show the returned Markdown checklist snapshot in chat.',
     'Keep exactly one active route segment when possible; mark completion only with concrete evidence.',
+    'Before task-scoped OTM calls, use exact task ids from the latest OTM snapshot/current.json; never guess ids from titles, memory, or prior route state.',
     'Mark internal steps complete with otm_progress as the work happens; complete the parent task only after all required internal steps are terminal and segment-level evidence exists.',
     'If the user steers, reconcile before continuing. Before final response, call otm_audit_stop. If required tasks remain, continue working.',
     'When the audit passes, call otm_finalize_turn, show the returned Markdown summary to the user, then call otm_clear_current.'

@@ -46,12 +46,12 @@ export const tools = [
   },
   {
     name: 'otm_start_task',
-    description: 'Mark one route segment active before doing related work.',
+    description: 'Mark one route segment active before doing related work. Use an exact taskId from the latest OTM snapshot/current.json; do not guess ids from task titles.',
     inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, runId: { type: 'string' }, taskId: { type: 'string' }, note: { type: 'string' } }, required: ['taskId'] }
   },
   {
     name: 'otm_progress',
-    description: 'Record a progress checkpoint and return a Markdown status update. Use this to mark one internal step done/active as work happens; route gates still require otm_complete_task evidence after internal steps are terminal.',
+    description: 'Record a progress checkpoint and return a Markdown status update. Use exact task ids from the latest snapshot/current.json when taskId is supplied. Use this to mark one internal step done/active as work happens; route gates still require otm_complete_task evidence after internal steps are terminal.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -72,7 +72,7 @@ export const tools = [
   },
   {
     name: 'otm_complete_task',
-    description: 'Mark a route segment complete. Requires concrete segment-level evidence and all required internal steps must already be done or skipped unless force=true is explicitly supplied.',
+    description: 'Mark a route segment complete using an exact taskId from the latest snapshot/current.json. Requires concrete segment-level evidence and all required internal steps must already be done or skipped unless force=true is explicitly supplied.',
     inputSchema: { type: 'object', properties: { workspaceRoot: { type: 'string' }, runId: { type: 'string' }, taskId: { type: 'string' }, evidence: { type: 'object', additionalProperties: true }, force: { type: 'boolean' } }, required: ['taskId', 'evidence'] }
   },
   {

@@ -17,7 +17,7 @@ export async function runMcpServer({ env = process.env } = {}) {
     { name: 'overtli_task_manager', version: '0.1.0' },
     {
       capabilities: { tools: {}, resources: {} },
-      instructions: 'Overtli Task Manager keeps Codex work organized as route checklists. Before otm_start/otm_reconcile, thoroughly analyze the full user request and pass specific route segments with internalSteps. Use otm_progress to mark internal steps complete as work happens, use otm_complete_task only after internal steps are terminal and segment-level evidence exists, call otm_audit_stop before final answers, then call otm_finalize_turn, show its Markdown summary, and call otm_clear_current.'
+      instructions: 'Overtli Task Manager keeps Codex work organized as route checklists. Before otm_start/otm_reconcile, thoroughly analyze the full user request and pass specific route segments with internalSteps. Before task-scoped OTM calls, use exact task ids from the latest snapshot/current.json; never guess ids from titles, memory, or prior route state. Use otm_progress to mark internal steps complete as work happens, use otm_complete_task only after internal steps are terminal and segment-level evidence exists, call otm_audit_stop before final answers, then call otm_finalize_turn, show its Markdown summary, and call otm_clear_current.'
     }
   );
 

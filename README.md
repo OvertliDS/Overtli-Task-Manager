@@ -129,112 +129,79 @@ Workspace State (.codex/overtli-task-manager/)
  └── summaries/ (Historical turn summaries)
 ```
 
-`current.md` is the persistent chat-friendly checklist. `current.json.checklist`
-contains the same full route list in a compact machine-readable form for UIs,
-hooks, or follow-on agents that need to show tasks being checked off.
-Current-state writes stage temporary files under `cache/tmp` and clean stale
-OTM-owned `current.json.*.tmp` / `current.md.*.tmp` files from older versions,
-so the workspace state folder stays inspectable.
-Long raw tool inputs are written to `cache/scratch` and referenced from route
-evidence with a short pointer, keeping `current.md` and turn summaries readable.
-Workflow cleanup treats scratch files as short-lived and removes stale scratch
-dumps after roughly 30 minutes.
-`otm_clear_current` also runs immediate OTM-owned temp/scratch cleanup at route
-completion, and `otm_cleanup_workspace` exposes the same cleanup as an explicit
-tool/CLI command.
+### State Files
 
-Durable history cleanup is separate from workspace temp cleanup. `otm_clear_current`
-also runs a best-effort prune of inactive history older than 7 days. Use
-`otm_prune_history` or `otm prune-history` to run it explicitly, with
-`--dry-run` for an audit-only report. History pruning preserves active, blocked,
-and paused routes even when they are older than the cutoff, then removes old
-inactive runs plus their tasks, events, summaries, and expired/old cache entries.
+| File / Folder | Purpose |
+|---|---|
+| `current.md` | Chat-friendly route checklist for humans and follow-on agents |
+| `current.json.checklist` | Compact machine-readable checklist for UIs and hooks |
+| `cache/tmp` | Atomic write staging and stale `current.*.tmp` cleanup |
+| `cache/scratch` | Short-lived raw tool payloads referenced by route evidence |
+| `summaries/` | Historical turn summaries |
 
-The default render policy is `start_end_delta`:
+`otm_clear_current` cleans active state plus OTM-owned temp/scratch files at
+route completion. `otm_cleanup_workspace` exposes the same cleanup directly.
+Durable history cleanup is separate: `otm_prune_history` / `otm prune-history`
+removes old inactive runs, tasks, events, summaries, and cache entries while
+preserving active, blocked, and paused routes.
 
-```text
-Route start: full checklist
-Routine progress: compact status card
-Steering/manual status: full snapshot
-Route finalization: full completion summary
-```
+### Route Display
 
-`current.json` includes render bookkeeping (`renderRevision`,
-`lastRenderedMode`, `lastRenderedTaskId`, and `lastRenderedHash`) so UIs and
-agents can avoid repeated full-list rendering.
+| Moment | Rendered Output |
+|---|---|
+| Route start | Full checklist |
+| Routine progress | Compact status card |
+| Steering or manual status | Full snapshot |
+| Finalization | Full completion summary |
 
-The model should analyze the full user request before calling `otm_start` or
-`otm_reconcile`: inline chat text, attached files, screenshots/images it can
-inspect, OCR or descriptions, IDE context, and steering within the turn. The
-model should pass a `tasks` array that maps the main current-scope phases,
-steps, issues, problems, and deliverables to separate route segments, with
-`internalSteps` or `metadata.internalSteps` for explicit, inferred, researched,
-and discovered subwork. OTM persists and normalizes those segments; it does not
-perform model-level visual or semantic inference on its own.
+`current.json` tracks render metadata (`renderRevision`, `lastRenderedMode`,
+`lastRenderedTaskId`, `lastRenderedHash`) so agents and UIs can avoid repeating
+the full checklist unnecessarily.
 
-When `otm_start` receives only a goal or prompt, a deterministic fallback
-planner acts as a safety net. It looks for obvious explicit phases, steps,
-issue lists, problem lists, and sequenced deliverables so they are not collapsed
-into one broad "fix everything" task. If the prompt is asking for a plan, spec,
-or documentation for later work, fallback segments stay
-planning/documentation-oriented rather than becoming implementation tasks.
+### Route Planning
 
-Task ordering is normalized for readability: completed work stays checked off,
-the current active segment is shown next, ordinary pending work stays ahead of
-validation/documentation, commit/push, and final audit/summary segments. When a
-route is steered, `otm_reconcile` can merge related open tasks, add distinct new
-tasks, or explicitly reopen completed/dropped/superseded work with
-`action: "reopen"` or `reopen: true`. Reopened tasks keep their prior evidence
-and record reopening metadata.
+1. Routes should be split into separate segments for the main phases, steps,
+   issues, problems, and deliverables.
+2. Segments can include `internalSteps` or
+   `metadata.internalSteps` for explicit, inferred, researched, and discovered
+   subwork.
+3. Fallback planning splits obvious phases, steps, issues, and deliverables
+   when only a goal or prompt is supplied.
+4. `otm_reconcile` can merge, add, reorder, or reopen tasks when the route
+   changes; reopened tasks keep prior evidence and reopening metadata.
 
-OTM enforces sequential handling for manual task changes. Starting or recording
-progress on a different task is blocked while another required task is active
-unless the switch is performed through reconciliation or explicitly allowed by
-the caller. Whenever OTM chooses a current task, it promotes that task to
-`active` and demotes other active route segments so the header, table,
-`current.json`, and audit state agree.
+OTM keeps one current task whenever possible. Manual task switching is blocked
+while another required task is active unless reconciliation or an explicit
+override allows it.
 
-Each task keeps internal implementation detail in `metadata.internalSteps`.
-String inputs remain accepted, but OTM normalizes them into small records with
-`id`, `title`, and `status` so `current.json` can show which internal checkpoint
-is pending, active, done, blocked, or skipped after compaction or handoff.
-`otm_progress` can update one internal step by id, title, index, or object.
-Models should update internal steps as soon as the corresponding work is done
-and evidence exists. They should not finish the whole project and then backfill
-internal step status, because that removes the checklist's value as a live
-coordination surface.
-Internal steps are prerequisites for the parent route segment: a route gate
-cannot be completed while any internal step is pending, active, or blocked.
-`done` and `skipped` are terminal internal states. Internal steps still do not
-complete the parent route segment or open the stop gate by themselves; the model
-must also call `otm_complete_task` with concrete evidence when a top-level route
-checkpoint/gate is actually complete.
+### Internal Step Gates
 
-When a model-supplied task has no explicit internal steps, OTM creates
-category-aware defaults for implementation, documentation/review, validation,
-install/setup, and final-summary tasks. Fallback-planner tasks still carry their
-own actionable internal steps.
+| Rule | Effect |
+|---|---|
+| Internal steps normalize to `{ id, title, status }` records | Handoffs can resume at the exact checkpoint |
+| `otm_progress` updates steps by id, title, index, or object | Step status changes are visible as work happens |
+| `done` and `skipped` are terminal | Pending, active, or blocked steps prevent parent completion |
+| `otm_complete_task` still needs segment evidence | Internal steps alone do not open the stop gate |
 
-MCP tool results are Markdown/plain-text first. Full machine-readable route
-state remains available through the `otm://current` resource, while normal tool
-responses avoid showing an additional raw JSON block in chat.
+When a task has no explicit internal steps, OTM creates category-aware defaults
+for implementation, docs/review, validation, install/setup, and final-summary
+work. Fallback-planner tasks keep their own actionable steps.
 
-For faster hooks, OTM avoids rewriting unchanged state files and uses read-only
-snapshots for passive hook checks. Automatic evidence tracking records only
-file edits, validation/build commands, failed commands, and explicit OTM
-checkpoint calls by default. Set `OTM_RECORD_PRE_TOOL=1` to record pre-tool
-observations, or `OTM_TRACK_MCP_EVIDENCE=1` to opt into broad MCP evidence.
+### Hooks And Completion
 
-Default hook timeouts are capped but not brittle on Windows: SessionStart 15s,
-UserPromptSubmit 12s, PreToolUse 8s, PostToolUse 12s, PreCompact/PostCompact
-15s, and Stop 45s.
+| Area | Behavior |
+|---|---|
+| MCP results | Markdown/plain-text first; full JSON remains available through `otm://current` |
+| Passive hooks | Use read-only snapshots and avoid unchanged state rewrites |
+| Evidence tracking | Defaults to file edits, validation/build commands, failures, and explicit OTM checkpoints |
+| Opt-ins | `OTM_RECORD_PRE_TOOL=1`, `OTM_TRACK_MCP_EVIDENCE=1`, `OTM_STOP_AUTO_FINALIZE=1` |
+| Hook timeouts | SessionStart 15s, UserPromptSubmit 12s, PreToolUse 8s, PostToolUse 12s, Pre/PostCompact 15s, Stop 45s |
 
-The normal completion path is model-visible: call `otm_audit_stop`, then
-`otm_finalize_turn`, show the returned Markdown summary in chat, and finally
-call `otm_clear_current`. The Stop hook blocks incomplete routes and, by
-default, also blocks an already-complete active route once so the model can
-perform that visible finalization path. Set `OTM_STOP_AUTO_FINALIZE=1` only when
-you intentionally want the Stop hook to auto-finalize as a fallback.
+Normal closeout is model-visible: run `otm_audit_stop`, call
+`otm_finalize_turn`, show the returned Markdown summary, then call
+`otm_clear_current`. The Stop hook blocks incomplete routes and, by default,
+also blocks a complete-but-unfinalized route once so the model can show that
+summary before clearing state.
 
 ---
 
