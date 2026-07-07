@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { createTaskManager } from '../core/manager.mjs';
@@ -10,7 +11,11 @@ import { resolveSessionId } from '../core/session-scope.mjs';
 export async function runHookScript(eventName, { stdin = '', cwd = process.cwd(), env = process.env } = {}) {
   const input = parseJson(stdin, {});
   const workspaceRoot = findWorkspaceRoot(input.cwd || cwd);
-  try { cleanupWorkspaceStateTempFiles(workspaceRoot, { sessionId: resolveSessionId(input, env) }); } catch {}
+  const sessionId = resolveSessionId(input, env);
+  try { cleanupWorkspaceStateTempFiles(workspaceRoot, { sessionId, ...(sessionId ? {} : { scratchMaxAgeMs: -1 }) }); } catch {}
+  if (!claimHookInvocation({ eventName, input, workspaceRoot, sessionId, env })) {
+    return emitJson({ continue: true, suppressOutput: true });
+  }
   const manager = createTaskManager({ cwd: workspaceRoot, env });
 
   switch (eventName) {
@@ -43,7 +48,9 @@ function handleSessionStart(manager, input, workspaceRoot, env) {
       manager.upsertMemory({ workspaceRoot, kind: 'project_overview', title: 'Project overview cache', body: projectReview.summary, tags: ['project-overview', 'auto-review'], source: { fingerprint: projectReview.fingerprint, sourceCount: projectReview.sourceCount } });
     }
   } catch {}
-  const snap = manager.snapshot({ workspaceRoot, sessionId, lastUpdate: { kind: 'session_start', message: 'Session loaded OTM state.', at: new Date().toISOString() } });
+  const snap = sessionId
+    ? manager.snapshot({ workspaceRoot, sessionId, lastUpdate: { kind: 'session_start', message: 'Session loaded OTM state.', at: new Date().toISOString() } })
+    : { run: null, markdown: '' };
   const context = snap.run
     ? `Overtli Task Manager loaded an active route. Continue using OTM tools and keep current.json updated.\n\n${snap.markdown}`
     : `Overtli Task Manager is available. For non-trivial work, call otm_start or otm_reconcile before implementation. Project awareness cache ${projectReview ? (projectReview.unchanged ? 'is current' : 'was refreshed') : 'was not refreshed'}.`;
@@ -66,7 +73,7 @@ function syncAgentsInstructions(workspaceRoot, env) {
 
 function handleUserPromptSubmit(manager, input, workspaceRoot, env) {
   const sessionId = resolveSessionId(input, env);
-  const active = manager.snapshot({ workspaceRoot, sessionId, write: false }).run;
+  const active = sessionId ? manager.snapshot({ workspaceRoot, sessionId, write: false }).run : null;
   const classification = classifyPrompt(input.prompt || '', Boolean(active));
   if (classification === 'empty' || classification === 'simple') {
     return { continue: true, suppressOutput: true };
@@ -93,6 +100,7 @@ function handleUserPromptSubmit(manager, input, workspaceRoot, env) {
 
 function handlePreToolUse(manager, input, workspaceRoot, env) {
   const sessionId = resolveSessionId(input, env);
+  if (!sessionId) return { continue: true, suppressOutput: true };
   const current = manager.snapshot({ workspaceRoot, sessionId, write: false }).snapshot;
   if (!current?.runId || input.tool_name?.includes('overtli_task_manager')) return { continue: true, suppressOutput: true };
   if (process.env.OTM_RECORD_PRE_TOOL === '1') {
@@ -106,6 +114,7 @@ function handlePreToolUse(manager, input, workspaceRoot, env) {
 
 function handlePostToolUse(manager, input, workspaceRoot, env) {
   const sessionId = resolveSessionId(input, env);
+  if (!sessionId) return { continue: true, suppressOutput: true };
   const current = manager.snapshot({ workspaceRoot, sessionId, write: false }).snapshot;
   if (!current?.runId || input.tool_name?.includes('overtli_task_manager')) return { continue: true, suppressOutput: true };
   if (!shouldRecordPostToolEvidence(input)) return { continue: true, suppressOutput: true };
@@ -126,17 +135,31 @@ function handlePostToolUse(manager, input, workspaceRoot, env) {
 }
 
 function handlePreCompact(manager, input, workspaceRoot, env) {
-  const snap = manager.snapshot({ workspaceRoot, sessionId: resolveSessionId(input, env), lastUpdate: { kind: 'pre_compact', message: 'Route saved before context compaction.', at: new Date().toISOString() } });
+  const sessionId = resolveSessionId(input, env);
+  if (!sessionId) return { continue: true, suppressOutput: true };
+  const snap = manager.snapshot({ workspaceRoot, sessionId, lastUpdate: { kind: 'pre_compact', message: 'Route saved before context compaction.', at: new Date().toISOString() } });
   return { continue: true, suppressOutput: true, systemMessage: snap.markdown };
 }
 
 function handlePostCompact(manager, input, workspaceRoot, env) {
-  const snap = manager.snapshot({ workspaceRoot, sessionId: resolveSessionId(input, env), lastUpdate: { kind: 'post_compact', message: 'Route restored after context compaction.', at: new Date().toISOString() } });
+  const sessionId = resolveSessionId(input, env);
+  if (!sessionId) return { continue: true, suppressOutput: true };
+  const snap = manager.snapshot({ workspaceRoot, sessionId, lastUpdate: { kind: 'post_compact', message: 'Route restored after context compaction.', at: new Date().toISOString() } });
   return { continue: true, suppressOutput: true, systemMessage: snap.markdown };
 }
 
 function handleStop(manager, input, workspaceRoot, env) {
   const sessionId = resolveSessionId(input, env);
+  // Codex marks a Stop invocation triggered by prior Stop-hook feedback. Never
+  // block that follow-up again: doing so creates an unbounded continuation loop
+  // that no model can terminate on its own.
+  if (isActiveStopHook(input)) return { continue: true, suppressOutput: true };
+
+  // A workspace can contain routes from several chats plus legacy unscoped
+  // routes. Without a chat identity there is no safe route to enforce, and
+  // choosing the newest/legacy route can block on another chat's checklist.
+  if (!sessionId) return { continue: true, suppressOutput: true };
+
   const audit = manager.auditStop({ workspaceRoot, sessionId, turnId: input.turn_id, hookEventName: input.hook_event_name });
   if (!audit.run) return { continue: true, suppressOutput: true };
   if (!audit.stopAllowed) {
@@ -159,6 +182,56 @@ function handleStop(manager, input, workspaceRoot, env) {
     return { decision: 'block', reason: `OTM finalization failed and needs one repair pass: ${error.message}` };
   }
   return { continue: true, suppressOutput: true, systemMessage: 'Overtli Task Manager finalized the route, saved the summary, and cleared current.json.' };
+}
+
+function isActiveStopHook(input) {
+  const value = input.stop_hook_active ?? input.stopHookActive;
+  return value === true || value === 1 || String(value || '').toLowerCase() === 'true';
+}
+
+function claimHookInvocation({ eventName, input, workspaceRoot, sessionId, env }) {
+  if (env.OTM_DEDUPE_HOOKS === '0') return true;
+  const configuredTtl = Number(env.OTM_HOOK_DEDUPE_TTL_MS || 10_000);
+  const ttlMs = Number.isFinite(configuredTtl) && configuredTtl > 0 ? Math.max(1_000, configuredTtl) : 10_000;
+  const identity = input.hook_id
+    || input.hookId
+    || input.invocation_id
+    || input.invocationId
+    || input.tool_use_id
+    || input.toolUseId
+    || input.turn_id
+    || input.turnId
+    || crypto.createHash('sha256').update(JSON.stringify(input)).digest('hex');
+  const digest = crypto.createHash('sha256').update(`${sessionId || 'unscoped'}:${eventName}:${identity}`).digest('hex').slice(0, 24);
+  const dedupeDir = path.join(workspaceTempDir(workspaceRoot), 'hook-invocations');
+  const claimPath = path.join(dedupeDir, `${digest}.claim`);
+  ensureDir(dedupeDir);
+  cleanupHookClaims(dedupeDir, ttlMs);
+  try {
+    const handle = fs.openSync(claimPath, 'wx');
+    try { fs.writeFileSync(handle, `${process.pid}\n${new Date().toISOString()}\n`, 'utf8'); } finally { fs.closeSync(handle); }
+    return true;
+  } catch (error) {
+    if (error?.code !== 'EEXIST') throw error;
+    try {
+      if (Date.now() - fs.statSync(claimPath).mtimeMs > ttlMs) {
+        fs.rmSync(claimPath, { force: true });
+        return claimHookInvocation({ eventName, input, workspaceRoot, sessionId, env });
+      }
+    } catch {}
+    return false;
+  }
+}
+
+function cleanupHookClaims(dedupeDir, ttlMs) {
+  const cutoff = Date.now() - Math.max(ttlMs * 6, 60_000);
+  try {
+    for (const entry of fs.readdirSync(dedupeDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith('.claim')) continue;
+      const filePath = path.join(dedupeDir, entry.name);
+      try { if (fs.statSync(filePath).mtimeMs < cutoff) fs.rmSync(filePath, { force: true }); } catch {}
+    }
+  } catch {}
 }
 
 function classifyToolIntent(input) {

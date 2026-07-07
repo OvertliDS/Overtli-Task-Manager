@@ -14,12 +14,13 @@ Codex hooks    ──┘                          ├─ session current.json/cu
 The durable store tracks runs, tasks, events, summaries, and cache entries. SQLite is preferred; JSON is a fallback for machines that cannot install native dependencies.
 
 Active routes are selected by `(normalized workspaceRoot, sessionId)`. The
-session id resolves from an explicit tool/hook argument, `OTM_SESSION_ID`, or
-`CODEX_THREAD_ID`, in that order. A supplied `runId` is still validated against
-the current workspace and session. This makes separate chats and VS Code
-windows independent even when they share one repository and global store.
-Legacy active rows with no session id are claimed atomically once. SQLite uses
-WAL mode and a composite workspace/session/status index; the JSON fallback
+session id resolves from explicit session/thread/conversation hook fields,
+`OTM_SESSION_ID`, or `CODEX_THREAD_ID`, in that order. A supplied `runId` is
+still validated against the current workspace and session. This makes separate
+chats and VS Code windows independent even when they share one repository and
+global store. Legacy active rows with no session id remain isolated unless
+`OTM_CLAIM_LEGACY_ROUTE=1` explicitly enables one-time adoption. SQLite uses WAL
+mode and a composite workspace/session/status index; the JSON fallback
 serializes mutations through a short-lived cross-process lock file.
 
 Tasks are the stop-gated route checkpoints. Each task may also carry
@@ -54,9 +55,11 @@ temporary files under `cache/tmp/`. Current-state writes also remove stale
 OTM-owned `current.json.*.tmp` and `current.md.*.tmp` artifacts left by older
 versions or interrupted writes, while leaving unrelated files untouched.
 Long raw hook/tool payloads that would make route Markdown noisy are stored in
-`cache/scratch/` and referenced from evidence with a short path. Workflow
-cleanup removes scratch dumps after roughly 30 minutes; atomic temp cleanup uses
-a shorter concurrency guard so active writes are not deleted.
+`cache/scratch/` and referenced from evidence with a short path. Scoped
+workflow cleanup removes only that session's expired scratch dumps; unscoped
+maintenance does not prune scoped scratch while scoped routes remain active.
+Atomic temp cleanup uses a shorter concurrency guard so active writes are not
+deleted.
 The top-level current files are a workspace-wide index when session scoping is
 active. Canonical route state lives under the hashed session key returned in
 each snapshot's `paths`; raw session ids are not exposed by the index. Clearing
@@ -82,4 +85,17 @@ Project memory is not a full RAG index. It is a lightweight, project-specific ca
 
 ## Hooks
 
-The Stop hook is the enforcement gate. If required route segments remain open, it returns a block decision and Codex continues the turn with the remaining work as the continuation prompt.
+Hooks require a resolved Codex session before reading or mutating route state.
+Global and workspace installs may both be active, so a short-lived atomic claim
+deduplicates each host invocation across processes. The first invocation owns
+the output; duplicates return silently.
+
+The Stop hook is the enforcement gate. If required route segments remain open,
+the first invocation returns one block decision and Codex continues the turn
+with the remaining work. A host-marked continuation (`stop_hook_active`) is
+released to bound the loop, missing session identity is never mapped to a legacy
+route, and Stop-hook failures fail open with a warning. Normal closeout remains
+explicit: audit, finalize, present the summary, then clear. Clear recovers the
+just-finalized session run from its canonical snapshot so durable run and
+summary state are marked cleared even when finalize and clear are separate
+calls.

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createTaskManager } from '../src/core/manager.mjs';
 import { deriveFallbackTasks } from '../src/core/planner.mjs';
@@ -15,6 +15,7 @@ import { reviewProjectContext } from '../src/context/project-review.mjs';
 import { toMcpResult } from '../src/mcp/result.mjs';
 import { runHookScript } from '../src/hooks/runner.mjs';
 import { runPostinstall, shouldAutoInstallGlobal } from '../scripts/postinstall.mjs';
+import { resolveSessionId } from '../src/core/session-scope.mjs';
 
 function tempWorkspace(prefix = 'otm-test-') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -216,7 +217,7 @@ test('the same Codex session keeps routes independent across workspaces', () => 
   assert.equal(manager.snapshot({ workspaceRoot: workspaceB, write: false }).run.id, routeB.run.id);
 });
 
-test('a legacy unscoped active route is claimed once by the first scoped session', () => {
+test('legacy unscoped routes require explicit opt-in before a scoped session claims them', () => {
   const workspaceRoot = tempWorkspace('otm-legacy-claim-');
   const baseEnv = testEnv('otm-legacy-claim');
   delete baseEnv.CODEX_THREAD_ID;
@@ -225,13 +226,80 @@ test('a legacy unscoped active route is claimed once by the first scoped session
   const legacy = legacyManager.start({ workspaceRoot, goal: 'Legacy route', tasks: [{ title: 'Legacy task' }] });
 
   const managerA = createTaskManager({ cwd: workspaceRoot, env: { ...baseEnv, CODEX_THREAD_ID: 'claiming-thread' } });
-  assert.equal(managerA.snapshot({ workspaceRoot, write: false }).run.id, legacy.run.id);
-  assert.equal(managerA.store.getRun(legacy.run.id).sessionId, 'claiming-thread');
+  assert.equal(managerA.snapshot({ workspaceRoot, write: false }).run, null);
+  assert.equal(managerA.store.getRun(legacy.run.id).sessionId, null);
 
-  const managerB = createTaskManager({ cwd: workspaceRoot, env: { ...baseEnv, CODEX_THREAD_ID: 'other-thread' } });
-  const routeB = managerB.start({ workspaceRoot, goal: 'Other route', tasks: [{ title: 'Other task' }] });
-  assert.notEqual(routeB.run.id, legacy.run.id);
-  assert.equal(managerA.store.getRun(legacy.run.id).status, 'active');
+  const claimingManager = createTaskManager({
+    cwd: workspaceRoot,
+    env: { ...baseEnv, CODEX_THREAD_ID: 'explicit-claiming-thread', OTM_CLAIM_LEGACY_ROUTE: '1' }
+  });
+  assert.equal(claimingManager.snapshot({ workspaceRoot, write: false }).run.id, legacy.run.id);
+  assert.equal(claimingManager.store.getRun(legacy.run.id).sessionId, 'explicit-claiming-thread');
+});
+
+test('session identity resolves supported hook payload aliases before environment fallback', () => {
+  assert.equal(resolveSessionId({ session_id: 'session-id' }, {}), 'session-id');
+  assert.equal(resolveSessionId({ thread_id: 'thread-id' }, {}), 'thread-id');
+  assert.equal(resolveSessionId({ conversationId: 'conversation-id' }, {}), 'conversation-id');
+  assert.equal(resolveSessionId({}, { CODEX_THREAD_ID: 'environment-id' }), 'environment-id');
+});
+
+test('sqlite isolates multiple chats in one project and one chat across projects', () => {
+  if (!loadBetterSqlite3()) return;
+  const workspaceA = tempWorkspace('otm-sqlite-matrix-a-');
+  const workspaceB = tempWorkspace('otm-sqlite-matrix-b-');
+  const baseEnv = sqliteTestEnv('otm-sqlite-matrix');
+  const managerA1 = createTaskManager({ cwd: workspaceA, env: { ...baseEnv, CODEX_THREAD_ID: 'chat-a' } });
+  const managerA2 = createTaskManager({ cwd: workspaceA, env: { ...baseEnv, CODEX_THREAD_ID: 'chat-b' } });
+  const managerB1 = createTaskManager({ cwd: workspaceB, env: { ...baseEnv, CODEX_THREAD_ID: 'chat-a' } });
+  const routeA1 = managerA1.start({ workspaceRoot: workspaceA, goal: 'A1', tasks: [{ title: 'A1' }] });
+  const routeA2 = managerA2.start({ workspaceRoot: workspaceA, goal: 'A2', tasks: [{ title: 'A2' }] });
+  const routeB1 = managerB1.start({ workspaceRoot: workspaceB, goal: 'B1', tasks: [{ title: 'B1' }] });
+
+  assert.equal(managerA1.snapshot({ workspaceRoot: workspaceA, write: false }).run.id, routeA1.run.id);
+  assert.equal(managerA2.snapshot({ workspaceRoot: workspaceA, write: false }).run.id, routeA2.run.id);
+  assert.equal(managerB1.snapshot({ workspaceRoot: workspaceB, write: false }).run.id, routeB1.run.id);
+  assert.equal(managerA1.store.listActiveRuns(workspaceA).length, 2);
+  assert.equal(managerA1.store.listActiveRuns(workspaceB).length, 1);
+});
+
+test('unscoped snapshots preserve the workspace index when scoped routes are active', () => {
+  const workspaceRoot = tempWorkspace('otm-index-preserve-');
+  const baseEnv = testEnv('otm-index-preserve');
+  const managerA = createTaskManager({ cwd: workspaceRoot, env: { ...baseEnv, CODEX_THREAD_ID: 'index-a' } });
+  const managerB = createTaskManager({ cwd: workspaceRoot, env: { ...baseEnv, CODEX_THREAD_ID: 'index-b' } });
+  managerA.start({ workspaceRoot, goal: 'Index A', tasks: [{ title: 'A' }] });
+  managerB.start({ workspaceRoot, goal: 'Index B', tasks: [{ title: 'B' }] });
+
+  const unscoped = createTaskManager({ cwd: workspaceRoot, env: baseEnv });
+  assert.equal(unscoped.snapshot({ workspaceRoot }).run, null);
+  const index = JSON.parse(fs.readFileSync(currentJsonPath(workspaceRoot), 'utf8'));
+  assert.equal(index.schemaVersion, 'otm.current-index.v1');
+  assert.equal(index.activeSessionCount, 2);
+  assert.throws(
+    () => unscoped.start({ workspaceRoot, goal: 'Ambiguous route', tasks: [{ title: 'Unsafe' }] }),
+    /session id is required/
+  );
+});
+
+test('scoped state writes do not prune another session scratch evidence', () => {
+  const workspaceRoot = tempWorkspace('otm-scratch-isolation-');
+  const baseEnv = testEnv('otm-scratch-isolation');
+  const managerA = createTaskManager({ cwd: workspaceRoot, env: { ...baseEnv, CODEX_THREAD_ID: 'scratch-a' } });
+  const managerB = createTaskManager({ cwd: workspaceRoot, env: { ...baseEnv, CODEX_THREAD_ID: 'scratch-b' } });
+  const routeA = managerA.start({ workspaceRoot, goal: 'Scratch A', tasks: [{ title: 'A' }] });
+  managerB.start({ workspaceRoot, goal: 'Scratch B', tasks: [{ title: 'B' }] });
+  const scratchB = workspaceScratchDir(workspaceRoot, 'scratch-b');
+  fs.mkdirSync(scratchB, { recursive: true });
+  const evidencePath = path.join(scratchB, 'old-but-active.txt');
+  fs.writeFileSync(evidencePath, 'preserve', 'utf8');
+  const oldTime = new Date(Date.now() - 60 * 60 * 1000);
+  fs.utimesSync(evidencePath, oldTime, oldTime);
+
+  managerA.progress({ workspaceRoot, taskId: routeA.snapshot.tasks[0].id, message: 'Write A state.' });
+  assert.equal(fs.existsSync(evidencePath), true);
+  createTaskManager({ cwd: workspaceRoot, env: baseEnv }).clearCurrent({ workspaceRoot });
+  assert.equal(fs.existsSync(evidencePath), true);
 });
 
 test('read-only snapshots do not rewrite current state files', async () => {
@@ -433,7 +501,7 @@ test('sqlite history pruning removes old inactive rows', { skip: !loadBetterSqli
 
 test('post-tool hook stores long raw command input in scratchpad instead of route evidence', async () => {
   const workspaceRoot = tempWorkspace('otm-scratchpad-');
-  const env = testEnv('otm-scratchpad');
+  const env = { ...testEnv('otm-scratchpad'), CODEX_THREAD_ID: 'scratchpad-session' };
   const manager = createTaskManager({ cwd: workspaceRoot, env });
   manager.start({
     workspaceRoot,
@@ -447,6 +515,8 @@ test('post-tool hook stores long raw command input in scratchpad instead of rout
     cwd: workspaceRoot,
     env,
     stdin: JSON.stringify({
+      session_id: 'scratchpad-session',
+      invocation_id: 'scratchpad-tool',
       tool_name: 'apply_patch',
       tool_input: { command: rawCommand },
       tool_response: { status: 0 }
@@ -980,7 +1050,7 @@ test('session start creates and refreshes only the managed AGENTS.md block', asy
   const created = await withCapturedStdout(() => runHookScript('session-start', {
     cwd: emptyWorkspace,
     env,
-    stdin: JSON.stringify({ cwd: emptyWorkspace, hook_event_name: 'SessionStart' })
+    stdin: JSON.stringify({ cwd: emptyWorkspace, hook_event_name: 'SessionStart', invocation_id: 'agents-create' })
   }));
   assert.match(fs.readFileSync(path.join(emptyWorkspace, 'AGENTS.md'), 'utf8'), /OVERTLI-TASK-MANAGER:BEGIN/);
   assert.match(created.result.systemMessage, /AGENTS\.md managed instructions: created/);
@@ -992,7 +1062,7 @@ test('session start creates and refreshes only the managed AGENTS.md block', asy
   const first = await withCapturedStdout(() => runHookScript('session-start', {
     cwd: workspaceRoot,
     env,
-    stdin: JSON.stringify({ cwd: workspaceRoot, hook_event_name: 'SessionStart' })
+    stdin: JSON.stringify({ cwd: workspaceRoot, hook_event_name: 'SessionStart', invocation_id: 'agents-first' })
   }));
   const firstAgents = fs.readFileSync(agentsPath, 'utf8');
   assert.match(firstAgents, /Keep this content/);
@@ -1004,7 +1074,7 @@ test('session start creates and refreshes only the managed AGENTS.md block', asy
   const second = await withCapturedStdout(() => runHookScript('session-start', {
     cwd: workspaceRoot,
     env,
-    stdin: JSON.stringify({ cwd: workspaceRoot, hook_event_name: 'SessionStart' })
+    stdin: JSON.stringify({ cwd: workspaceRoot, hook_event_name: 'SessionStart', invocation_id: 'agents-second' })
   }));
   const refreshed = fs.readFileSync(agentsPath, 'utf8');
   assert.match(refreshed, /Prefer thorough completion over shallow progress/);
@@ -1062,7 +1132,7 @@ test('project review reuses unchanged cache without rewriting files', () => {
 
 test('stop hook requires model-visible finalization before clearing current state by default', async () => {
   const workspaceRoot = tempWorkspace('otm-stop-finalize-');
-  const env = testEnv('otm-stop-finalize');
+  const env = { ...testEnv('otm-stop-finalize'), CODEX_THREAD_ID: 'stop-finalize-session' };
   const manager = createTaskManager({ cwd: workspaceRoot, env });
   const started = manager.start({
     workspaceRoot,
@@ -1081,7 +1151,7 @@ test('stop hook requires model-visible finalization before clearing current stat
   const blocked = await withCapturedStdout(() => runHookScript('stop', {
     cwd: workspaceRoot,
     env,
-    stdin: JSON.stringify({ cwd: workspaceRoot, hook_event_name: 'Stop', turn_id: 'turn-stop' })
+    stdin: JSON.stringify({ cwd: workspaceRoot, hook_event_name: 'Stop', turn_id: 'turn-stop', session_id: 'stop-finalize-session' })
   }));
   assert.equal(blocked.result.decision, 'block');
   assert.match(blocked.result.reason, /visible finalization must be model-driven/);
@@ -1093,8 +1163,152 @@ test('stop hook requires model-visible finalization before clearing current stat
   const allowed = await withCapturedStdout(() => runHookScript('stop', {
     cwd: workspaceRoot,
     env,
-    stdin: JSON.stringify({ cwd: workspaceRoot, hook_event_name: 'Stop', turn_id: 'turn-stop' })
+    stdin: JSON.stringify({ cwd: workspaceRoot, hook_event_name: 'Stop', turn_id: 'turn-stop', session_id: 'stop-finalize-session' })
   }));
   assert.equal(allowed.result.continue, true);
   assert.doesNotMatch(allowed.captured, /visible finalization must be model-driven/);
+});
+
+test('separate finalize and clear recover the completed scoped run and mark its summary cleared', () => {
+  const workspaceRoot = tempWorkspace('otm-finalize-clear-state-');
+  const env = { ...testEnv('otm-finalize-clear-state'), CODEX_THREAD_ID: 'finalize-clear-session' };
+  const manager = createTaskManager({ cwd: workspaceRoot, env });
+  const started = manager.start({ workspaceRoot, goal: 'Finalize then clear', tasks: [{ title: 'Finish' }] });
+  const taskId = started.snapshot.tasks[0].id;
+  finishInternalSteps(manager, workspaceRoot, taskId);
+  manager.completeTask({ workspaceRoot, taskId, evidence: { kind: 'test_result', summary: 'Complete.' } });
+
+  const finalized = manager.finalizeTurn({ workspaceRoot, outcome: 'completed' });
+  assert.equal(manager.store.getRun(started.run.id).status, 'completed');
+  assert.equal(finalized.summary.currentCleared, false);
+  manager.clearCurrent({ workspaceRoot });
+
+  assert.equal(manager.store.getRun(started.run.id).status, 'cleared');
+  assert.equal(manager.store.listSummaries(workspaceRoot).find((item) => item.runId === started.run.id).currentCleared, true);
+});
+
+test('identity-less hooks cannot read or mutate legacy route state', async () => {
+  const workspaceRoot = tempWorkspace('otm-unscoped-hooks-');
+  const env = testEnv('otm-unscoped-hooks');
+  const manager = createTaskManager({ cwd: workspaceRoot, env });
+  const legacy = manager.start({ workspaceRoot, goal: 'Legacy private route', tasks: [{ title: 'Do not expose this task' }] });
+  const before = manager.store.getEvents(legacy.run.id).length;
+
+  const sessionStart = await withCapturedStdout(() => runHookScript('session-start', {
+    cwd: workspaceRoot,
+    env,
+    stdin: JSON.stringify({ cwd: workspaceRoot, hook_event_name: 'SessionStart', invocation_id: 'unscoped-start' })
+  }));
+  const postTool = await withCapturedStdout(() => runHookScript('post-tool-use', {
+    cwd: workspaceRoot,
+    env,
+    stdin: JSON.stringify({ cwd: workspaceRoot, hook_event_name: 'PostToolUse', invocation_id: 'unscoped-tool', tool_name: 'Bash', tool_response: { exit_code: 1 } })
+  }));
+  const stop = await withCapturedStdout(() => runHookScript('stop', {
+    cwd: workspaceRoot,
+    env,
+    stdin: JSON.stringify({ cwd: workspaceRoot, hook_event_name: 'Stop', invocation_id: 'unscoped-stop' })
+  }));
+
+  assert.doesNotMatch(sessionStart.captured, /Legacy private route|Do not expose this task/);
+  assert.equal(postTool.result.continue, true);
+  assert.equal(stop.result.continue, true);
+  assert.equal(manager.store.getEvents(legacy.run.id).length, before);
+  assert.equal(manager.store.getRun(legacy.run.id).status, 'active');
+});
+
+test('duplicate hook commands emit user guidance only once per host invocation', async () => {
+  const workspaceRoot = tempWorkspace('otm-hook-dedupe-');
+  const env = { ...testEnv('otm-hook-dedupe'), CODEX_THREAD_ID: 'dedupe-session' };
+  const input = JSON.stringify({ cwd: workspaceRoot, hook_event_name: 'UserPromptSubmit', turn_id: 'dedupe-turn', session_id: 'dedupe-session', prompt: 'Implement a substantial feature.' });
+  const first = await withCapturedStdout(() => runHookScript('user-prompt-submit', { cwd: workspaceRoot, env, stdin: input }));
+  const duplicate = await withCapturedStdout(() => runHookScript('user-prompt-submit', { cwd: workspaceRoot, env, stdin: input }));
+
+  assert.match(first.result.hookSpecificOutput.additionalContext, /Overtli Task Manager protocol is active/);
+  assert.equal(duplicate.result.continue, true);
+  assert.equal(duplicate.result.hookSpecificOutput, undefined);
+});
+
+test('separate global and workspace hook processes claim one shared invocation', async () => {
+  const workspaceRoot = tempWorkspace('otm-hook-process-dedupe-');
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'otm-hook-process-state-'));
+  const cliPath = fileURLToPath(new URL('../bin/otm.mjs', import.meta.url));
+  const input = JSON.stringify({ cwd: workspaceRoot, hook_event_name: 'UserPromptSubmit', turn_id: 'process-dedupe-turn', session_id: 'process-dedupe-session', prompt: 'Implement a substantial feature.' });
+  const runHook = () => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [cliPath, 'hook', 'user-prompt-submit'], {
+      cwd: workspaceRoot,
+      env: { ...process.env, OTM_STORAGE: 'json', OTM_STATE_DIR: stateDir, CODEX_THREAD_ID: 'process-dedupe-session' },
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('exit', (code) => code === 0 ? resolve(JSON.parse(stdout.trim())) : reject(new Error(`Hook exited ${code}: ${stderr}`)));
+    child.stdin.end(input);
+  });
+
+  const outputs = await Promise.all([runHook(), runHook()]);
+  assert.equal(outputs.filter((item) => item.hookSpecificOutput?.additionalContext).length, 1);
+  assert.equal(outputs.filter((item) => item.continue === true && !item.hookSpecificOutput).length, 1);
+});
+
+test('repeated Stop feedback is released and cannot create an unbounded loop', async () => {
+  const workspaceRoot = tempWorkspace('otm-stop-repeat-');
+  const env = { ...testEnv('otm-stop-repeat'), CODEX_THREAD_ID: 'repeat-session', OTM_DEDUPE_HOOKS: '0' };
+  const manager = createTaskManager({ cwd: workspaceRoot, env });
+  manager.start({ workspaceRoot, goal: 'Incomplete route', tasks: [{ title: 'Still open' }] });
+  const payload = { cwd: workspaceRoot, hook_event_name: 'Stop', turn_id: 'repeat-turn', session_id: 'repeat-session' };
+
+  const first = await withCapturedStdout(() => runHookScript('stop', { cwd: workspaceRoot, env, stdin: JSON.stringify(payload) }));
+  const repeated = await withCapturedStdout(() => runHookScript('stop', { cwd: workspaceRoot, env, stdin: JSON.stringify({ ...payload, stop_hook_active: true }) }));
+
+  assert.equal(first.result.decision, 'block');
+  assert.match(first.result.reason, /Still open/);
+  assert.equal(repeated.result.continue, true);
+  assert.equal(repeated.result.decision, undefined);
+});
+
+test('Stop hook process failures fail open instead of returning another block', () => {
+  const workspaceRoot = tempWorkspace('otm-stop-fail-open-');
+  const invalidStateDir = path.join(workspaceRoot, 'state-file');
+  fs.writeFileSync(invalidStateDir, 'not a directory', 'utf8');
+  const hookPath = fileURLToPath(new URL('../hooks/stop.mjs', import.meta.url));
+  const child = spawnSync(process.execPath, [hookPath], {
+    cwd: workspaceRoot,
+    env: { ...process.env, OTM_STORAGE: 'json', OTM_STATE_DIR: invalidStateDir, CODEX_THREAD_ID: 'broken-stop' },
+    input: JSON.stringify({ cwd: workspaceRoot, hook_event_name: 'Stop', session_id: 'broken-stop' }),
+    encoding: 'utf8'
+  });
+  const output = JSON.parse(child.stdout.trim());
+  assert.equal(output.continue, true);
+  assert.equal(output.decision, undefined);
+  assert.match(output.systemMessage, /Stop hook warning/);
+});
+
+test('terminal task transitions normalize internal steps and reject stale progress', () => {
+  const workspaceRoot = tempWorkspace('otm-terminal-transitions-');
+  const manager = createTaskManager({ cwd: workspaceRoot, env: testEnv('otm-terminal-transitions') });
+  const started = manager.start({
+    workspaceRoot,
+    goal: 'Terminal transitions',
+    tasks: [
+      { title: 'Drop this', internalSteps: ['Inspect', 'Implement'] },
+      { title: 'Keep this', internalSteps: ['Continue'] }
+    ]
+  });
+  const droppedId = started.snapshot.tasks[0].id;
+  manager.dropTask({ workspaceRoot, taskId: droppedId, reason: 'No longer required.' });
+  const dropped = manager.store.getTask(droppedId);
+
+  assert.equal(dropped.status, 'dropped');
+  assert.deepEqual(internalStepStatuses(dropped), ['skipped', 'skipped']);
+  const next = manager.snapshot({ workspaceRoot, write: false }).snapshot.tasks.find((task) => task.title === 'Keep this');
+  assert.equal(next.status, 'active');
+  assert.deepEqual(internalStepStatuses(next), ['active']);
+  assert.throws(
+    () => manager.progress({ workspaceRoot, taskId: droppedId, message: 'Stale update.' }),
+    /Cannot record progress for a task in status dropped/
+  );
 });

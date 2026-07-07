@@ -5,11 +5,13 @@ import { installWorkspace, renderInstallResult } from '../install/install-worksp
 import { installGlobal, renderGlobalInstallResult } from '../install/install-global.mjs';
 import { reviewProjectContext } from '../context/project-review.mjs';
 import { runHookScript } from '../hooks/runner.mjs';
+import { resolveSessionId } from '../core/session-scope.mjs';
 
 export async function handleCli({ argv, cwd, stdin, packageRoot, env }) {
   const command = argv[0] || 'help';
   const flags = parseFlags(argv.slice(1));
   const workspaceRoot = path.resolve(flags.workspace || flags.workspaceRoot || findWorkspaceRoot(cwd));
+  const sessionId = resolveSessionId({ sessionId: flags.sessionId }, env);
   const manager = createTaskManager({ cwd: workspaceRoot, env });
 
   if (command === 'help' || command === '--help' || command === '-h') {
@@ -42,12 +44,12 @@ export async function handleCli({ argv, cwd, stdin, packageRoot, env }) {
   }
 
   if (command === 'doctor') {
-    console.log(renderDoctor({ workspaceRoot, packageRoot, manager }));
+    console.log(renderDoctor({ workspaceRoot, packageRoot, manager, sessionId }));
     return;
   }
 
   if (command === 'snapshot') {
-    const result = manager.snapshot({ workspaceRoot });
+    const result = manager.snapshot({ workspaceRoot, sessionId, write: false });
     console.log(result.markdown);
     return;
   }
@@ -62,7 +64,7 @@ export async function handleCli({ argv, cwd, stdin, packageRoot, env }) {
   }
 
   if (command === 'clear-current') {
-    const result = manager.clearCurrent({ workspaceRoot, deleteFiles: Boolean(flags.deleteFiles) });
+    const result = manager.clearCurrent({ workspaceRoot, sessionId, deleteFiles: Boolean(flags.deleteFiles) });
     console.log(result.markdown);
     return;
   }
@@ -114,9 +116,9 @@ function parseFlags(items) {
   return flags;
 }
 
-function renderDoctor({ workspaceRoot, packageRoot, manager }) {
-  const active = manager.snapshot({ workspaceRoot }).run;
-  const current = readJson(currentJsonPath(workspaceRoot, active?.sessionId), null);
+function renderDoctor({ workspaceRoot, packageRoot, manager, sessionId }) {
+  const active = manager.snapshot({ workspaceRoot, sessionId, write: false }).run;
+  const current = readJson(currentJsonPath(workspaceRoot, sessionId), null);
   const index = readJson(currentJsonPath(workspaceRoot), null);
   const lines = [];
   lines.push('## Overtli Task Manager doctor');
@@ -124,6 +126,7 @@ function renderDoctor({ workspaceRoot, packageRoot, manager }) {
   lines.push(`Workspace: \`${workspaceRoot}\``);
   lines.push(`Package: \`${packageRoot}\``);
   lines.push(`Storage: \`${manager.store.kind}\``);
+  lines.push(`Session: \`${sessionId || 'unscoped'}\``);
   lines.push(`Active route for session: ${active ? `yes — ${active.id}` : 'no'}`);
   lines.push(`Session current.json: ${current ? 'present' : 'not present'}`);
   lines.push(`Active workspace sessions: ${index?.activeSessionCount ?? manager.store.listActiveRuns(workspaceRoot).length}`);
@@ -156,10 +159,10 @@ function helpText() {
 Commands:
   otm install [--workspace PATH] [--dry-run] [--with-project-mcp-config] [--agents-file AGENTS.override.md]
   otm install-global [--codex-home PATH] [--dry-run]
-  otm doctor [--workspace PATH]
-  otm snapshot [--workspace PATH]
+  otm doctor [--workspace PATH] [--session-id ID]
+  otm snapshot [--workspace PATH] [--session-id ID]
   otm review-project [--workspace PATH] [--max-files N]
-  otm clear-current [--workspace PATH] [--delete-files]
+  otm clear-current [--workspace PATH] [--session-id ID] [--delete-files]
   otm cleanup [--workspace PATH] [--min-age-ms N] [--scratch-max-age-ms N]
   otm prune-history [--workspace PATH] [--retention-days N] [--dry-run]
   otm mcp-config

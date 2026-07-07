@@ -91,7 +91,7 @@ async function dispatchTool({ name, args, manager, packageRoot, env }) {
     case 'otm_doctor': {
       const workspaceRoot = args.workspaceRoot || findWorkspaceRoot(process.cwd());
       const sessionId = resolveSessionId(args, env);
-      const snap = manager.snapshot({ workspaceRoot, sessionId });
+      const snap = manager.snapshot({ workspaceRoot, sessionId, write: false });
       const activeSessions = manager.store.listActiveRuns(workspaceRoot).length;
       return { snapshot: snap.snapshot, markdown: `## OTM doctor\n\nStorage: \`${manager.store.kind}\`\nSession: \`${sessionId || 'unscoped'}\`\nActive route for session: ${snap.run ? `yes — ${snap.run.id}` : 'no'}\nActive workspace sessions: ${activeSessions}\nSession current.json: \`${currentJsonPath(workspaceRoot, sessionId)}\`\nWorkspace index: \`${currentJsonPath(workspaceRoot)}\`\n` };
     }

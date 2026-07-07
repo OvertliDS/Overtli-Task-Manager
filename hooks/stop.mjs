@@ -7,9 +7,7 @@ function readStdin() {
 }
 
 runHookScript('stop', { stdin: readStdin(), cwd: process.cwd(), env: process.env }).catch((error) => {
-  if ('stop' === 'stop') {
-    process.stdout.write(JSON.stringify({ decision: 'block', reason: `OTM hook failed and needs repair: ${error?.message || error}` }) + '\n');
-  } else {
-    process.stdout.write(JSON.stringify({ continue: true, suppressOutput: true, systemMessage: `OTM hook warning: ${error?.message || error}` }) + '\n');
-  }
+  // Stop-hook failures must fail open. A blocking error response is replayed by
+  // the host and can trap the model in an otherwise unbreakable feedback loop.
+  process.stdout.write(JSON.stringify({ continue: true, suppressOutput: true, systemMessage: `OTM Stop hook warning: ${error?.message || error}` }) + '\n');
 });

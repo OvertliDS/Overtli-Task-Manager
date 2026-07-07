@@ -9,6 +9,10 @@ export function resolveSessionId(args = {}, env = process.env) {
   return normalizeSessionId(
     args.sessionId
     || args.session_id
+    || args.threadId
+    || args.thread_id
+    || args.conversationId
+    || args.conversation_id
     || env.OTM_SESSION_ID
     || env.CODEX_THREAD_ID
   );

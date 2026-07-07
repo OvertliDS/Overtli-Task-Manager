@@ -19,6 +19,11 @@ Use this skill when the user asks to install, initialize, repair, configure, or 
 8. Use optional project MCP config only when the user wants project-scoped MCP configuration. Otherwise provide the `otm mcp-config` snippet for global Codex config.
 9. Run `otm_doctor` after installation.
 
+For a requested global refresh, run `otm install-global` from the installed
+plugin copy after updating it. Global and workspace hook entries may coexist;
+runtime invocation deduplication prevents duplicate guidance and Stop feedback.
+Verify both the configured command paths and a real hook smoke invocation.
+
 ## Safety
 
 - If a managed block has only one marker, stop and report manual repair instructions.

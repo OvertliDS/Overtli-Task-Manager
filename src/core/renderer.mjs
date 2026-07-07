@@ -151,12 +151,12 @@ export function renderDeltaMarkdown(snapshot, options = {}) {
 }
 
 export function writeCurrentFiles(workspaceRoot, snapshot) {
-  cleanupWorkspaceStateTempFiles(workspaceRoot);
+  cleanupWorkspaceStateTempFiles(workspaceRoot, snapshot.sessionId ? { sessionId: snapshot.sessionId } : {});
   const tempDir = workspaceTempDir(workspaceRoot);
   const jsonChanged = atomicWriteJson(currentJsonPath(workspaceRoot, snapshot.sessionId), snapshot, { tempDir });
   const markdownChanged = atomicWriteText(currentMarkdownPath(workspaceRoot, snapshot.sessionId), renderSnapshotMarkdown(snapshot), { tempDir });
   const indexChanged = snapshot.sessionId ? writeWorkspaceCurrentIndex(workspaceRoot, { tempDir }) : { jsonChanged: false, markdownChanged: false };
-  cleanupWorkspaceStateTempFiles(workspaceRoot);
+  cleanupWorkspaceStateTempFiles(workspaceRoot, snapshot.sessionId ? { sessionId: snapshot.sessionId } : {});
   return { jsonChanged, markdownChanged, indexChanged };
 }
 

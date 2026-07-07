@@ -25,6 +25,12 @@ Use this skill when the user asks Codex to build, fix, refactor, research, revie
 14. If the audit says stop is blocked, keep working on the listed required segments.
 15. When the audit passes, call `otm_finalize_turn`, show its Markdown summary to the user, then call `otm_clear_current`.
 
+OTM hooks enforce only a resolved Codex session. Never substitute the
+workspace index or a legacy unscoped route when a hook lacks session identity.
+Duplicate global/workspace hook invocations and host-marked repeated Stop calls
+are termination safeguards; do not counteract their silent allow response by
+manually repeating stale hook feedback.
+
 ## Quality bar
 
 - Aim for complete, production-quality work.

@@ -156,10 +156,10 @@ node ~/.codex/plugins/overtli-task-manager/bin/otm.mjs doctor
 otm install [--workspace PATH] [--dry-run] [--with-project-mcp-config]
             [--agents-file AGENTS.override.md]
 otm install-global [--codex-home PATH] [--dry-run]
-otm doctor [--workspace PATH]
-otm snapshot [--workspace PATH]
+otm doctor [--workspace PATH] [--session-id ID]
+otm snapshot [--workspace PATH] [--session-id ID]
 otm review-project [--workspace PATH] [--max-files N]
-otm clear-current [--workspace PATH] [--delete-files]
+otm clear-current [--workspace PATH] [--session-id ID] [--delete-files]
 otm cleanup [--workspace PATH] [--min-age-ms N] [--scratch-max-age-ms N]
 otm prune-history [--workspace PATH] [--retention-days N] [--dry-run]
 otm mcp-config
@@ -218,13 +218,18 @@ the full checklist unnecessarily.
 
 ### Concurrent chats and windows
 
-OTM resolves a session in this order: explicit `sessionId`, `OTM_SESSION_ID`,
-then `CODEX_THREAD_ID`. Active-run lookup always includes both the workspace and
-that session. `replaceExisting=true` therefore replaces only the current
-session's route. An older unscoped active route is claimed atomically by the
-first scoped session that resumes it; later sessions receive independent
-routes. Explicit `runId` calls are rejected when the run belongs to another
-workspace or session.
+OTM resolves a session from explicit `sessionId`/hook session, thread, or
+conversation fields, then `OTM_SESSION_ID`, then `CODEX_THREAD_ID`. Active-run
+lookup always includes both the workspace and that session.
+`replaceExisting=true` therefore replaces only the current session's route.
+Explicit `runId` calls are rejected when the run belongs to another workspace
+or session.
+
+Legacy unscoped routes are not adopted automatically because doing so could
+attach another chat's stale checklist to a new session. Set
+`OTM_CLAIM_LEGACY_ROUTE=1` only for an intentional one-time migration. Unscoped
+route creation is rejected while scoped routes are active, and unscoped
+diagnostics cannot overwrite the workspace session index.
 
 SQLite uses WAL mode and a workspace/session index. The JSON fallback uses a
 cross-process lock for mutations so concurrent Codex processes do not lose one
@@ -265,16 +270,21 @@ work. Fallback-planner tasks keep their own actionable steps.
 | Area | Behavior |
 |---|---|
 | MCP results | Markdown/plain-text first; full JSON remains available through `otm://current` |
-| Passive hooks | Use read-only snapshots and avoid unchanged state rewrites |
+| Passive hooks | Touch route state only when the current Codex session is identifiable |
+| Duplicate installs | Cross-process invocation claims suppress duplicate global/workspace hook output |
 | Evidence tracking | Defaults to file edits, validation/build commands, failures, and explicit OTM checkpoints |
-| Opt-ins | `OTM_RECORD_PRE_TOOL=1`, `OTM_TRACK_MCP_EVIDENCE=1`, `OTM_STOP_AUTO_FINALIZE=1` |
+| Opt-ins | `OTM_RECORD_PRE_TOOL=1`, `OTM_TRACK_MCP_EVIDENCE=1`, `OTM_STOP_AUTO_FINALIZE=1`, `OTM_CLAIM_LEGACY_ROUTE=1` |
 | Hook timeouts | SessionStart 15s, UserPromptSubmit 12s, PreToolUse 8s, PostToolUse 12s, Pre/PostCompact 15s, Stop 45s |
 
 Normal closeout is model-visible: run `otm_audit_stop`, call
 `otm_finalize_turn`, show the returned Markdown summary, then call
 `otm_clear_current`. The Stop hook blocks incomplete routes and, by default,
 also blocks a complete-but-unfinalized route once so the model can show that
-summary before clearing state.
+summary before clearing state. A host-marked repeated Stop invocation is always
+released, and Stop-hook execution failures fail open with a warning. These are
+termination safeguards: they prevent an invalid or duplicate hook from burning
+tokens indefinitely while explicit `otm_audit_stop` remains the authoritative
+completion check.
 
 ---
 
