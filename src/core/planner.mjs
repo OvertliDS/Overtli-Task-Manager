@@ -1,13 +1,18 @@
 import { clampText, compactOneLine } from './text-utils.mjs';
 
 export function deriveFallbackTasks(prompt, options = {}) {
+  return planFallbackRoute(prompt, options).tasks;
+}
+
+export function planFallbackRoute(prompt, options = {}) {
   const text = combinePromptContext(prompt, options).trim();
   const goal = options.goal || compactOneLine(text || 'Complete the requested Codex task', 180);
   const lower = text.toLowerCase();
+  const documentationEdit = /\b(update|edit|rewrite|fix|add|remove|create|implement)\s+(?:the\s+)?(?:readme|docs?|documentation|architecture|guide|manual)\b/.test(lower);
   const planningOnlyLike = (
-    /\b(plan|roadmap|proposal|strategy|outline|spec|design doc|document|docs|documentation)\b/.test(lower)
+    /\b(plan|roadmap|proposal|strategy|outline|spec|design doc)\b/.test(lower)
     || /\b(for later|later implementation|future implementation|not for implementation now|not implement(?:ing)? now)\b/.test(lower)
-  ) && !/\b(complete now|do now|finish now|implement now|fix now|ship now|commit|push|install globally|reinstall globally)\b/.test(lower);
+  ) && !documentationEdit && !/\b(complete now|do now|finish now|implement now|fix now|ship now|commit|push|install globally|reinstall globally)\b/.test(lower);
   const implementationLike = !planningOnlyLike
     && /\b(build|create|implement|fix|refactor|change|add|remove|debug|test|ship|repo|code|extension|mcp|hook|plugin|readme|install|reinstall|commit|push|run|wire|update|repair|resolve)\b/.test(lower);
   const researchLike = planningOnlyLike || /\b(research|review|analyze|inspect|compare|summarize|explain|plan)\b/.test(lower);
@@ -59,11 +64,21 @@ export function deriveFallbackTasks(prompt, options = {}) {
   if (implementationLike) {
     tasks.push(
       { title: 'Validate behavior and check for regressions', required: true, priority: 80, acceptanceCriteria: ['Run the most relevant available checks', 'Record failures with blocker evidence or passing checks with validation evidence'], internalSteps: ['Run targeted syntax, unit, or smoke checks for changed surfaces', 'Inspect failures before deciding whether they are blockers', 'Review the final diff for accidental scope expansion'] },
-      { title: 'Summarize outcome and clear active checklist', required: true, priority: 90, acceptanceCriteria: ['Turn summary is written', 'Active route state is cleared after completion'], internalSteps: ['Reconcile each route segment against evidence', 'Write a concise final summary or checkpoint', 'Clear current route state only after the stop audit passes'] }
+      { title: 'Reconcile evidence and prepare final summary', required: true, priority: 90, acceptanceCriteria: ['Route evidence is reconciled', 'Final summary readiness is verified'], internalSteps: ['Reconcile each route segment against evidence', 'Write a concise final summary or checkpoint', 'Verify readiness for the separate finalization lifecycle operation'] }
     );
   }
 
-  return tasks;
+  return {
+    tasks,
+    metadata: {
+      classification: documentationEdit ? 'documentation_edit' : (planningOnlyLike ? 'planning_only' : (implementationLike ? 'implementation' : (researchLike ? 'review_or_research' : 'simple'))),
+      extractedItemCount: routePoints.length,
+      omittedItemCount: 0,
+      reasons: documentationEdit ? ['documentation-edit action takes implementation precedence'] : (planningOnlyLike ? ['explicit planning-only language without an immediate implementation directive'] : []),
+      warnings: [],
+      confidence: routePoints.length >= 2 ? 'high' : 'medium'
+    }
+  };
 }
 
 export function combinePromptContext(prompt, options = {}) {
@@ -82,6 +97,8 @@ export function classifyPrompt(prompt, hasActiveRun = false) {
   if (hasActiveRun && /\b(continue|resume|keep going|carry on|next|from checkpoint)\b/.test(text)) return 'continue';
   if (hasActiveRun && /\b(actually|instead|skip|drop|change|also|add|remove|update|steer|focus on|do not|don't)\b/.test(text)) return 'steer';
   if (/\b(continue|resume|from checkpoint)\b/.test(text)) return 'resume';
+  if (/\b(build|create|implement|fix|refactor|add|remove|debug|repair|wire|update)\b/.test(text)
+    && /\b(code|bug|test|readme|docs?|hook|mcp|plugin|config|install|file|feature)\b/.test(text)) return 'new_route';
   if (text.length < 140 && !/[.;:]|\band\b.*\band\b/.test(text)) return 'simple';
   return 'new_route';
 }
@@ -96,7 +113,9 @@ function extractRoutePoints(text) {
 
   points.push(...extractInlineRoutePoints(text));
   points.push(...extractSequencedActionPoints(text));
-  const unique = dedupePoints(points).slice(0, 12);
+  // Do not silently drop requested work.  The manager enforces the durable
+  // maximum and can return structured overflow when a caller configures one.
+  const unique = dedupePoints(points);
   return unique.length >= 2 ? unique : [];
 }
 

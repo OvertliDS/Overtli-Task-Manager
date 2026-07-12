@@ -7,6 +7,9 @@ const BLOCK_END = '# OVERTLI-TASK-MANAGER:GITIGNORE:END';
 export function patchGitignore({ workspaceRoot, dryRun = false } = {}) {
   const filePath = path.join(workspaceRoot, '.gitignore');
   const before = readText(filePath, '');
+  if (markerCount(before, BLOCK_BEGIN) > 1 || markerCount(before, BLOCK_END) > 1) {
+    return { ok: false, action: 'conflict', filePath, reason: 'Gitignore contains duplicate OTM managed block markers.' };
+  }
   const block = `${BLOCK_BEGIN}
 .codex/overtli-task-manager/current.json
 .codex/overtli-task-manager/current.md
@@ -29,4 +32,8 @@ ${BLOCK_END}`;
   }
   if (!dryRun && after !== before) atomicWriteText(filePath, after);
   return { ok: true, filePath, dryRun, action: after === before ? 'unchanged' : 'updated', changed: after !== before, preview: dryRun ? after : undefined };
+}
+
+function markerCount(text, marker) {
+  return String(text).split(marker).length - 1;
 }

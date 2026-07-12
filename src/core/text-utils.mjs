@@ -25,7 +25,15 @@ export function similarityScore(a, b) {
 }
 
 export function markdownEscapeCell(value) {
-  return String(value ?? '').replace(/\|/g, '\\|').replace(/\n+/g, ' ');
+  return markdownEscapeText(value).replace(/\|/g, '\\|');
+}
+
+/** Escape untrusted inline text in Markdown renderers without making it opaque. */
+export function markdownEscapeText(value) {
+  return String(value ?? '')
+    .replace(/\\/g, '\\\\')
+    .replace(/[\`*_{}\[\]<>#+\-!()]/g, '\\$&')
+    .replace(/\r?\n+/g, ' ');
 }
 
 export function compactOneLine(value, max = 140) {

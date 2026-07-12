@@ -3,6 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { sessionScopeKey } from './session-scope.mjs';
+import { OtmError } from './errors.mjs';
 
 const DEFAULT_TEMP_MIN_AGE_MS = 60_000;
 const DEFAULT_SCRATCH_MAX_AGE_MS = 30 * 60 * 1000;
@@ -36,6 +37,33 @@ export function readJson(filePath, fallback = null) {
   }
 }
 
+/**
+ * Read an OTM-owned JSON artifact without turning corruption into an empty
+ * value.  Callers that would otherwise overwrite a current snapshot or serve
+ * it through MCP use this instead of the intentionally lenient generic
+ * `readJson` helper.
+ */
+export function readOtmJsonArtifact(filePath, { allowMissing = true } = {}) {
+  let text;
+  try {
+    text = fs.readFileSync(filePath, 'utf8');
+  } catch (error) {
+    if (allowMissing && error?.code === 'ENOENT') return null;
+    throw new OtmError('Unable to read an OTM JSON artifact. Preserve the file and use doctor or repair before retrying.', {
+      code: 'SNAPSHOT_READ_FAILED',
+      details: { path: filePath, reason: error?.code || 'READ_FAILED' }
+    });
+  }
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new OtmError('An OTM JSON artifact is malformed. It was preserved; run doctor and repair or restore a known-good backup before retrying.', {
+      code: 'SNAPSHOT_CORRUPTION',
+      details: { path: filePath, reason: String(error?.message || 'INVALID_JSON').slice(0, 160) }
+    });
+  }
+}
+
 export function atomicWriteText(filePath, text, options = {}) {
   ensureDir(path.dirname(filePath));
   if (readText(filePath, null) === text) return false;
@@ -65,16 +93,17 @@ export function cleanupWorkspaceStateTempFiles(workspaceRoot, options = {}) {
   const stateDir = workspaceStateDir(workspaceRoot);
   const projectCacheDir = cacheDir(workspaceRoot);
   const tempDir = workspaceTempDir(workspaceRoot);
-  const scratchDirs = options.sessionId
+  const scratchDirs = (options.sessionId
     ? [workspaceScratchDir(workspaceRoot, options.sessionId)]
-    : workspaceScratchDirs(workspaceRoot);
+    : workspaceScratchDirs(workspaceRoot)).filter((scratchDir) => !new Set(options.excludeSessionIds || []).has(path.basename(path.dirname(path.dirname(scratchDir)))));
   const minAgeMs = Number.isFinite(Number(options.minAgeMs)) ? Number(options.minAgeMs) : DEFAULT_TEMP_MIN_AGE_MS;
   const scratchMaxAgeMs = Number.isFinite(Number(options.scratchMaxAgeMs)) ? Number(options.scratchMaxAgeMs) : DEFAULT_SCRATCH_MAX_AGE_MS;
+  const dryRun = options.dryRun === true;
   return [
-    ...cleanupTempFilesInDir(stateDir, { minAgeMs }),
-    ...cleanupTempFilesInDir(projectCacheDir, { minAgeMs }),
-    ...cleanupTempFilesInDir(tempDir, { minAgeMs }),
-    ...scratchDirs.flatMap((scratchDir) => cleanupScratchFilesInDir(scratchDir, { maxAgeMs: scratchMaxAgeMs }))
+    ...cleanupTempFilesInDir(stateDir, { minAgeMs, dryRun }),
+    ...cleanupTempFilesInDir(projectCacheDir, { minAgeMs, dryRun }),
+    ...cleanupTempFilesInDir(tempDir, { minAgeMs, dryRun }),
+    ...scratchDirs.flatMap((scratchDir) => cleanupScratchFilesInDir(scratchDir, { maxAgeMs: scratchMaxAgeMs, dryRun }))
   ];
 }
 
@@ -155,7 +184,7 @@ export function statSafe(filePath) {
   }
 }
 
-function cleanupTempFilesInDir(dir, { minAgeMs }) {
+function cleanupTempFilesInDir(dir, { minAgeMs, dryRun = false }) {
   if (!pathExists(dir)) return [];
   const now = Date.now();
   const removed = [];
@@ -164,10 +193,8 @@ function cleanupTempFilesInDir(dir, { minAgeMs }) {
     const filePath = path.join(dir, entry.name);
     const stat = statSafe(filePath);
     if (!stat || (minAgeMs > 0 && now - stat.mtimeMs < minAgeMs)) continue;
-    try {
-      fs.rmSync(filePath, { force: true });
-      removed.push(filePath);
-    } catch {}
+    if (dryRun) { removed.push(filePath); continue; }
+    try { fs.rmSync(filePath, { force: true }); removed.push(filePath); } catch {}
   }
   return removed;
 }
@@ -176,7 +203,7 @@ function isOtmAtomicTempName(name) {
   return /^(?:current\.json|current\.md|install\.json|[^\\/]+\.md|[^\\/]+\.json)\.\d+\.\d+\.tmp$/i.test(String(name || ''));
 }
 
-function cleanupScratchFilesInDir(dir, { maxAgeMs }) {
+function cleanupScratchFilesInDir(dir, { maxAgeMs, dryRun = false }) {
   if (!pathExists(dir) || maxAgeMs < 0) return [];
   const now = Date.now();
   const removed = [];
@@ -185,10 +212,8 @@ function cleanupScratchFilesInDir(dir, { maxAgeMs }) {
     const filePath = path.join(dir, entry.name);
     const stat = statSafe(filePath);
     if (!stat || (maxAgeMs > 0 && now - stat.mtimeMs < maxAgeMs)) continue;
-    try {
-      fs.rmSync(filePath, { force: true });
-      removed.push(filePath);
-    } catch {}
+    if (dryRun) { removed.push(filePath); continue; }
+    try { fs.rmSync(filePath, { force: true }); removed.push(filePath); } catch {}
   }
   return removed;
 }

@@ -1,7 +1,20 @@
 export function toMcpResult(result) {
   return {
-    content: [{ type: 'text', text: result?.markdown || renderPlainResult(result) }]
+    content: [{ type: 'text', text: result?.markdown || renderPlainResult(result) }],
+    // MCP clients that understand structuredContent receive a machine-safe
+    // companion payload with a stable envelope; Markdown remains the
+    // human-facing representation and arbitrary operation fields stay inside
+    // `result` rather than leaking into the protocol root.
+    structuredContent: { ok: true, result: sanitizeStructuredResult(result) }
   };
+}
+
+function sanitizeStructuredResult(value) {
+  if (value === undefined) return { ok: true };
+  return JSON.parse(JSON.stringify(value, (key, item) => {
+    if (/authorization|token|secret|password|private.?key/i.test(key)) return '[REDACTED]';
+    return item;
+  }));
 }
 
 function renderPlainResult(result) {

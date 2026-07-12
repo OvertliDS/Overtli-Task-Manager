@@ -6,7 +6,7 @@ import { handleCli } from '../src/cli/commands.mjs';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-function readStdinIfAvailable() {
+function readStdinForHook() {
   try {
     if (process.stdin.isTTY) return '';
     return readFileSync(0, 'utf8');
@@ -18,10 +18,12 @@ function readStdinIfAvailable() {
 handleCli({
   argv: process.argv.slice(2),
   cwd: process.cwd(),
-  stdin: readStdinIfAvailable(),
+  stdin: process.argv[2] === 'hook' ? readStdinForHook() : '',
   packageRoot,
   env: process.env
+}).then((result) => {
+  if (Number.isInteger(result?.exitCode)) process.exitCode = result.exitCode;
 }).catch((error) => {
-  console.error(`[Overtli Task Manager] ${error?.stack || error?.message || error}`);
+  console.error(`[Overtli Task Manager] ${error?.code ? `${error.code}: ` : ''}${error?.message || error}`);
   process.exit(1);
 });

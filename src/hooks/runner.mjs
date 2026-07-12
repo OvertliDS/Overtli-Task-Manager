@@ -7,53 +7,61 @@ import { atomicWriteText, cleanupWorkspaceStateTempFiles, ensureDir, findWorkspa
 import { reviewProjectContext } from '../context/project-review.mjs';
 import { patchAgentsFile } from '../install/agent-block.mjs';
 import { resolveSessionId } from '../core/session-scope.mjs';
+import { redactSensitiveText } from '../core/validation.mjs';
 
 export async function runHookScript(eventName, { stdin = '', cwd = process.cwd(), env = process.env } = {}) {
   const input = parseJson(stdin, {});
   const workspaceRoot = findWorkspaceRoot(input.cwd || cwd);
   const sessionId = resolveSessionId(input, env);
-  try { cleanupWorkspaceStateTempFiles(workspaceRoot, { sessionId, ...(sessionId ? {} : { scratchMaxAgeMs: -1 }) }); } catch {}
+  let cleanupDiagnostic = null;
+  try {
+    cleanupWorkspaceStateTempFiles(workspaceRoot, { sessionId, ...(sessionId ? {} : { scratchMaxAgeMs: -1 }) });
+  } catch (error) {
+    // Hooks remain fail-open, but maintenance errors must be visible instead
+    // of being quietly discarded. Redaction keeps host output safe.
+    cleanupDiagnostic = `OTM hook diagnostic: startup cleanup was not completed. ${redactSensitiveText(error?.message || String(error))}`;
+  }
+  let result;
   if (!claimHookInvocation({ eventName, input, workspaceRoot, sessionId, env })) {
-    return emitJson({ continue: true, suppressOutput: true });
+    result = { continue: true, suppressOutput: true };
+  } else {
+    const manager = createTaskManager({ cwd: workspaceRoot, env });
+    switch (eventName) {
+      case 'session-start': result = handleSessionStart(manager, input, workspaceRoot, env); break;
+      case 'user-prompt-submit': result = handleUserPromptSubmit(manager, input, workspaceRoot, env); break;
+      case 'pre-tool-use': result = handlePreToolUse(manager, input, workspaceRoot, env); break;
+      case 'post-tool-use': result = handlePostToolUse(manager, input, workspaceRoot, env); break;
+      case 'pre-compact': result = handlePreCompact(manager, input, workspaceRoot, env); break;
+      case 'post-compact': result = handlePostCompact(manager, input, workspaceRoot, env); break;
+      case 'stop': result = handleStop(manager, input, workspaceRoot, env); break;
+      default: result = { continue: true, suppressOutput: true };
+    }
   }
-  const manager = createTaskManager({ cwd: workspaceRoot, env });
+  return emitJson(appendHookDiagnostic(result, cleanupDiagnostic));
+}
 
-  switch (eventName) {
-    case 'session-start':
-      return emitJson(handleSessionStart(manager, input, workspaceRoot, env));
-    case 'user-prompt-submit':
-      return emitJson(handleUserPromptSubmit(manager, input, workspaceRoot, env));
-    case 'pre-tool-use':
-      return emitJson(handlePreToolUse(manager, input, workspaceRoot, env));
-    case 'post-tool-use':
-      return emitJson(handlePostToolUse(manager, input, workspaceRoot, env));
-    case 'pre-compact':
-      return emitJson(handlePreCompact(manager, input, workspaceRoot, env));
-    case 'post-compact':
-      return emitJson(handlePostCompact(manager, input, workspaceRoot, env));
-    case 'stop':
-      return emitJson(handleStop(manager, input, workspaceRoot, env));
-    default:
-      return emitJson({ continue: true, suppressOutput: true });
-  }
+function appendHookDiagnostic(result, diagnostic) {
+  if (!diagnostic) return result;
+  return { ...result, systemMessage: [result.systemMessage, diagnostic].filter(Boolean).join('\n') };
 }
 
 function handleSessionStart(manager, input, workspaceRoot, env) {
   const sessionId = resolveSessionId(input, env);
   const agentsSync = syncAgentsInstructions(workspaceRoot, env);
   let projectReview = null;
+  let projectReviewError = null;
   try {
     projectReview = reviewProjectContext({ workspaceRoot, maxFiles: Number(env.OTM_PROJECT_REVIEW_MAX_FILES || 20) });
     if (!projectReview.unchanged) {
       manager.upsertMemory({ workspaceRoot, kind: 'project_overview', title: 'Project overview cache', body: projectReview.summary, tags: ['project-overview', 'auto-review'], source: { fingerprint: projectReview.fingerprint, sourceCount: projectReview.sourceCount } });
     }
-  } catch {}
+  } catch (error) { projectReviewError = error?.message || String(error); }
   const snap = sessionId
     ? manager.snapshot({ workspaceRoot, sessionId, lastUpdate: { kind: 'session_start', message: 'Session loaded OTM state.', at: new Date().toISOString() } })
     : { run: null, markdown: '' };
   const context = snap.run
     ? `Overtli Task Manager loaded an active route. Continue using OTM tools and keep current.json updated.\n\n${snap.markdown}`
-    : `Overtli Task Manager is available. For non-trivial work, call otm_start or otm_reconcile before implementation. Project awareness cache ${projectReview ? (projectReview.unchanged ? 'is current' : 'was refreshed') : 'was not refreshed'}.`;
+    : `Overtli Task Manager is available. For non-trivial work, call otm_start or otm_reconcile before implementation. Project awareness cache ${projectReview ? (projectReview.unchanged ? 'is current' : 'was refreshed') : 'was not refreshed'}.${projectReviewError ? ` Project-review diagnostic: ${redactSensitiveText(projectReviewError)}` : ''}`;
   const syncMessage = agentsSync.ok
     ? `AGENTS.md managed instructions: ${agentsSync.action}.`
     : `AGENTS.md managed instructions were not synchronized: ${agentsSync.reason}`;
@@ -61,8 +69,15 @@ function handleSessionStart(manager, input, workspaceRoot, env) {
 }
 
 function syncAgentsInstructions(workspaceRoot, env) {
-  if (env.OTM_AUTO_SYNC_AGENTS === '0') {
-    return { ok: true, action: 'disabled by OTM_AUTO_SYNC_AGENTS=0' };
+  // Session hooks run in repositories that may not have been explicitly
+  // installed or trusted for OTM-managed files. Never create or alter an
+  // AGENTS file merely because a hook was discovered: both synchronization
+  // and trust must be deliberately opted in by the installation owner.
+  if (env.OTM_AUTO_SYNC_AGENTS !== '1') {
+    return { ok: true, action: 'disabled (set OTM_AUTO_SYNC_AGENTS=1 to enable)' };
+  }
+  if (env.OTM_TRUSTED_INSTALLATION !== '1') {
+    return { ok: true, action: 'not synchronized because OTM_TRUSTED_INSTALLATION=1 is required' };
   }
   try {
     return patchAgentsFile({ workspaceRoot });
@@ -103,10 +118,14 @@ function handlePreToolUse(manager, input, workspaceRoot, env) {
   if (!sessionId) return { continue: true, suppressOutput: true };
   const current = manager.snapshot({ workspaceRoot, sessionId, write: false }).snapshot;
   if (!current?.runId || input.tool_name?.includes('overtli_task_manager')) return { continue: true, suppressOutput: true };
-  if (process.env.OTM_RECORD_PRE_TOOL === '1') {
-    const message = classifyToolIntent(input);
+  if (env.OTM_RECORD_PRE_TOOL === '1') {
+    const message = classifyToolIntent(input, env);
     if (message) {
-      try { manager.progress({ workspaceRoot, sessionId, message, evidence: { kind: 'hook_observation', summary: message, command: input.tool_input?.command || null }, hookEventName: input.hook_event_name, turnId: input.turn_id }); } catch {}
+      try {
+        manager.progress({ workspaceRoot, sessionId, message, evidence: { kind: 'hook_observation', summary: message, ...commandEvidenceForTool(input, workspaceRoot, sessionId, env) }, hookEventName: input.hook_event_name, turnId: input.turn_id });
+      } catch (error) {
+        return hookDiagnostic('pre-tool evidence was not recorded', error);
+      }
     }
   }
   return { continue: true, suppressOutput: true };
@@ -117,8 +136,8 @@ function handlePostToolUse(manager, input, workspaceRoot, env) {
   if (!sessionId) return { continue: true, suppressOutput: true };
   const current = manager.snapshot({ workspaceRoot, sessionId, write: false }).snapshot;
   if (!current?.runId || input.tool_name?.includes('overtli_task_manager')) return { continue: true, suppressOutput: true };
-  if (!shouldRecordPostToolEvidence(input)) return { continue: true, suppressOutput: true };
-  const commandEvidence = commandEvidenceForTool(input, workspaceRoot, sessionId);
+  if (!shouldRecordPostToolEvidence(input, env)) return { continue: true, suppressOutput: true };
+  const commandEvidence = commandEvidenceForTool(input, workspaceRoot, sessionId, env);
   const summary = summarizeToolResult(input);
   try {
     manager.progress({
@@ -130,8 +149,18 @@ function handlePostToolUse(manager, input, workspaceRoot, env) {
       hookEventName: input.hook_event_name,
       turnId: input.turn_id
     });
-  } catch {}
+  } catch (error) {
+    return hookDiagnostic('post-tool evidence was not recorded', error);
+  }
   return { continue: true, suppressOutput: true };
+}
+
+function hookDiagnostic(context, error) {
+  return {
+    continue: true,
+    suppressOutput: true,
+    systemMessage: `OTM hook diagnostic: ${context}. ${redactSensitiveText(error?.message || String(error))}`
+  };
 }
 
 function handlePreCompact(manager, input, workspaceRoot, env) {
@@ -169,7 +198,7 @@ function handleStop(manager, input, workspaceRoot, env) {
       reason: `Overtli Task Manager audit blocked the stop. Continue the route until required segments are complete:\n${remaining}\n\nUse OTM progress updates, complete tasks only with evidence, then run otm_audit_stop again.`
     };
   }
-  if (process.env.OTM_STOP_AUTO_FINALIZE !== '1') {
+  if (env.OTM_STOP_AUTO_FINALIZE !== '1') {
     return {
       decision: 'block',
       reason: 'Overtli Task Manager audit passed, but visible finalization must be model-driven. Call otm_finalize_turn, show its Markdown summary to the user, then call otm_clear_current before sending the final response. Set OTM_STOP_AUTO_FINALIZE=1 only when you intentionally want the Stop hook to auto-finalize as a fallback.'
@@ -179,7 +208,7 @@ function handleStop(manager, input, workspaceRoot, env) {
     manager.finalizeTurn({ workspaceRoot, sessionId, runId: audit.run.id, turnId: input.turn_id || audit.run.turnId || 'stop-hook', outcome: 'completed' });
     manager.clearCurrent({ workspaceRoot, sessionId, runId: audit.run.id });
   } catch (error) {
-    return { decision: 'block', reason: `OTM finalization failed and needs one repair pass: ${error.message}` };
+    return { decision: 'block', reason: `OTM finalization failed and needs one repair pass: ${redactSensitiveText(error?.message || String(error))}` };
   }
   return { continue: true, suppressOutput: true, systemMessage: 'Overtli Task Manager finalized the route, saved the summary, and cleared current.json.' };
 }
@@ -193,15 +222,20 @@ function claimHookInvocation({ eventName, input, workspaceRoot, sessionId, env }
   if (env.OTM_DEDUPE_HOOKS === '0') return true;
   const configuredTtl = Number(env.OTM_HOOK_DEDUPE_TTL_MS || 10_000);
   const ttlMs = Number.isFinite(configuredTtl) && configuredTtl > 0 ? Math.max(1_000, configuredTtl) : 10_000;
-  const identity = input.hook_id
+  const explicitIdentity = input.hook_id
     || input.hookId
     || input.invocation_id
     || input.invocationId
     || input.tool_use_id
-    || input.toolUseId
-    || input.turn_id
-    || input.turnId
-    || crypto.createHash('sha256').update(JSON.stringify(input)).digest('hex');
+    || input.toolUseId;
+  // A turn may contain many tool calls. Without a host-issued tool identity,
+  // distinguish them with the complete payload rather than collapsing the
+  // entire turn into one claim. Non-tool events retain a stable turn fallback.
+  const payloadIdentity = crypto.createHash('sha256').update(JSON.stringify(input)).digest('hex');
+  const identity = explicitIdentity
+    || (eventName === 'pre-tool-use' || eventName === 'post-tool-use'
+      ? payloadIdentity
+      : input.turn_id || input.turnId || payloadIdentity);
   const digest = crypto.createHash('sha256').update(`${sessionId || 'unscoped'}:${eventName}:${identity}`).digest('hex').slice(0, 24);
   const dedupeDir = path.join(workspaceTempDir(workspaceRoot), 'hook-invocations');
   const claimPath = path.join(dedupeDir, `${digest}.claim`);
@@ -234,13 +268,13 @@ function cleanupHookClaims(dedupeDir, ttlMs) {
   } catch {}
 }
 
-function classifyToolIntent(input) {
+function classifyToolIntent(input, env) {
   const name = input.tool_name || '';
   const command = String(input.tool_input?.command || '');
   if (name === 'apply_patch') return 'Applying file changes for the active route segment.';
   if (name === 'Bash' && isValidationCommand(command)) return 'Running validation for the active route segment.';
   if (name === 'Bash') return 'Running a project command for the active route segment.';
-  if (name.startsWith('mcp__') && process.env.OTM_TRACK_MCP_EVIDENCE === '1') return `Using ${name} as evidence for the active route segment.`;
+  if (name.startsWith('mcp__') && env.OTM_TRACK_MCP_EVIDENCE === '1') return `Using ${name} as evidence for the active route segment.`;
   return null;
 }
 
@@ -263,29 +297,48 @@ function inferEvidenceKind(input) {
   return 'tool_result';
 }
 
-function commandEvidenceForTool(input, workspaceRoot, sessionId = null) {
+function commandEvidenceForTool(input, workspaceRoot, sessionId = null, env) {
   const command = input.tool_input?.command || null;
-  if (!command) return {};
-  const text = String(command);
-  if (text.length <= 800) return { command: text };
+  const files = changedFilesForTool(input);
+  if (!command) return files.length ? { files } : {};
+  const mode = commandCaptureMode(env);
+  if (mode === 'none' || (mode === 'validation-only' && !isValidationCommand(command))) return files.length ? { files } : {};
+  const text = redactSensitiveText(command);
+  if (text.length <= 800) return { command: text, ...(files.length ? { files } : {}) };
   const scratchRoot = workspaceScratchDir(workspaceRoot, sessionId);
   ensureDir(scratchRoot);
   const digest = crypto.createHash('sha256').update(text).digest('hex').slice(0, 12);
-  const fileName = `${new Date().toISOString().replace(/[:.]/g, '-')}-${input.tool_name || 'tool'}-${digest}.txt`;
+  // Tool names originate with the host. Never place them in a filesystem path;
+  // the evidence record can retain its safe human-facing description instead.
+  const fileName = `${new Date().toISOString().replace(/[:.]/g, '-')}-command-${digest}.txt`;
   const filePath = path.join(scratchRoot, fileName);
   atomicWriteText(filePath, text, { tempDir: workspaceTempDir(workspaceRoot) });
   const rel = relativeToWorkspace(workspaceRoot, filePath);
   return {
     command: `[omitted long ${input.tool_name || 'tool'} input; saved to ${rel}]`,
-    notes: { scratchFile: rel, originalLength: text.length }
+    notes: { scratchFile: rel, originalLength: text.length },
+    ...(files.length ? { files } : {})
   };
 }
 
-function shouldRecordPostToolEvidence(input) {
+function commandCaptureMode(env = {}) {
+  const value = String(env.OTM_COMMAND_CAPTURE || 'redacted').trim().toLowerCase();
+  return ['redacted', 'none', 'validation-only'].includes(value) ? value : 'redacted';
+}
+
+function changedFilesForTool(input) {
+  const explicit = input.tool_response?.changed_files || input.tool_response?.file_paths || input.tool_input?.files;
+  const values = Array.isArray(explicit) ? explicit : [];
+  const patch = String(input.tool_input?.patch || input.tool_input?.input || '');
+  for (const match of patch.matchAll(/^\*\*\* (?:Update|Add|Delete) File:\s+(.+)$/gm)) values.push(match[1]);
+  return [...new Set(values.map((value) => String(value).trim()).filter((value) => value && value.length <= 1024 && !value.includes('\0')))];
+}
+
+function shouldRecordPostToolEvidence(input, env) {
   const name = input.tool_name || '';
   const command = String(input.tool_input?.command || '');
   if (name === 'apply_patch') return true;
-  if (name.startsWith('mcp__')) return process.env.OTM_TRACK_MCP_EVIDENCE === '1';
+  if (name.startsWith('mcp__')) return env.OTM_TRACK_MCP_EVIDENCE === '1';
   if (name === 'Bash') return isValidationCommand(command) || toolFailed(input);
   return toolFailed(input);
 }

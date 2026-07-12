@@ -23,6 +23,27 @@ global store. Legacy active rows with no session id remain isolated unless
 mode and a composite workspace/session/status index; the JSON fallback
 serializes mutations through a short-lived cross-process lock file.
 
+SQLite state carries a schema version independently from the package version.
+Opening an older schema runs ordered transactional migrations after a local
+pre-migration backup is made. JSON state is validated as a complete document;
+invalid or orphaned records are quarantined with recovery guidance rather than
+being silently replaced. Route creation is one store operation covering the
+run, all initial tasks, and its first event, so competing starts cannot create
+two active routes for one canonical workspace/session scope.
+
+All evidence and hook command capture pass through credential redaction before
+they enter durable state or scratch files. `OTM_COMMAND_CAPTURE` selects
+`redacted` (the default), `none`, or `validation-only` command retention. This
+protects common secret forms,
+but OTM is not a credential store and users must not intentionally supply
+secrets as route input.
+
+Session hooks do not mutate project instructions by default. Managed
+`AGENTS.md` synchronization requires both `OTM_AUTO_SYNC_AGENTS=1` and
+`OTM_TRUSTED_INSTALLATION=1`; when either is absent, the hook reports that
+sync is disabled and leaves project files unchanged. The explicit workspace
+installer remains the normal way to add OTM-managed instruction blocks.
+
 Tasks are the stop-gated route checkpoints. Each task may also carry
 `metadata.internalSteps`, which are normalized from model-supplied strings or
 objects into durable `{ id, title, status }` records. These records preserve the
@@ -33,6 +54,15 @@ checking off a substep does not complete the route gate. A task cannot move to
 completion call includes concrete evidence. This keeps compaction-resume detail
 and stop-gated route completion aligned without letting either replace the
 other.
+
+The core owns explicit transition matrices rather than trusting a requested
+status. Task edges are `pending -> active|dropped|superseded`, `active ->
+pending|done|blocked|dropped|superseded`, `blocked -> active|pending|dropped|
+superseded`, and a recorded reopen is required for terminal tasks to return to
+`active` or `pending`. Run edges similarly constrain finalization, clear,
+abandon, resume, and archive. Every public task mutation validates the scoped
+run/task identity, expected revision, and the applicable matrix edge before
+the store's atomic mutation is committed.
 
 ## Workspace files
 
@@ -77,11 +107,25 @@ best-effort history prune after clearing the active route, and
 explicitly. The prune preserves active, blocked, and paused runs, then removes
 inactive runs older than the cutoff along with their tasks, events, and
 summaries. Cache entries are pruned when they are expired or older than the
-cutoff. Dry-run mode reports the row counts without deleting anything.
+cutoff. Cleanup and history dry-run modes are read-only previews: they do not
+create a missing store, rewrite JSON state, rotate a recovery backup, or remove
+candidate scratch files.
+
+`otm doctor` is also read-only. It opens SQLite with a read-only connection and
+parses JSON directly so malformed state remains available for recovery. It
+reports integrity/schema status, duplicate active scopes, orphan records,
+unknown statuses, locks, current-file/index divergence, and hooks JSON health.
+`otm doctor --repair` is an explicit summary-file republish action and refuses
+to run when the diagnostic report includes integrity errors.
 
 ## Project memory
 
-Project memory is not a full RAG index. It is a lightweight, project-specific cache that prefers overview files and durable summaries.
+Project memory is not a full RAG index. It is a lightweight, project-specific cache that prefers overview files and durable summaries. Search normalizes tokens and returns a numeric score plus `matchReasons`: exact phrase matches receive a 5-point boost, title-token matches 3 points each, tag-token matches 2 each, body-token matches 1 each, recent updates receive a small documented boost, and an explicit `scoreHint` is additive. Expired entries are excluded from normal search/listing.
+
+Finalization writes turn-summary memory with a stable identifier derived from the
+durable run and summary IDs. Retrying the same operation updates that one
+memory record; separate runs with identical human-readable goals retain their
+own summary memory.
 
 ## Hooks
 
@@ -99,3 +143,8 @@ explicit: audit, finalize, present the summary, then clear. Clear recovers the
 just-finalized session run from its canonical snapshot so durable run and
 summary state are marked cleared even when finalize and clear are separate
 calls.
+
+An unfinished route is never cleared through the normal completion action.
+Clients must use the explicit abandon operation with a recorded reason
+(`otm_abandon` or `otm abandon --run-id ... --reason ... --confirm`); normal
+clear remains finalization-gated.

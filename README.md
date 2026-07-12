@@ -23,7 +23,7 @@ Overtli Task Manager (OTM) structures AI coding sessions into evidence-backed ro
 *   **Internal Step Gates:** Keeps each route segment honest by requiring internal steps to be checked off as work happens before the parent segment can be completed.
 *   **Lifecycle Hooks:** Intercepts sessions, prompts, tools, and stops to enforce task completion and audit progress.
 *   **Workspace Memory:** Keeps a lightweight, high-signal index of project guides (`AGENTS.md`), memory banks, and schemas.
-*   **Managed Instruction Sync:** Detects the enclosing Git workspace and creates or refreshes only OTM's marked `AGENTS.md` block at session start.
+*   **Managed Instruction Sync:** Can refresh only OTM's marked `AGENTS.md` block after an explicitly trusted installation opts in; ordinary sessions never modify project instructions.
 
 ---
 
@@ -41,11 +41,44 @@ cd ~/.codex/plugins/overtli-task-manager
 npm install
 ```
 
+## Operations and recovery
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Migration guide](docs/MIGRATION.md)
+- [Backup and restore](docs/BACKUP_RESTORE.md)
+- [Repair guide](docs/REPAIR.md)
+- [Uninstall guide](docs/UNINSTALL.md)
+- [Threat model](docs/THREAT_MODEL.md)
+- [Security policy](SECURITY.md)
+
+### Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OTM_STORAGE` | `auto` | Select `auto`, `sqlite`, or `json`; `sqlite` fails if the native backend is unavailable. |
+| `OTM_STATE_DIR` | `OTM_HOME` or `<CODEX_HOME>/overtli-task-manager` | Override the durable store directory. |
+| `OTM_HOME` | `<CODEX_HOME>/overtli-task-manager` | Base durable state directory when `OTM_STATE_DIR` is not set. |
+| `CODEX_HOME` | `~/.codex` | Codex home used for global installation and the default OTM state location. |
+| `OTM_SESSION_ID` | host supplied | Explicit session identity, after request payload fields and before `CODEX_THREAD_ID`. |
+| `CODEX_THREAD_ID` | host supplied | Fallback session identity when no explicit request/session ID is available. |
+| `OTM_CLAIM_LEGACY_ROUTE` | `0` | Set to `1` only to explicitly adopt a legacy unscoped route. |
+| `OTM_AUTO_SYNC_AGENTS` | disabled | Set to `1` to request managed `AGENTS.md` block synchronization; it also requires `OTM_TRUSTED_INSTALLATION=1`. |
+| `OTM_TRUSTED_INSTALLATION` | disabled | Set to `1` only for a trusted OTM installation. Required together with `OTM_AUTO_SYNC_AGENTS=1` before a session hook may modify `AGENTS.md`. |
+| `OTM_AUTO_INSTALL_GLOBAL` | disabled | Set to `1` only to explicitly permit postinstall global setup. |
+| `OTM_RECORD_PRE_TOOL` | disabled | Set to `1` to record pre-tool observations. |
+| `OTM_TRACK_MCP_EVIDENCE` | disabled | Set to `1` to record configured MCP tool evidence. |
+| `OTM_STOP_AUTO_FINALIZE` | disabled | Set to `1` only to use Stop-hook finalization fallback. |
+| `OTM_DEDUPE_HOOKS` | enabled | Set to `0` to disable cross-install hook deduplication. |
+| `OTM_HOOK_DEDUPE_TTL_MS` | `10000` | Hook dedupe claim lifetime in milliseconds. |
+| `OTM_PROJECT_REVIEW_MAX_FILES` | `20` | Maximum eligible project-review files read at session start. |
+| `OTM_COMMAND_CAPTURE` | `redacted` | Command-evidence policy: `redacted` stores redacted commands/scratch, `none` stores no command text, and `validation-only` stores command text only for recognized validation commands. |
+| `CI` | unset | Suppresses postinstall global setup even if `OTM_AUTO_INSTALL_GLOBAL=1`; CI never mutates global Codex state. |
+
 #### Verify the SQLite backend
 
-`better-sqlite3` is an optional dependency so OTM can fall back to JSON on
-machines where a native addon cannot be installed. That also means npm may
-finish successfully while omitting SQLite. After `npm install`, verify the
+`better-sqlite3` is a required dependency so CI and production installations
+cannot silently omit the SQLite backend. JSON remains a supported explicit
+storage selection (`OTM_STORAGE=json`). After `npm ci` or `npm install`, verify the
 actual native module instead of relying on the declaration in `package.json`:
 
 ```bash
@@ -66,7 +99,7 @@ If `npm ls` is empty, reinstall the version range declared by this project and
 show native install output:
 
 ```bash
-npm install better-sqlite3@^11.9.1 --save-optional --foreground-scripts
+npm install better-sqlite3@^11.9.1 --foreground-scripts
 ```
 
 Use a supported Node.js release (this project requires Node 20.10 or newer;
@@ -80,7 +113,7 @@ then repeat the load test above. The upstream package's
 and [troubleshooting](https://github.com/WiseLibs/better-sqlite3/blob/master/docs/troubleshooting.md)
 guides are the authoritative reference for uncommon toolchain failures.
 
-When run from that standard plugin path, `npm install` automatically merges OTM hooks into `~/.codex/hooks.json` and refreshes OTM skills under `~/.codex/skills`. Existing global hooks are backed up and unrelated entries are preserved. Development checkouts and CI skip global changes; set `OTM_AUTO_INSTALL_GLOBAL=0` to opt out or `OTM_AUTO_INSTALL_GLOBAL=1` to allow a custom plugin path.
+`npm install` does not mutate global Codex configuration. To perform a global install, run `otm install-global` explicitly, or set `OTM_AUTO_INSTALL_GLOBAL=1` only in a consciously trusted install environment. Existing global hooks are backed up and unrelated entries are preserved.
 
 > [!NOTE]
 > On Windows, the standard path is `%USERPROFILE%\.codex\plugins\overtli-task-manager`.
@@ -117,7 +150,25 @@ This idempotently merges OTM lifecycle hooks into `~/.codex/hooks.json` without 
 node ~/.codex/plugins/overtli-task-manager/bin/otm.mjs install --agents-file AGENTS.override.md
 ```
 
-When the plugin's `SessionStart` hook is active, OTM also creates or refreshes its managed block in the enclosing Git workspace automatically. Existing content outside the markers is preserved, incomplete marker pairs are reported without being overwritten, and `OTM_AUTO_SYNC_AGENTS=0` disables this synchronization. Nested package manifests do not shadow the enclosing Git root.
+Preview removal before applying it. `otm uninstall` removes only OTM-managed
+marker blocks, structurally identified OTM hook commands, and packaged skill
+directories whose contents still match the installed package. It preserves
+route state and summaries unless `--remove-state` is also explicitly confirmed.
+
+```bash
+node ~/.codex/plugins/overtli-task-manager/bin/otm.mjs uninstall --dry-run
+node ~/.codex/plugins/overtli-task-manager/bin/otm.mjs uninstall --confirm
+```
+
+Global removal follows the same preview-and-confirm flow and preserves any
+modified packaged skill directories and unrelated hooks:
+
+```bash
+node ~/.codex/plugins/overtli-task-manager/bin/otm.mjs uninstall --global --dry-run
+node ~/.codex/plugins/overtli-task-manager/bin/otm.mjs uninstall --global --confirm
+```
+
+When the plugin's `SessionStart` hook is active, it leaves `AGENTS.md` untouched by default. A deliberately trusted installation may opt into synchronization with both `OTM_AUTO_SYNC_AGENTS=1` and `OTM_TRUSTED_INSTALLATION=1`; only then does OTM create or refresh its managed block in the enclosing Git workspace. Existing content outside markers is preserved, incomplete marker pairs are reported without being overwritten, and nested package manifests do not shadow the enclosing Git root.
 
 To verify the setup:
 ```bash
@@ -142,6 +193,7 @@ node ~/.codex/plugins/overtli-task-manager/bin/otm.mjs doctor
 | `otm_audit_stop` | Completion | Check if all required route segments are completed |
 | `otm_finalize_turn` | Completion | Save turn summary and update project memory |
 | `otm_clear_current` | Completion | Clear active route state files |
+| `otm_abandon` | Completion | Explicitly abandon unfinished route work with a recorded reason |
 | `otm_cleanup_workspace` | Completion | Clean OTM-owned temp and scratch artifacts |
 | `otm_prune_history` | Completion | Prune durable run/task/event/summary/cache history older than retention |
 | `otm_project_review`| Memory | Index high-signal repository context |
@@ -156,11 +208,22 @@ node ~/.codex/plugins/overtli-task-manager/bin/otm.mjs doctor
 otm install [--workspace PATH] [--dry-run] [--with-project-mcp-config]
             [--agents-file AGENTS.override.md]
 otm install-global [--codex-home PATH] [--dry-run]
-otm doctor [--workspace PATH] [--session-id ID]
+otm uninstall [--workspace PATH] [--dry-run] [--confirm] [--remove-state]
+otm uninstall --global [--codex-home PATH] [--dry-run] [--confirm]
+otm doctor [--workspace PATH] [--session-id ID] [--repair] [--dry-run] [--json]
+otm migrate [--dry-run] [--json]
+otm backup [--output PATH] [--dry-run] [--json]
+otm restore --input PATH --confirm [--dry-run] [--json]
+otm repair [--workspace PATH] [--dry-run] [--json]
+otm export --output PATH [--workspace PATH] [--dry-run] [--json]
+otm import --input PATH --confirm [--workspace PATH] [--dry-run] [--json]
+otm resume --run-id ID [--task-id ID] [--reason TEXT] [--workspace PATH] [--json]
+otm archive --run-id ID --confirm [--reason TEXT] [--workspace PATH] [--json]
+otm abandon --run-id ID --reason TEXT --confirm [--delete-files] [--workspace PATH] [--json]
 otm snapshot [--workspace PATH] [--session-id ID]
 otm review-project [--workspace PATH] [--max-files N]
 otm clear-current [--workspace PATH] [--session-id ID] [--delete-files]
-otm cleanup [--workspace PATH] [--min-age-ms N] [--scratch-max-age-ms N]
+otm cleanup [--workspace PATH] [--min-age-ms N] [--scratch-max-age-ms N] [--dry-run]
 otm prune-history [--workspace PATH] [--retention-days N] [--dry-run]
 otm mcp-config
 ```
@@ -273,7 +336,7 @@ work. Fallback-planner tasks keep their own actionable steps.
 | Passive hooks | Touch route state only when the current Codex session is identifiable |
 | Duplicate installs | Cross-process invocation claims suppress duplicate global/workspace hook output |
 | Evidence tracking | Defaults to file edits, validation/build commands, failures, and explicit OTM checkpoints |
-| Opt-ins | `OTM_RECORD_PRE_TOOL=1`, `OTM_TRACK_MCP_EVIDENCE=1`, `OTM_STOP_AUTO_FINALIZE=1`, `OTM_CLAIM_LEGACY_ROUTE=1` |
+| Opt-ins | `OTM_RECORD_PRE_TOOL=1`, `OTM_TRACK_MCP_EVIDENCE=1`, `OTM_STOP_AUTO_FINALIZE=1`, `OTM_CLAIM_LEGACY_ROUTE=1`; project-instruction sync additionally requires both `OTM_AUTO_SYNC_AGENTS=1` and `OTM_TRUSTED_INSTALLATION=1` |
 | Hook timeouts | SessionStart 15s, UserPromptSubmit 12s, PreToolUse 8s, PostToolUse 12s, Pre/PostCompact 15s, Stop 45s |
 
 Normal closeout is model-visible: run `otm_audit_stop`, call

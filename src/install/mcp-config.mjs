@@ -5,6 +5,9 @@ import { MCP_BLOCK_BEGIN, MCP_BLOCK_END } from '../core/constants.mjs';
 export function patchProjectMcpConfig({ workspaceRoot, packageRoot, dryRun = false } = {}) {
   const filePath = path.join(workspaceRoot, '.codex', 'config.toml');
   const before = readText(filePath, '');
+  if (markerCount(before, MCP_BLOCK_BEGIN) > 1 || markerCount(before, MCP_BLOCK_END) > 1) {
+    return { ok: false, action: 'conflict', filePath, reason: 'MCP configuration contains duplicate OTM managed block markers.' };
+  }
   const commandPath = path.join(packageRoot, 'bin', 'otm-mcp.mjs').replace(/\\/g, '\\\\');
   const block = `${MCP_BLOCK_BEGIN}
 [mcp_servers.overtli_task_manager]
@@ -30,4 +33,8 @@ ${MCP_BLOCK_END}`;
     : `${before.trimEnd()}\n\n${block}\n`.trimStart();
   if (!dryRun && after !== before) atomicWriteText(filePath, after);
   return { ok: true, filePath, dryRun, changed: after !== before, preview: dryRun ? after : undefined };
+}
+
+function markerCount(text, marker) {
+  return String(text).split(marker).length - 1;
 }

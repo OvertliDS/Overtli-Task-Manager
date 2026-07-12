@@ -1,6 +1,6 @@
 {
   "name": "@overtli/task-manager",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Codex-first MCP task manager with route checklists, checkpoint summaries, project memory, hooks, skills, and AGENTS.md integration.",
   "type": "module",
   "license": "MIT",
@@ -42,6 +42,8 @@
     ".codex-plugin/",
     ".mcp.json",
     "README.md",
+    "CHANGELOG.md",
+    "SECURITY.md",
     "LICENSE",
     "scripts/",
     "docs/",
@@ -55,12 +57,14 @@
     "doctor": "node ./bin/otm.mjs doctor",
     "snapshot": "node ./bin/otm.mjs snapshot",
     "test": "node --test",
-    "syntax:check": "node ./scripts/syntax-check.mjs"
+    "coverage": "node ./scripts/coverage-check.mjs",
+    "syntax:check": "node ./scripts/syntax-check.mjs",
+    "lint": "npm run syntax:check",
+    "format:check": "git diff --check",
+    "type:check": "node --check ./src/core/manager.mjs && node --check ./src/storage/json-store.mjs && node --check ./src/storage/sqlite-store.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0"
-  },
-  "optionalDependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
     "better-sqlite3": "^11.9.1"
   }
 }

@@ -5,16 +5,15 @@ import { fileURLToPath } from 'node:url';
 import { installGlobal, renderGlobalInstallResult } from '../src/install/install-global.mjs';
 
 export function shouldAutoInstallGlobal({ packageRoot, codexHome, env = process.env } = {}) {
-  if (env.OTM_AUTO_INSTALL_GLOBAL === '0' || env.CI) return false;
-  if (env.OTM_AUTO_INSTALL_GLOBAL === '1') return true;
-  const expected = path.resolve(codexHome, 'plugins', 'overtli-task-manager');
-  return path.resolve(packageRoot) === expected;
+  // Package installation is not authority to mutate the user's global Codex
+  // configuration. Global setup requires a conscious environment opt-in.
+  return env.OTM_AUTO_INSTALL_GLOBAL === '1' && !env.CI;
 }
 
 export function runPostinstall({ packageRoot, env = process.env } = {}) {
   const codexHome = path.resolve(env.CODEX_HOME || path.join(os.homedir(), '.codex'));
   if (!shouldAutoInstallGlobal({ packageRoot, codexHome, env })) {
-    return { installed: false, message: 'Skipping OTM global setup outside the active Codex plugin directory.' };
+    return { installed: false, message: 'Skipping global OTM setup. Run otm install-global or set OTM_AUTO_INSTALL_GLOBAL=1 explicitly.' };
   }
   const result = installGlobal({ codexHome, packageRoot, env });
   return { installed: true, result, message: renderGlobalInstallResult(result) };

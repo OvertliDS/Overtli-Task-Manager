@@ -2,35 +2,54 @@ import path from 'node:path';
 import { createStore } from '../storage/store.mjs';
 import { assertCondition, OtmError } from './errors.mjs';
 import { newId, nowIso, sha256, stableTaskKey, shortHash } from './ids.mjs';
-import { cleanupWorkspaceStateTempFiles, findWorkspaceRoot, workspaceStateDir, ensureDir, summariesDir, atomicWriteJson, atomicWriteText, currentJsonPath, currentMarkdownPath, removeFileIfExists, workspaceTempDir, readJson } from './fs-utils.mjs';
+import { cleanupWorkspaceStateTempFiles, findWorkspaceRoot, workspaceStateDir, ensureDir, summariesDir, atomicWriteJson, atomicWriteText, currentJsonPath, currentMarkdownPath, removeFileIfExists, workspaceTempDir, readOtmJsonArtifact } from './fs-utils.mjs';
 import { buildSnapshot, renderSnapshotMarkdown, renderSummaryMarkdown, renderDeltaMarkdown, writeCurrentFiles, writeWorkspaceCurrentIndex } from './renderer.mjs';
-import { combinePromptContext, deriveFallbackTasks } from './planner.mjs';
-import { CURRENT_SCHEMA_VERSION, MANAGER_NAME, TASK_STATUSES } from './constants.mjs';
+import { combinePromptContext, planFallbackRoute } from './planner.mjs';
+import { CURRENT_SCHEMA_VERSION, MANAGER_NAME, RUN_STATUSES, TASK_STATUSES } from './constants.mjs';
 import { resolveSessionId } from './session-scope.mjs';
+import { assertRunTransition, assertTaskTransition } from './state-machine.mjs';
+import { LIMITS, assertAcyclicContext, assertKnownEnum, assertNonEmptyString, assertUniqueIds, canonicalizeWorkspaceRoot, redactSensitiveText, safeGeneratedFileId, workspaceIdentity } from './validation.mjs';
+import { tokenize } from './text-utils.mjs';
 
 const DEFAULT_HISTORY_RETENTION_DAYS = 7;
 
 export function createTaskManager(options = {}) {
   const env = options.env || process.env;
-  const store = options.store || createStore({ env });
+  const store = options.store || createStore({ env, readOnly: options.readOnly === true });
 
   function resolveWorkspace(cwdOrRoot) {
-    return path.resolve(cwdOrRoot || options.cwd || process.cwd());
+    return canonicalizeWorkspaceRoot(cwdOrRoot || options.cwd || process.cwd()).displayPath;
   }
 
   function recordEvent(runId, eventType, payload = {}, context = {}) {
-    const event = {
+    const event = buildEvent(runId, eventType, payload, context);
+    store.recordEvent(event);
+    return event;
+  }
+
+  function buildEvent(runId, eventType, payload = {}, context = {}) {
+    return {
       id: newId('evt'),
       runId,
       turnId: context.turnId || payload.turnId || null,
       hookEventName: context.hookEventName || payload.hookEventName || null,
       eventType,
-      idempotencyKey: context.idempotencyKey || `${runId}:${eventType}:${shortHash(JSON.stringify(payload))}:${Date.now()}`,
+      idempotencyKey: context.idempotencyKey || context.operationId || context.invocationId || context.toolUseId || `${runId}:${eventType}:${shortHash(JSON.stringify(payload))}`,
       payload,
       createdAt: nowIso()
     };
-    store.recordEvent(event);
-    return event;
+  }
+
+  function commitRunMutation(run, tasks, eventType, payload, context = {}, summaries = [], newTasks = []) {
+    const next = store.commitRunMutation({
+      run,
+      expectedRevision: Number(run.routeRevision || 1) - 1,
+      tasks,
+      newTasks,
+      summaries,
+      event: buildEvent(run.id, eventType, payload, context)
+    });
+    return next;
   }
 
   function getScopedActiveRun(workspaceRoot, sessionId, { claimLegacy = true } = {}) {
@@ -58,52 +77,52 @@ export function createTaskManager(options = {}) {
     return run;
   }
 
+  function assertExpectedRevision(run, args = {}) {
+    if (args.expectedRevision === undefined || args.expectedRevision === null) return;
+    const expected = Number(args.expectedRevision);
+    assertCondition(Number.isInteger(expected) && expected === Number(run.routeRevision), 'Route revision conflict.', 'REVISION_CONFLICT', { expectedRevision: expected, currentRevision: run.routeRevision, runId: run.id });
+  }
+
   function normalizeTask(input, runId, sortOrder, createdBy = 'manual') {
-    assertCondition(input && typeof input.title === 'string' && input.title.trim(), 'Task title is required.', 'INVALID_TASK');
+    assertCondition(input && typeof input === 'object' && !Array.isArray(input), 'Task must be an object.', 'INVALID_TASK');
+    const title = assertNonEmptyString(input.title, 'task title', LIMITS.title);
     const acceptanceCriteria = Array.isArray(input.acceptanceCriteria) && input.acceptanceCriteria.length
-      ? input.acceptanceCriteria.map(String).filter(Boolean)
+      ? normalizeBoundedStrings(input.acceptanceCriteria, 'acceptance criteria', 128, 2_000)
       : ['Complete this route segment with concrete evidence.'];
+    assertCondition(input.acceptanceCriteria === undefined || Array.isArray(input.acceptanceCriteria), 'acceptanceCriteria must be an array.', 'INVALID_INPUT');
+    const taskId = input.id === undefined ? newId('task') : assertNonEmptyString(String(input.id), 'task id', LIMITS.id);
+    const stableKey = input.stableKey === undefined ? stableTaskKey(title, acceptanceCriteria) : assertNonEmptyString(String(input.stableKey), 'task stableKey', 256);
+    const priority = normalizeBoundedInteger(input.priority, 50, 0, 1_000, 'task priority');
+    const normalizedSortOrder = normalizeBoundedInteger(input.sortOrder, sortOrder, 0, 100_000, 'task sortOrder');
+    const description = input.description === undefined || input.description === null || String(input.description).trim() === ''
+      ? null
+      : assertNonEmptyString(String(input.description), 'task description', LIMITS.text);
+    const evidence = input.evidence === undefined ? [] : normalizeTaskEvidence(input.evidence);
     const metadata = normalizeTaskMetadata(input, acceptanceCriteria);
     return {
-      id: input.id || newId('task'),
+      id: taskId,
       runId,
-      parentId: input.parentId || null,
-      stableKey: input.stableKey || stableTaskKey(input.title, acceptanceCriteria),
-      title: input.title.trim(),
-      description: input.description ? String(input.description).trim() : null,
-      status: input.status && TASK_STATUSES.has(input.status) ? input.status : 'pending',
+      parentId: input.parentId === undefined || input.parentId === null ? null : assertNonEmptyString(String(input.parentId), 'task parentId', LIMITS.id),
+      stableKey,
+      title,
+      description,
+      // Route creation is intentionally non-trusting: terminal/blocked states
+      // must be produced through explicit domain transitions, never prompt data.
+      status: input.status === undefined ? 'pending' : assertInitialTaskStatus(input.status),
       required: input.required !== false,
-      priority: Number.isFinite(Number(input.priority)) ? Number(input.priority) : 50,
-      sortOrder: Number.isFinite(Number(input.sortOrder)) ? Number(input.sortOrder) : sortOrder,
-      createdBy,
+      priority,
+      sortOrder: normalizedSortOrder,
+      createdBy: assertNonEmptyString(String(createdBy), 'task createdBy', 128),
       acceptanceCriteria,
-      evidence: Array.isArray(input.evidence) ? input.evidence : [],
+      evidence,
       createdAt: nowIso(),
       updatedAt: nowIso(),
       completedAt: null,
-      metadata
+      metadata: { ...metadata, dependsOn: normalizeDependsOn(input.dependsOn ?? metadata.dependsOn) }
     };
   }
 
-  function addOrMergeTask(input, run, sortOrder, createdBy = 'steering', reason = 'reconcile') {
-    const task = normalizeTask(input, run.id, sortOrder, createdBy);
-    if (input.reopen === true) {
-      const closed = findRelatedReopenableTask(store.getTasks(run.id), task);
-      if (closed) {
-        reopenTask(closed, task, reason);
-        return { action: 'reopened', taskId: closed.id };
-      }
-    }
-    const match = findRelatedOpenTask(store.getTasks(run.id), task);
-    if (match) {
-      mergeTask(match, task, reason);
-      return { action: 'merged', taskId: match.id };
-    }
-    store.addTasks([task]);
-    return { action: 'added', taskId: task.id };
-  }
-
-  function mergeTask(existing, incoming, reason) {
+  function mergedTask(existing, incoming, reason) {
     const existingMetadata = existing.metadata || {};
     const incomingMetadata = incoming.metadata || {};
     const metadata = { ...incomingMetadata, ...existingMetadata };
@@ -119,15 +138,16 @@ export function createTaskManager(options = {}) {
         at: nowIso()
       })
     ];
-    store.updateTask(existing.id, {
+    return {
+      ...existing,
       required: Boolean(existing.required || incoming.required),
       priority: Math.min(Number(existing.priority || 50), Number(incoming.priority || 50)),
       acceptanceCriteria: unionStrings(existing.acceptanceCriteria || [], incoming.acceptanceCriteria || []),
       metadata
-    });
+    };
   }
 
-  function reopenTask(existing, incoming = null, reason = 'reconcile') {
+  function reopenedTask(existing, incoming = null, reason = 'reconcile') {
     const existingMetadata = existing.metadata || {};
     const incomingMetadata = incoming?.metadata || {};
     const metadata = { ...incomingMetadata, ...existingMetadata };
@@ -142,28 +162,17 @@ export function createTaskManager(options = {}) {
         at: nowIso()
       })
     ];
-    store.updateTask(existing.id, {
-      status: incoming?.status === 'active' ? 'active' : 'pending',
+    const status = incoming?.status === 'active' ? 'active' : 'pending';
+    assertTaskTransition(existing.status, status, { taskId: existing.id, reason });
+    return {
+      ...existing,
+      status,
       completedAt: null,
       required: incoming ? Boolean(existing.required || incoming.required) : existing.required,
       priority: incoming ? Math.min(Number(existing.priority || 50), Number(incoming.priority || 50)) : existing.priority,
       acceptanceCriteria: incoming ? unionStrings(existing.acceptanceCriteria || [], incoming.acceptanceCriteria || []) : existing.acceptanceCriteria,
       metadata
-    });
-  }
-
-  function activateCurrentTask(runId, current) {
-    for (const task of store.getTasks(runId)) {
-      if (task.status === 'active' && task.id !== current?.id) {
-        store.updateTask(task.id, { status: 'pending', metadata: suspendInternalStepProgress(task.metadata) });
-      }
-    }
-    if (current) {
-      store.updateTask(current.id, {
-        status: current.status === 'pending' ? 'active' : current.status,
-        metadata: ensureInternalStepProgress(current.metadata, current.status === 'pending' ? 'active' : current.status)
-      });
-    }
+    };
   }
 
   function snapshotForRun(run, lastUpdate = null, { write = true } = {}) {
@@ -187,12 +196,8 @@ export function createTaskManager(options = {}) {
       return { run: active, snapshot, markdown: renderSnapshotMarkdown(snapshot), reused: true };
     }
 
-    if (active && args.replaceExisting === true) {
-      store.updateRun(active.id, { status: 'abandoned', finalizedAt: nowIso(), metadata: { ...(active.metadata || {}), abandonedReason: 'Replaced by new route' } });
-      recordEvent(active.id, 'run_abandoned', { reason: 'Replaced by new route' }, args);
-    }
-
     const prompt = String(args.prompt || args.goal || '').trim();
+    assertAcyclicContext({ context: args.context, promptContext: args.promptContext, attachments: args.attachments, screenshots: args.screenshots || args.images });
     const plannerPrompt = combinePromptContext(prompt, {
       context: args.context,
       promptContext: args.promptContext,
@@ -220,19 +225,40 @@ export function createTaskManager(options = {}) {
         promptPreview: plannerPrompt.slice(0, 500)
       }
     };
-    const taskInputs = Array.isArray(args.tasks) && args.tasks.length ? args.tasks : deriveFallbackTasks(prompt, {
+    let fallbackPlan = null;
+    const taskInputs = Array.isArray(args.tasks) && args.tasks.length ? args.tasks : (fallbackPlan = planFallbackRoute(prompt, {
       goal,
       context: args.context,
       promptContext: args.promptContext,
       attachments: args.attachments,
       screenshots: args.screenshots || args.images
-    });
+    })).tasks;
+    if (fallbackPlan) run.metadata.planner = fallbackPlan.metadata;
+    assertCondition(taskInputs.length <= 256, 'Too many route tasks.', 'INPUT_TOO_LARGE');
+    assertUniqueIds(taskInputs.filter((task) => task?.id), 'task');
     const tasks = taskInputs.map((task, index) => normalizeTask(task, run.id, index + 1, task.createdBy || 'prompt'));
+    assertValidDependencies(tasks);
     normalizeActiveTasks(tasks);
     run.currentTaskId = tasks.find((task) => task.status === 'active')?.id || tasks[0]?.id || null;
-    store.createRun(run);
-    store.addTasks(tasks);
-    recordEvent(run.id, 'run_started', { goal, taskCount: tasks.length, promptHash: run.promptHash }, args);
+    const startEvent = {
+      id: newId('evt'),
+      runId: run.id,
+      turnId: args.turnId || null,
+      hookEventName: args.hookEventName || null,
+      eventType: 'run_started',
+      idempotencyKey: args.idempotencyKey || args.operationId || args.invocationId || args.toolUseId || `${run.id}:run_started:${shortHash(JSON.stringify({ goal, taskCount: tasks.length, promptHash: run.promptHash }))}`,
+      payload: { goal, taskCount: tasks.length, promptHash: run.promptHash },
+      createdAt: nowIso()
+    };
+    try {
+      store.createRoute({ run, tasks, event: startEvent, replaceRunId: active && args.replaceExisting === true ? active.id : null });
+    } catch (error) {
+      if (error?.code !== 'ACTIVE_ROUTE_CONFLICT') throw error;
+      const concurrent = getScopedActiveRun(workspaceRoot, sessionId, { claimLegacy: false });
+      if (!concurrent) throw error;
+      const snapshot = snapshotForRun(concurrent, { kind: 'reuse_active', message: 'A concurrent start already created this session route; reusing it.', at: nowIso() });
+      return { run: concurrent, snapshot, markdown: renderSnapshotMarkdown(snapshot), reused: true };
+    }
     const snapshot = snapshotForRun(run, { kind: 'run_started', message: `Route created with ${tasks.length} segment${tasks.length === 1 ? '' : 's'}.`, at: nowIso() });
     return { run, snapshot, markdown: renderSnapshotMarkdown(snapshot), reused: false };
   }
@@ -241,17 +267,21 @@ export function createTaskManager(options = {}) {
     const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
     const sessionId = resolveSessionId(args, env);
     let run = getRunOrActive({ runId: args.runId, workspaceRoot, sessionId });
+    assertExpectedRevision(run, args);
     const mode = args.mode || 'append';
     const now = nowIso();
     const tasks = store.getTasks(run.id);
+    const originalById = new Map(tasks.map((task) => [task.id, task]));
+    let workingTasks = tasks.map((task) => ({ ...task, metadata: { ...(task.metadata || {}) } }));
     let changed = 0;
     let preferredCurrentId = run.currentTaskId;
     let forcePreferredCurrent = false;
 
     if (mode === 'replace') {
-      for (const task of tasks) {
+      for (const task of workingTasks) {
         if (!['done', 'dropped', 'superseded'].includes(task.status)) {
-          store.updateTask(task.id, { status: 'superseded', metadata: { ...(task.metadata || {}), supersededByPrompt: args.prompt || null } });
+          assertTaskTransition(task.status, 'superseded', { taskId: task.id, reason: args.prompt || null });
+          replaceWorkingTask({ ...task, status: 'superseded', metadata: terminalizeInternalSteps({ ...(task.metadata || {}), supersededByPrompt: args.prompt || null }) });
           changed += 1;
         }
       }
@@ -260,72 +290,107 @@ export function createTaskManager(options = {}) {
     for (const change of Array.isArray(args.changes) ? args.changes : []) {
       if (change.action === 'supersede' || change.action === 'drop') {
         const task = store.getTask(change.taskId);
-        if (task) {
-          store.updateTask(task.id, {
+        if (task && task.runId === run.id) {
+          assertCondition(!['done', 'dropped', 'superseded'].includes(task.status), 'Completed or terminal tasks must be reopened before reconciliation can terminalize them.', 'INVALID_TRANSITION');
+          const currentTask = workingTasks.find((item) => item.id === task.id);
+          assertCondition(currentTask, 'Task not found in active route.', 'TASK_NOT_FOUND');
+          assertTaskTransition(currentTask.status, change.action === 'drop' ? 'dropped' : 'superseded', { taskId: currentTask.id, reason: change.reason || null });
+          replaceWorkingTask({ ...currentTask,
             status: change.action === 'drop' ? 'dropped' : 'superseded',
             metadata: terminalizeInternalSteps({ ...(task.metadata || {}), reason: change.reason || args.prompt || null })
           });
           changed += 1;
-        }
+        } else if (task) throw new OtmError('Task belongs to a different run.', { code: 'TASK_RUN_SCOPE_MISMATCH' });
+        else throw new OtmError('Task not found in active route.', { code: 'TASK_NOT_FOUND', details: { taskId: change.taskId } });
       } else if (change.action === 'activate') {
-        markTaskActive({ workspaceRoot, sessionId, runId: run.id, taskId: change.taskId, note: change.reason || 'Activated by reconciliation', silent: true });
+        const task = workingTasks.find((item) => item.id === change.taskId);
+        assertCondition(task, 'Task not found in active route.', 'TASK_NOT_FOUND');
+        assertCondition(['pending', 'active'].includes(task.status), `Cannot activate task in status ${task.status}. Resume or reopen it through its recorded lifecycle operation.`, 'INVALID_TRANSITION');
+        assertTaskTransition(task.status, 'active', { taskId: task.id });
+        assertDependenciesTerminal(task, workingTasks);
+        assertCanSwitchTask(workingTasks, task, { ...args, silent: true });
         preferredCurrentId = change.taskId;
         forcePreferredCurrent = true;
         changed += 1;
       } else if (change.action === 'reopen') {
-        const task = resolveTaskForReopen(change, store.getTasks(run.id));
+        const task = resolveTaskForReopen(change, workingTasks);
         if (task) {
-          reopenTask(task, change.title ? normalizeTask(change, run.id, task.sortOrder, 'steering') : null, change.reason || args.prompt || 'change:reopen');
+          const incoming = change.title ? normalizeTask(change, run.id, task.sortOrder, 'steering') : null;
+          replaceWorkingTask(reopenedTask(task, incoming, change.reason || args.prompt || 'change:reopen'));
           preferredCurrentId = task.id;
           forcePreferredCurrent = true;
           changed += 1;
-        }
+        } else throw new OtmError('Task not found in active route.', { code: 'TASK_NOT_FOUND', details: { taskId: change.taskId || null } });
       } else if (change.action === 'add') {
-        const nextOrder = store.getTasks(run.id).length + 1;
-        addOrMergeTask(change, run, nextOrder, 'steering', change.reason || args.prompt || 'change:add');
+        reconcileTaskInput(change, workingTasks.length + 1, 'steering', change.reason || args.prompt || 'change:add');
         changed += 1;
-      }
+      } else throw new OtmError(`Unsupported reconciliation action: ${change.action}`, { code: 'INVALID_RECONCILIATION' });
     }
 
     if (Array.isArray(args.tasks) && args.tasks.length) {
       for (const [index, input] of args.tasks.entries()) {
-        const nextOrder = store.getTasks(run.id).length + index + 1;
-        addOrMergeTask(input, run, nextOrder, input.createdBy || 'steering', args.prompt || 'reconcile:tasks');
+        const nextOrder = workingTasks.length + index + 1;
+        reconcileTaskInput(input, nextOrder, input.createdBy || 'steering', args.prompt || 'reconcile:tasks');
         changed += 1;
       }
     }
 
-    const refreshedTasks = store.getTasks(run.id);
-    const current = chooseCurrentTask(refreshedTasks, preferredCurrentId, { forcePreferred: forcePreferredCurrent });
-    activateCurrentTask(run.id, current);
-    run = store.updateRun(run.id, {
-      routeRevision: (run.routeRevision || 1) + (changed ? 1 : 0),
+    assertValidDependencies(workingTasks);
+    const current = chooseCurrentTask(workingTasks, preferredCurrentId, { forcePreferred: forcePreferredCurrent });
+    workingTasks = activateTaskList(workingTasks, current);
+    assertTaskListTransitions(tasks, workingTasks);
+    const taskUpdates = workingTasks.filter((task) => originalById.has(task.id) && JSON.stringify(task) !== JSON.stringify(originalById.get(task.id)));
+    const newTasks = workingTasks.filter((task) => !originalById.has(task.id));
+    const nextRunStatus = workingTasks.some((task) => task.status === 'blocked') ? 'blocked' : (current ? 'active' : 'ready_to_finalize');
+    assertRunTransition(run.status, nextRunStatus, { runId: run.id });
+    run = commitRunMutation({ ...run,
+      routeRevision: (run.routeRevision || 1) + 1,
       currentTaskId: current?.id || null,
-      status: refreshedTasks.some((task) => task.status === 'blocked') ? 'blocked' : 'active',
+      status: nextRunStatus,
       updatedAt: now
-    });
-    recordEvent(run.id, 'run_reconciled', { mode, changed, prompt: args.prompt || null }, args);
+    }, taskUpdates, 'run_reconciled', { mode, changed, prompt: args.prompt || null }, args, [], newTasks);
     const snapshot = snapshotForRun(run, { kind: 'run_reconciled', message: changed ? `Route updated with ${changed} change${changed === 1 ? '' : 's'}.` : 'Route checked. No changes were needed.', at: now });
     return { run, snapshot, markdown: renderSnapshotMarkdown(snapshot), changed };
+
+    function replaceWorkingTask(next) {
+      workingTasks = workingTasks.map((task) => task.id === next.id ? next : task);
+    }
+
+    function reconcileTaskInput(input, sortOrder, createdBy, reason) {
+      const candidate = normalizeTask(input, run.id, sortOrder, createdBy);
+      assertCondition(!workingTasks.some((task) => task.id === candidate.id), 'Task identifier already exists in this route.', 'DUPLICATE_ID');
+      if (input.reopen === true) {
+        const closed = findRelatedReopenableTask(workingTasks, candidate);
+        if (closed) { replaceWorkingTask(reopenedTask(closed, candidate, reason)); return; }
+      }
+      const open = findRelatedOpenTask(workingTasks, candidate);
+      if (open) { replaceWorkingTask(mergedTask(open, candidate, reason)); return; }
+      workingTasks.push(candidate);
+    }
   }
 
   function markTaskActive(args = {}) {
     const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
     const sessionId = resolveSessionId(args, env);
     let run = getRunOrActive({ runId: args.runId, workspaceRoot, sessionId });
+    assertExpectedRevision(run, args);
     const task = store.getTask(args.taskId || run.currentTaskId);
     assertCondition(task && task.runId === run.id, 'Task not found in active route.', 'TASK_NOT_FOUND');
-    assertCondition(!['done', 'dropped', 'superseded'].includes(task.status), `Cannot activate task in status ${task.status}.`, 'INVALID_TRANSITION');
+    assertCondition(['pending', 'active'].includes(task.status), `Cannot activate task in status ${task.status}. Resume or reopen it through its recorded lifecycle operation.`, 'INVALID_TRANSITION');
+    assertTaskTransition(task.status, 'active', { taskId: task.id });
+    assertDependenciesTerminal(task, store.getTasks(run.id));
     assertCanSwitchTask(store.getTasks(run.id), task, args);
 
+    const taskUpdates = [];
     for (const other of store.getTasks(run.id)) {
       if (other.status === 'active' && other.id !== task.id) {
-        store.updateTask(other.id, { status: 'pending', metadata: suspendInternalStepProgress(other.metadata) });
+        taskUpdates.push({ ...other, status: 'pending', metadata: suspendInternalStepProgress(other.metadata) });
       }
     }
-    store.updateTask(task.id, { status: 'active' });
-    run = store.updateRun(run.id, { currentTaskId: task.id, status: 'active' });
-    recordEvent(run.id, 'task_started', { taskId: task.id, title: task.title, note: args.note || null }, args);
+    taskUpdates.push({ ...task, status: 'active' });
+    assertRunTransition(run.status, 'active', { runId: run.id });
+    assertTaskListTransitions(store.getTasks(run.id), taskUpdates);
+    run = commitRunMutation({ ...run, currentTaskId: task.id, status: 'active', routeRevision: (run.routeRevision || 1) + 1 }, taskUpdates, 'task_started', { taskId: task.id, title: task.title, note: args.note || null }, args);
     const snapshot = snapshotForRun(run, { kind: 'task_started', message: `Working on: ${task.title}`, at: nowIso() });
     return args.silent ? { run, snapshot } : { run, snapshot, markdown: renderDeltaMarkdown(snapshot) };
   }
@@ -334,19 +399,21 @@ export function createTaskManager(options = {}) {
     const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
     const sessionId = resolveSessionId(args, env);
     let run = getRunOrActive({ runId: args.runId, workspaceRoot, sessionId });
+    assertExpectedRevision(run, args);
     const targetTaskId = args.taskId || (hasInternalStepUpdate(args) ? run.currentTaskId : null);
     if (targetTaskId) {
       const task = store.getTask(targetTaskId);
       assertCondition(task && task.runId === run.id, 'Task not found in active route.', 'TASK_NOT_FOUND');
       assertCondition(['pending', 'active'].includes(task.status), `Cannot record progress for a task in status ${task.status}. Reconcile the route first.`, 'INVALID_TRANSITION');
+      assertTaskTransition(task.status, 'active', { taskId: task.id });
       assertCanSwitchTask(store.getTasks(run.id), task, args);
       const evidence = [...(task.evidence || []), evidenceFromArgs(args.evidence || { kind: 'manual_note', summary: args.message || 'Progress recorded' })];
       const status = task.status === 'pending' ? 'active' : task.status;
       const metadata = updateInternalStepProgress(task.metadata, args, { taskStatus: status });
-      store.updateTask(task.id, { evidence, status, metadata });
-      run = store.updateRun(run.id, { currentTaskId: task.id, status: 'active' });
+      assertRunTransition(run.status, 'active', { runId: run.id });
+      run = commitRunMutation({ ...run, currentTaskId: task.id, status: 'active', routeRevision: (run.routeRevision || 1) + 1 }, [{ ...task, evidence, status, metadata }], 'progress', { message: args.message || null, taskId: args.taskId || null }, args);
     }
-    recordEvent(run.id, 'progress', { message: args.message || null, taskId: args.taskId || null }, args);
+    else recordEvent(run.id, 'progress', { message: args.message || null, taskId: args.taskId || null }, args);
     const snapshot = snapshotForRun(run, { kind: 'progress', message: args.message || 'Progress checkpoint recorded.', at: nowIso() });
     return { run, snapshot, markdown: renderDeltaMarkdown(snapshot) };
   }
@@ -355,20 +422,25 @@ export function createTaskManager(options = {}) {
     const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
     const sessionId = resolveSessionId(args, env);
     let run = getRunOrActive({ runId: args.runId, workspaceRoot, sessionId });
+    assertExpectedRevision(run, args);
     const taskId = args.taskId || run.currentTaskId;
     const task = store.getTask(taskId);
     assertCondition(task && task.runId === run.id, 'Task not found in active route.', 'TASK_NOT_FOUND');
-    assertCondition(args.force === true || task.status === 'active', `Cannot complete a task in status ${task.status}. Activate it through route reconciliation first.`, 'INVALID_TRANSITION');
+    assertCondition(args.force !== true, 'Forced completion is not available through the normal lifecycle API.', 'PRIVILEGED_OPERATION_REQUIRED');
+    assertCondition(task.status === 'active', `Cannot complete a task in status ${task.status}. Activate it through route reconciliation first.`, 'INVALID_TRANSITION');
+    assertTaskTransition(task.status, 'done', { taskId: task.id });
     const evidence = args.evidence ? evidenceFromArgs(args.evidence) : null;
     const nextEvidence = evidence ? [...(task.evidence || []), evidence] : (task.evidence || []);
-    assertCondition(args.force === true || evidence, 'A task can only be completed after completion evidence is attached.', 'EVIDENCE_REQUIRED');
+    assertCondition(evidence, 'A task can only be completed after completion evidence is attached.', 'EVIDENCE_REQUIRED');
     assertInternalStepsComplete(task.metadata);
-    store.updateTask(task.id, { status: 'done', evidence: nextEvidence, completedAt: nowIso(), metadata: normalizeCompletedInternalSteps(task.metadata) });
-    const next = chooseCurrentTask(store.getTasks(run.id), task.id);
-    activateCurrentTask(run.id, next);
-    run = store.updateRun(run.id, { currentTaskId: next?.id || null, status: next ? 'active' : 'active' });
-    recordEvent(run.id, 'task_completed', { taskId: task.id, title: task.title, evidence }, args);
-    const snapshot = snapshotForRun(run, { kind: 'task_completed', message: `Completed: ${task.title}`, at: nowIso() });
+    const completedTask = { ...task, status: 'done', evidence: nextEvidence, completedAt: nowIso(), metadata: normalizeCompletedInternalSteps(task.metadata) };
+    const afterCompletion = store.getTasks(run.id).map((item) => item.id === task.id ? completedTask : item);
+    const next = chooseCurrentTask(afterCompletion, task.id);
+    const taskUpdates = activateTaskList(afterCompletion, next);
+    assertRunTransition(run.status, next ? 'active' : 'ready_to_finalize', { runId: run.id });
+    assertTaskListTransitions(store.getTasks(run.id), taskUpdates);
+    run = commitRunMutation({ ...run, currentTaskId: next?.id || null, status: next ? 'active' : 'ready_to_finalize', routeRevision: (run.routeRevision || 1) + 1 }, taskUpdates, 'task_completed', { taskId: task.id, title: task.title, evidence }, args);
+    const snapshot = snapshotForRun(run, { kind: 'task_completed', taskId: task.id, message: `Completed: ${task.title}`, at: nowIso() });
     return { run, snapshot, markdown: renderDeltaMarkdown(snapshot) };
   }
 
@@ -376,17 +448,15 @@ export function createTaskManager(options = {}) {
     const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
     const sessionId = resolveSessionId(args, env);
     let run = getRunOrActive({ runId: args.runId, workspaceRoot, sessionId });
+    assertExpectedRevision(run, args);
     const task = store.getTask(args.taskId || run.currentTaskId);
     assertCondition(task && task.runId === run.id, 'Task not found in active route.', 'TASK_NOT_FOUND');
     assertCondition(task.status === 'active', `Cannot block a task in status ${task.status}. Activate it through route reconciliation first.`, 'INVALID_TRANSITION');
+    assertTaskTransition(task.status, 'blocked', { taskId: task.id });
     const evidence = evidenceFromArgs(args.evidence || { kind: 'blocker', summary: args.reason || 'Task blocked' });
-    store.updateTask(task.id, {
-      status: 'blocked',
-      evidence: [...(task.evidence || []), evidence],
-      metadata: { ...(task.metadata || {}), blockerRequiresUser: Boolean(args.requiresUser), blockerReason: args.reason || null }
-    });
-    run = store.updateRun(run.id, { currentTaskId: task.id, status: 'blocked' });
-    recordEvent(run.id, 'task_blocked', { taskId: task.id, reason: args.reason || null, requiresUser: Boolean(args.requiresUser) }, args);
+    assertRunTransition(run.status, 'blocked', { runId: run.id });
+    assertTaskListTransitions(store.getTasks(run.id), [{ ...task, status: 'blocked' }]);
+    run = commitRunMutation({ ...run, currentTaskId: task.id, status: 'blocked', routeRevision: (run.routeRevision || 1) + 1 }, [{ ...task, status: 'blocked', evidence: [...(task.evidence || []), evidence], metadata: { ...(task.metadata || {}), blockerRequiresUser: Boolean(args.requiresUser), blockerReason: args.reason || null } }], 'task_blocked', { taskId: task.id, reason: args.reason || null, requiresUser: Boolean(args.requiresUser) }, args);
     const snapshot = snapshotForRun(run, { kind: 'task_blocked', message: `Blocked: ${task.title}${args.reason ? ` — ${args.reason}` : ''}`, at: nowIso() });
     return { run, snapshot, markdown: renderDeltaMarkdown(snapshot, { title: 'OTM Gate' }) };
   }
@@ -395,16 +465,18 @@ export function createTaskManager(options = {}) {
     const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
     const sessionId = resolveSessionId(args, env);
     let run = getRunOrActive({ runId: args.runId, workspaceRoot, sessionId });
+    assertExpectedRevision(run, args);
     const task = store.getTask(args.taskId);
     assertCondition(task && task.runId === run.id, 'Task not found in active route.', 'TASK_NOT_FOUND');
-    store.updateTask(task.id, {
-      status: args.supersede ? 'superseded' : 'dropped',
-      metadata: terminalizeInternalSteps({ ...(task.metadata || {}), reason: args.reason || null })
-    });
-    const next = chooseCurrentTask(store.getTasks(run.id), task.id);
-    activateCurrentTask(run.id, next);
-    run = store.updateRun(run.id, { currentTaskId: next?.id || null, status: 'active', routeRevision: (run.routeRevision || 1) + 1 });
-    recordEvent(run.id, args.supersede ? 'task_superseded' : 'task_dropped', { taskId: task.id, reason: args.reason || null }, args);
+    assertCondition(!['done', 'dropped', 'superseded'].includes(task.status), 'Completed or terminal tasks must be explicitly reopened before they can be dropped or superseded.', 'INVALID_TRANSITION');
+    assertTaskTransition(task.status, args.supersede ? 'superseded' : 'dropped', { taskId: task.id, reason: args.reason || null });
+    const terminalTask = { ...task, status: args.supersede ? 'superseded' : 'dropped', metadata: terminalizeInternalSteps({ ...(task.metadata || {}), reason: args.reason || null }) };
+    const afterTerminal = store.getTasks(run.id).map((item) => item.id === task.id ? terminalTask : item);
+    const next = chooseCurrentTask(afterTerminal, task.id);
+    const taskUpdates = activateTaskList(afterTerminal, next);
+    assertRunTransition(run.status, next ? 'active' : 'ready_to_finalize', { runId: run.id });
+    assertTaskListTransitions(store.getTasks(run.id), taskUpdates);
+    run = commitRunMutation({ ...run, currentTaskId: next?.id || null, status: next ? 'active' : 'ready_to_finalize', routeRevision: (run.routeRevision || 1) + 1 }, taskUpdates, args.supersede ? 'task_superseded' : 'task_dropped', { taskId: task.id, reason: args.reason || null }, args);
     const snapshot = snapshotForRun(run, { kind: args.supersede ? 'task_superseded' : 'task_dropped', message: `${args.supersede ? 'Superseded' : 'Dropped'}: ${task.title}`, at: nowIso() });
     return { run, snapshot, markdown: renderDeltaMarkdown(snapshot) };
   }
@@ -437,26 +509,38 @@ export function createTaskManager(options = {}) {
     const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
     const sessionId = resolveSessionId(args, env);
     let run = getRunOrActive({ runId: args.runId, workspaceRoot, sessionId });
+    assertExpectedRevision(run, args);
+    const requestedSummaryId = args.summaryId || deterministicSummaryId(run.id, args);
+    const existingSummary = requestedSummaryId ? store.listSummaries(workspaceRoot, 10_000).find((item) => item.runId === run.id && item.id === requestedSummaryId) : null;
+    if (existingSummary && run.finalizedAt) {
+      publishSummaryFiles(workspaceRoot, run.id, existingSummary);
+      const snapshot = snapshotForRun(run, { kind: 'turn_finalized', message: 'Existing turn summary republished after retry.', at: nowIso() });
+      return { run, summary: existingSummary, summaryJson: existingSummary.summaryJson, summaryMd: existingSummary.summaryMd, snapshot, markdown: existingSummary.summaryMd, idempotent: true };
+    }
     const audit = auditStop({ workspaceRoot, runId: run.id, sessionId });
     if (!audit.stopAllowed && args.allowIncomplete !== true) {
       throw new OtmError('Cannot finalize while required route segments remain open.', { code: 'STOP_AUDIT_FAILED', details: audit.remainingRequired });
     }
+    if (!audit.stopAllowed) {
+      assertCondition(typeof args.reason === 'string' && args.reason.trim(), 'Incomplete finalization requires an explicit reason.', 'INCOMPLETE_FINALIZATION_REASON_REQUIRED');
+    }
     const tasks = store.getTasks(run.id);
     const summaryJson = buildSummaryJson({ run, tasks, outcome: args.outcome || (audit.stopAllowed ? 'completed' : 'incomplete'), nextSteps: args.nextSteps || [] });
     const summaryMd = renderSummaryMarkdown(summaryJson);
-    const summaryId = args.summaryId || newId('summary');
+    const summaryId = requestedSummaryId || newId('summary');
     const createdAt = nowIso();
     const turnId = args.turnId || run.turnId || 'manual';
     const summary = { id: summaryId, runId: run.id, workspaceRoot, turnId, summaryMd, summaryJson, currentCleared: false, createdAt };
-    store.upsertSummary(summary);
-    ensureDir(summariesDir(workspaceRoot));
-    const base = path.join(summariesDir(workspaceRoot), `${turnId}-${summaryId}`);
-    const tempDir = workspaceTempDir(workspaceRoot);
-    atomicWriteJson(`${base}.json`, summaryJson, { tempDir });
-    atomicWriteText(`${base}.md`, summaryMd, { tempDir });
-    upsertMemory({ workspaceRoot, kind: 'turn_summary', title: `Turn summary: ${run.goal}`, body: summaryMd, tags: ['turn-summary', 'checkpoint'], source: { runId: run.id, summaryId, turnId } });
-    run = store.updateRun(run.id, { status: audit.stopAllowed ? 'completed' : 'blocked', finalizedAt: createdAt });
-    recordEvent(run.id, 'turn_finalized', { summaryId, complete: audit.stopAllowed }, args);
+    // Commit the complete recoverable summary record first. If publication to
+    // the workspace later fails, doctor/repair can reconstruct both files
+    // from durable summary metadata instead of trying to infer an orphan.
+    const finalStatus = audit.stopAllowed ? 'completed' : 'blocked';
+    assertRunTransition(run.status, finalStatus, { runId: run.id });
+    run = commitRunMutation({ ...run, status: finalStatus, finalizedAt: createdAt, routeRevision: (run.routeRevision || 1) + 1,
+      metadata: audit.stopAllowed ? run.metadata : { ...(run.metadata || {}), incompleteFinalizationReason: args.reason.trim() }
+    }, [], 'turn_finalized', { summaryId, complete: audit.stopAllowed, reason: audit.stopAllowed ? null : args.reason.trim() }, args, [summary]);
+    publishSummaryFiles(workspaceRoot, run.id, summary);
+    upsertMemory({ id: `mem_${shortHash(`turn-summary:${run.id}:${summaryId}`)}`, workspaceRoot, kind: 'turn_summary', title: `Turn summary: ${run.goal}`, body: summaryMd, tags: ['turn-summary', 'checkpoint'], source: { runId: run.id, summaryId, turnId } });
     const snapshot = snapshotForRun(run, { kind: 'turn_finalized', message: 'Turn summary written. Active route can now be cleared.', at: createdAt });
     if (args.clear === true || args.clearCurrent === true) {
       const cleared = clearCurrent({ workspaceRoot, runId: run.id, sessionId, deleteFiles: Boolean(args.deleteFiles) });
@@ -464,6 +548,29 @@ export function createTaskManager(options = {}) {
 ${cleared.markdown || ''}` };
     }
     return { run, summary, summaryJson, summaryMd, snapshot, markdown: summaryMd };
+  }
+
+  function publishSummaryFiles(workspaceRoot, runId, summary) {
+    ensureDir(summariesDir(workspaceRoot));
+    // External turn/summary identifiers remain record metadata only; filenames
+    // are generated from a fixed namespace and hash to prevent path injection.
+    const base = path.join(summariesDir(workspaceRoot), safeGeneratedFileId('summary', `${runId}:${summary.id}`));
+    const tempDir = workspaceTempDir(workspaceRoot);
+    return {
+      json: atomicWriteJson(`${base}.json`, summary.summaryJson, { tempDir }),
+      markdown: atomicWriteText(`${base}.md`, summary.summaryMd, { tempDir })
+    };
+  }
+
+  function repairSummaries(args = {}) {
+    const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
+    const summaries = store.listSummaries(workspaceRoot, 10_000);
+    if (args.dryRun === true) return { workspaceRoot, dryRun: true, matched: summaries.length, repaired: 0 };
+    const repaired = summaries.reduce((count, summary) => {
+      const result = publishSummaryFiles(workspaceRoot, summary.runId, summary);
+      return count + (result.json || result.markdown ? 1 : 0);
+    }, 0);
+    return { workspaceRoot, dryRun: false, matched: summaries.length, repaired };
   }
 
   function clearCurrent(args = {}) {
@@ -474,7 +581,7 @@ ${cleared.markdown || ''}` };
       if (error?.code !== 'NO_ACTIVE_RUN') throw error;
     }
     if (!run && !args.runId) {
-      const current = readJson(currentJsonPath(workspaceRoot, sessionId), null);
+      const current = readOtmJsonArtifact(currentJsonPath(workspaceRoot, sessionId));
       if (current?.runId) {
         const candidate = store.getRun(current.runId);
         if (candidate && sameWorkspace(candidate.workspaceRoot, workspaceRoot)
@@ -482,11 +589,19 @@ ${cleared.markdown || ''}` };
       }
     }
     if (run) {
-      store.updateRun(run.id, { status: args.status || 'cleared', finalizedAt: run.finalizedAt || nowIso() });
-      for (const summary of store.listSummaries(workspaceRoot, 100).filter((item) => item.runId === run.id && !item.currentCleared)) {
-        store.upsertSummary({ ...summary, currentCleared: true });
-      }
-      recordEvent(run.id, 'current_cleared', { mode: args.deleteFiles ? 'delete' : 'tombstone' }, args);
+      assertExpectedRevision(run, args);
+      const finalized = Boolean(run.finalizedAt) && ['completed', 'blocked'].includes(run.status);
+      const explicitAbandon = args.abandon === true && typeof args.reason === 'string' && args.reason.trim();
+      assertCondition(finalized || explicitAbandon, 'Current state can only be cleared after finalization. Use the explicit abandon operation with a reason for unfinished work.', 'CLEAR_REQUIRES_FINALIZATION');
+      const summaries = store.listSummaries(workspaceRoot, 100).filter((item) => item.runId === run.id && !item.currentCleared).map((summary) => ({ ...summary, currentCleared: true }));
+      const nextStatus = explicitAbandon ? 'abandoned' : (args.status || 'cleared');
+      assertRunTransition(run.status, nextStatus, { runId: run.id });
+      run = commitRunMutation({ ...run,
+        status: nextStatus,
+        finalizedAt: run.finalizedAt || nowIso(),
+        metadata: explicitAbandon ? { ...(run.metadata || {}), abandonedReason: args.reason.trim() } : run.metadata,
+        routeRevision: (run.routeRevision || 1) + 1
+      }, [], 'current_cleared', { mode: args.deleteFiles ? 'delete' : 'tombstone' }, args, summaries);
     }
     const hasScopedActiveRuns = store.listActiveRuns(workspaceRoot).some((item) => item.sessionId);
     const cleanupOptions = sessionId
@@ -497,25 +612,78 @@ ${cleared.markdown || ''}` };
       removeFileIfExists(currentMarkdownPath(workspaceRoot, sessionId));
       if (sessionId || hasScopedActiveRuns) writeWorkspaceCurrentIndex(workspaceRoot);
       cleanupWorkspaceStateTempFiles(workspaceRoot, cleanupOptions);
-      pruneHistoryQuietly(workspaceRoot);
-      return { cleared: true, deleted: true, markdown: '## ✅ Overtli Task Manager\n\nActive route cleared.\n' };
+      const maintenance = runPostClearMaintenance(workspaceRoot);
+      const markdown = appendMaintenanceWarnings('## ✅ Overtli Task Manager\n\nActive route cleared.\n', maintenance.warnings);
+      return { cleared: true, deleted: true, maintenance, markdown };
     }
     const tombstone = clearedSnapshot(workspaceRoot, { message: 'Active route cleared after summary.' }, run?.id || null, sessionId || run?.sessionId || null);
     if (!sessionId && hasScopedActiveRuns) writeWorkspaceCurrentIndex(workspaceRoot);
     else writeCurrentFiles(workspaceRoot, tombstone);
     cleanupWorkspaceStateTempFiles(workspaceRoot, cleanupOptions);
-    pruneHistoryQuietly(workspaceRoot);
-    return { cleared: true, deleted: false, snapshot: tombstone, markdown: renderSnapshotMarkdown(tombstone) };
+    const maintenance = runPostClearMaintenance(workspaceRoot);
+    return { cleared: true, deleted: false, snapshot: tombstone, maintenance, markdown: appendMaintenanceWarnings(renderSnapshotMarkdown(tombstone), maintenance.warnings) };
   }
 
   function cleanupWorkspace(args = {}) {
     const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
+    assertCondition(args.allSessions !== true || args.confirm === true, 'Cleaning scratch evidence for all sessions requires explicit confirmation.', 'CLEANUP_CONFIRMATION_REQUIRED');
+    const activeRuns = store.listActiveRuns(workspaceRoot);
+    const activeSessionIds = activeRuns.map((run) => run.sessionId).filter(Boolean);
+    const preserveAnyActiveScratch = args.allSessions !== true && activeRuns.length > 0;
     const removed = cleanupWorkspaceStateTempFiles(workspaceRoot, {
       minAgeMs: args.minAgeMs ?? 0,
-      scratchMaxAgeMs: args.scratchMaxAgeMs ?? 0
+      scratchMaxAgeMs: preserveAnyActiveScratch ? -1 : args.scratchMaxAgeMs,
+      excludeSessionIds: args.allSessions === true ? [] : activeSessionIds,
+      dryRun: args.dryRun === true
     });
-    const lines = ['## ✅ OTM cleanup', '', `Workspace: \`${workspaceRoot}\``, `Removed artifact(s): ${removed.length}`];
-    return { workspaceRoot, removed, markdown: `${lines.join('\n')}\n` };
+    const lines = [`## ${args.dryRun ? '🧪' : '✅'} OTM cleanup`, '', `Workspace: \`${workspaceRoot}\``, `${args.dryRun ? 'Matched' : 'Removed'} artifact(s): ${removed.length}`, `Active-session scratch skipped: ${args.allSessions === true ? 0 : activeRuns.length}`];
+    return { workspaceRoot, dryRun: args.dryRun === true, removed, skippedActiveSessions: args.allSessions === true ? [] : activeRuns.map((run) => run.sessionId || 'unscoped'), markdown: `${lines.join('\n')}\n` };
+  }
+
+  function abandonRun(args = {}) {
+    assertCondition(typeof args.reason === 'string' && args.reason.trim(), 'Abandon requires an explicit reason.', 'ABANDON_REASON_REQUIRED');
+    return clearCurrent({ ...args, abandon: true, status: 'abandoned' });
+  }
+
+  function resumeRun(args = {}) {
+    const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
+    const sessionId = resolveSessionId(args, env);
+    let run = getRunOrActive({ runId: args.runId, workspaceRoot, sessionId });
+    assertExpectedRevision(run, args);
+    assertCondition(['blocked', 'paused'].includes(run.status) && !run.finalizedAt, 'Only an unfinished blocked or paused route can be resumed.', 'INVALID_TRANSITION');
+    const tasks = store.getTasks(run.id);
+    const target = tasks.find((task) => task.id === (args.taskId || run.currentTaskId)) || tasks.find((task) => task.status === 'blocked') || tasks.find((task) => task.status === 'pending');
+    assertCondition(target, 'No resumable task exists for this route.', 'INVALID_TRANSITION');
+    assertCondition(!['done', 'dropped', 'superseded'].includes(target.status), 'Terminal tasks cannot be resumed without an explicit reconcile reopen.', 'INVALID_TRANSITION');
+    assertDependenciesTerminal(target, tasks);
+    assertTaskTransition(target.status, 'active', { taskId: target.id });
+    assertRunTransition(run.status, 'active', { runId: run.id });
+    const updatedTasks = tasks.map((task) => {
+      if (task.id === target.id) return {
+        ...task,
+        status: 'active',
+        completedAt: null,
+        metadata: ensureInternalStepProgress({ ...(task.metadata || {}), resumedAt: nowIso(), resumedReason: args.reason || null }, 'active')
+      };
+      if (task.status === 'active') return { ...task, status: 'pending', metadata: suspendInternalStepProgress(task.metadata) };
+      return task;
+    });
+    assertTaskListTransitions(tasks, updatedTasks);
+    run = commitRunMutation({ ...run, status: 'active', currentTaskId: target.id, routeRevision: (run.routeRevision || 1) + 1 }, updatedTasks, 'run_resumed', { taskId: target.id, reason: args.reason || null }, args);
+    const snapshot = snapshotForRun(run, { kind: 'run_resumed', taskId: target.id, message: `Resumed: ${target.title}`, at: nowIso() });
+    return { run, snapshot, markdown: renderDeltaMarkdown(snapshot) };
+  }
+
+  function archiveRun(args = {}) {
+    const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
+    const sessionId = resolveSessionId(args, env);
+    let run = getRunOrActive({ runId: args.runId, workspaceRoot, sessionId });
+    assertExpectedRevision(run, args);
+    if (run.status === 'archived') return { run, archived: false, idempotent: true };
+    assertCondition(['completed', 'cleared', 'abandoned'].includes(run.status) && Boolean(run.finalizedAt), 'Only finalized, cleared, or abandoned routes can be archived.', 'INVALID_TRANSITION');
+    assertRunTransition(run.status, 'archived', { runId: run.id });
+    run = commitRunMutation({ ...run, status: 'archived', routeRevision: (run.routeRevision || 1) + 1, metadata: { ...(run.metadata || {}), archivedAt: nowIso(), archiveReason: args.reason || null } }, [], 'run_archived', { reason: args.reason || null }, args);
+    return { run, archived: true, idempotent: false };
   }
 
   function pruneHistory(args = {}) {
@@ -533,12 +701,17 @@ ${cleared.markdown || ''}` };
     return { ...result, markdown: renderPruneHistoryMarkdown(result) };
   }
 
-  function pruneHistoryQuietly(workspaceRoot) {
+  function runPostClearMaintenance(workspaceRoot) {
+    const warnings = [];
     try {
-      if (typeof store.pruneHistory !== 'function') return null;
-      return pruneHistory({ workspaceRoot });
-    } catch {
-      return null;
+      if (typeof store.pruneHistory !== 'function') return { pruned: null, warnings };
+      return { pruned: pruneHistory({ workspaceRoot }), warnings };
+    } catch (error) {
+      // Clearing a finalized route is already durable. Do not roll it back for
+      // optional retention maintenance, but never hide a failure that needs
+      // explicit operator follow-up.
+      warnings.push(`Automatic history pruning was not completed: ${redactSensitiveText(error?.message || String(error))}`);
+      return { pruned: null, warnings };
     }
   }
 
@@ -572,7 +745,7 @@ ${cleared.markdown || ''}` };
       kind: args.kind || 'note',
       title: String(args.title || 'Project memory').trim(),
       body: String(args.body || '').trim(),
-      tags: Array.isArray(args.tags) ? args.tags.map(String) : [],
+      tags: normalizeMemoryTags(args.tags),
       source: args.source || {},
       scoreHint: Number(args.scoreHint || 0),
       createdAt: args.createdAt || now,
@@ -580,6 +753,8 @@ ${cleared.markdown || ''}` };
       expiresAt: args.expiresAt || null
     };
     assertCondition(entry.body, 'Memory body is required.', 'INVALID_MEMORY');
+    assertCondition(entry.title.length <= 500 && entry.body.length <= 16_000, 'Memory entry exceeds the size limit.', 'INPUT_TOO_LARGE');
+    assertCondition(Number.isFinite(entry.scoreHint) && entry.scoreHint >= 0 && entry.scoreHint <= 1_000, 'Memory scoreHint must be between 0 and 1000.', 'INVALID_MEMORY');
     store.upsertCache(entry);
     return { entry };
   }
@@ -587,17 +762,48 @@ ${cleared.markdown || ''}` };
   function searchMemory(args = {}) {
     const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
     const query = String(args.query || '').trim();
-    const entries = store.listCache(workspaceRoot, Number(args.limit || 50));
-    const scored = entries.map((entry) => ({ entry, score: scoreEntry(entry, query) }))
+    const limit = clampLimit(args.limit, 10, 100);
+    const entries = store.listCache(workspaceRoot, 500).filter((entry) => !entry.expiresAt || String(entry.expiresAt) > nowIso());
+    const scored = entries.map((entry) => ({ entry, ...scoreEntry(entry, query) }))
       .filter((item) => !query || item.score > 0)
       .sort((a, b) => b.score - a.score)
-      .slice(0, Number(args.limit || 10));
-    return { entries: scored.map(({ entry, score }) => ({ ...entry, score })) };
+      .slice(0, limit);
+    return { entries: scored.map(({ entry, score, matchReasons }) => ({ ...entry, score, matchReasons })) };
   }
 
   function deleteMemory(args = {}) {
     const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
-    return { deleted: store.deleteCache({ ...args, workspaceRoot }) };
+    const selectors = ['id', 'kind', 'tag'].filter((key) => typeof args[key] === 'string' && args[key].trim());
+    const all = args.all === true;
+    assertCondition(selectors.length > 0 || all, 'At least one memory selector is required.', 'MEMORY_SELECTOR_REQUIRED');
+    assertCondition(!all || args.confirm === true, 'Workspace-wide memory deletion requires all:true and explicit confirmation.', 'MEMORY_DELETE_CONFIRMATION_REQUIRED');
+    const filter = all ? { workspaceRoot } : { ...args, workspaceRoot };
+    const matched = store.listCache(workspaceRoot, 10_000).filter((entry) => memoryMatches(entry, filter));
+    if (args.dryRun === true) return { deleted: 0, dryRun: true, matched: matched.length, entries: matched.map((entry) => ({ id: entry.id, title: entry.title, kind: entry.kind })) };
+    return { deleted: store.deleteCache(filter), matched: matched.length };
+  }
+
+  function listMemory(args = {}) {
+    const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
+    const limit = clampLimit(args.limit, 50, 500);
+    const entries = store.listCache(workspaceRoot, limit).filter((entry) => !entry.expiresAt || String(entry.expiresAt) > nowIso());
+    return { entries };
+  }
+
+  function inspectMemory(args = {}) {
+    assertCondition(typeof args.id === 'string' && args.id.trim(), 'Memory id is required.', 'MEMORY_SELECTOR_REQUIRED');
+    const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
+    const entry = store.listCache(workspaceRoot, 10_000).find((item) => item.id === args.id);
+    assertCondition(entry, 'Memory entry not found.', 'MEMORY_NOT_FOUND');
+    return { entry };
+  }
+
+  function purgeExpiredMemory(args = {}) {
+    const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
+    const now = args.now || nowIso();
+    const matched = store.listCache(workspaceRoot, 10_000).filter((entry) => entry.expiresAt && String(entry.expiresAt) <= now);
+    if (args.dryRun === true) return { dryRun: true, deleted: 0, matched: matched.length };
+    return { dryRun: false, deleted: store.deleteCache({ workspaceRoot, expired: true, now }), matched: matched.length };
   }
 
   function listRuns(args = {}) {
@@ -605,8 +811,31 @@ ${cleared.markdown || ''}` };
     return { runs: store.listRuns(workspaceRoot, Number(args.limit || 20)) };
   }
 
+  function exportWorkspace(args = {}) {
+    const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
+    assertCondition(typeof store.exportWorkspace === 'function', 'Current OTM store does not support export.', 'EXPORT_UNSUPPORTED');
+    const payload = store.exportWorkspace(workspaceRoot);
+    return {
+      schemaVersion: 'otm.export.v1',
+      exportedAt: nowIso(),
+      workspaceRoot,
+      storageKind: store.kind,
+      ...payload
+    };
+  }
+
+  function importHistorical(args = {}) {
+    const workspaceRoot = resolveWorkspace(args.workspaceRoot || findWorkspaceRoot(args.cwd));
+    const document = validateHistoricalImport(args.document, workspaceRoot);
+    assertCondition(typeof store.importWorkspace === 'function', 'Current OTM store does not support import.', 'IMPORT_UNSUPPORTED');
+    if (args.dryRun === true) return { workspaceRoot, dryRun: true, imported: importDocumentCounts(document) };
+    const imported = store.importWorkspace(document);
+    return { workspaceRoot, dryRun: false, imported };
+  }
+
   return {
     store,
+    close: () => store.close?.(),
     start,
     reconcile,
     markTaskActive,
@@ -617,27 +846,96 @@ ${cleared.markdown || ''}` };
     auditStop,
     finalizeTurn,
     clearCurrent,
+    abandonRun,
+    resumeRun,
+    archiveRun,
+    repairSummaries,
     cleanupWorkspace,
     pruneHistory,
     snapshot,
     upsertMemory,
     searchMemory,
     deleteMemory,
+    listMemory,
+    inspectMemory,
+    purgeExpiredMemory,
     listRuns,
+    exportWorkspace,
+    importHistorical,
     recordEvent
   };
 }
 
+function normalizeBoundedStrings(value, name, maxItems, maxLength) {
+  assertCondition(Array.isArray(value), `${name} must be an array.`, 'INVALID_INPUT');
+  assertCondition(value.length <= maxItems, `${name} exceed the maximum item count.`, 'INPUT_TOO_LARGE');
+  return value.map((item) => assertNonEmptyString(String(item), name, maxLength));
+}
+
+function normalizeBoundedInteger(value, fallback, min, max, name) {
+  if (value === undefined || value === null) return fallback;
+  const numeric = Number(value);
+  assertCondition(Number.isInteger(numeric) && numeric >= min && numeric <= max, `${name} must be an integer between ${min} and ${max}.`, 'INVALID_INPUT');
+  return numeric;
+}
+
+function normalizeTaskEvidence(value) {
+  assertCondition(Array.isArray(value), 'Task evidence must be an array.', 'INVALID_INPUT');
+  assertCondition(value.length <= LIMITS.evidence, 'Task evidence exceeds the maximum item count.', 'INPUT_TOO_LARGE');
+  return value.map((item) => evidenceFromArgs(item));
+}
+
 function evidenceFromArgs(input = {}) {
+  assertCondition(input && typeof input === 'object' && !Array.isArray(input), 'Evidence must be an object.', 'INVALID_INPUT');
+  const summary = assertNonEmptyString(String(input.summary || input.message || 'Evidence captured'), 'evidence summary', LIMITS.text);
+  const kind = assertNonEmptyString(String(input.kind || 'manual_note'), 'evidence kind', 80);
+  const files = input.files === undefined ? undefined : normalizeEvidenceFiles(input.files);
+  const command = input.command === undefined || input.command === null
+    ? undefined
+    : redactSensitiveText(assertNonEmptyString(String(input.command), 'evidence command', LIMITS.text));
+  const exitCode = input.exitCode === undefined || input.exitCode === null
+    ? undefined
+    : normalizeExitCode(input.exitCode);
+  if (input.notes !== undefined) assertAcyclicContext(input.notes, 64 * 1024);
   return omitEmpty({
-    kind: input.kind || 'manual_note',
-    summary: String(input.summary || input.message || 'Evidence captured').trim(),
-    files: Array.isArray(input.files) && input.files.length ? input.files.map(String) : undefined,
-    command: input.command || undefined,
-    exitCode: input.exitCode ?? undefined,
-    notes: input.notes || undefined,
+    kind,
+    summary: redactSensitiveText(summary),
+    files,
+    command,
+    exitCode,
+    notes: input.notes ? redactEvidenceValue(input.notes) : undefined,
     at: nowIso()
   });
+}
+
+function normalizeEvidenceFiles(value) {
+  assertCondition(Array.isArray(value), 'Evidence files must be an array.', 'INVALID_INPUT');
+  assertCondition(value.length <= 128, 'Evidence files exceed the maximum item count.', 'INPUT_TOO_LARGE');
+  return value.map((item) => assertNonEmptyString(String(item), 'evidence file', 4_000));
+}
+
+function normalizeExitCode(value) {
+  const numeric = Number(value);
+  assertCondition(Number.isInteger(numeric) && numeric >= -255 && numeric <= 255, 'Evidence exitCode must be an integer between -255 and 255.', 'INVALID_INPUT');
+  return numeric;
+}
+
+function deterministicSummaryId(runId, args = {}) {
+  const operation = args.operationId || args.idempotencyKey || args.turnId;
+  return operation ? `summary_${shortHash(`${runId}:${operation}`)}` : null;
+}
+
+function redactEvidenceValue(value) {
+  if (typeof value === 'string') return redactSensitiveText(value);
+  if (Array.isArray(value)) return value.map(redactEvidenceValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => (
+      /authorization|token|secret|password|private.?key/i.test(key)
+        ? [key, '[REDACTED]']
+        : [key, redactEvidenceValue(item)]
+    )));
+  }
+  return value;
 }
 
 function buildSummaryJson({ run, tasks, outcome, nextSteps }) {
@@ -725,16 +1023,45 @@ function clearedSnapshot(workspaceRoot, lastUpdate = null, lastRunId = null, ses
   });
 }
 
+function appendMaintenanceWarnings(markdown, warnings = []) {
+  if (!warnings.length) return markdown;
+  return `${markdown.trimEnd()}\n\n### Maintenance warning\n\n${warnings.map((warning) => `- ${warning}`).join('\n')}\n`;
+}
+
 function omitEmpty(value) {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined && item !== null));
 }
 
 function sameWorkspace(left, right) {
-  const normalize = (value) => {
-    const resolved = path.resolve(value);
-    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-  };
-  return normalize(left) === normalize(right);
+  return workspaceIdentity(left) === workspaceIdentity(right);
+}
+
+function clampLimit(value, fallback, maximum) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const numeric = Number(value);
+  assertCondition(Number.isInteger(numeric) && numeric >= 1 && numeric <= maximum, `Limit must be an integer between 1 and ${maximum}.`, 'INVALID_LIMIT');
+  return numeric;
+}
+
+function normalizeMemoryTags(value) {
+  if (value == null) return [];
+  assertCondition(Array.isArray(value) && value.length <= 32, 'Memory tags must be an array with at most 32 values.', 'INVALID_MEMORY');
+  const tags = value.map((tag) => String(tag).trim().toLowerCase()).filter(Boolean);
+  assertCondition(tags.every((tag) => tag.length <= 80), 'Memory tag exceeds the maximum length.', 'INPUT_TOO_LARGE');
+  return [...new Set(tags)];
+}
+
+function memoryMatches(entry, filter) {
+  if (filter.id && entry.id !== filter.id) return false;
+  if (filter.kind && entry.kind !== filter.kind) return false;
+  if (filter.tag && !(entry.tags || []).map((tag) => String(tag).toLowerCase()).includes(String(filter.tag).trim().toLowerCase())) return false;
+  return true;
+}
+
+function assertInitialTaskStatus(status) {
+  assertKnownEnum(status, TASK_STATUSES, 'task status');
+  assertCondition(status === 'pending' || status === 'active', 'Initial route tasks must be pending or active.', 'INVALID_INITIAL_TASK_STATUS');
+  return status;
 }
 
 function normalizeTaskMetadata(input, acceptanceCriteria) {
@@ -755,6 +1082,7 @@ function normalizeActiveTasks(tasks) {
 
 function normalizeInternalSteps(input, acceptanceCriteria = []) {
   const supplied = Array.isArray(input.internalSteps) ? input.internalSteps : input.metadata?.internalSteps;
+  if (Array.isArray(supplied)) assertUniqueIds(supplied.filter((step) => step && typeof step === 'object' && step.id), 'internal step');
   const explicit = Array.isArray(supplied) ? normalizeInternalStepList(supplied) : [];
   if (explicit.length) return explicit;
 
@@ -965,7 +1293,7 @@ function markInternalStep(step, status) {
     ...step,
     status: normalizedStatus,
     updatedAt: nowIso(),
-    completedAt: ['done', 'skipped'].includes(normalizedStatus) ? (step.completedAt || nowIso()) : step.completedAt
+    completedAt: ['done', 'skipped'].includes(normalizedStatus) ? (step.completedAt || nowIso()) : undefined
   });
 }
 
@@ -989,20 +1317,28 @@ function assertInternalStepsComplete(metadata = {}) {
 
 function findRelatedOpenTask(tasks, candidate) {
   const open = tasks.filter((task) => !['done', 'dropped', 'superseded'].includes(task.status));
-  return open.find((task) => task.stableKey === candidate.stableKey)
-    || open.find((task) => relatedTaskScore(task, candidate) >= 0.72)
-    || null;
+  // Automatic reconciliation is deterministic: fuzzy title similarity can
+  // collapse distinct user requirements and is therefore never authoritative.
+  return open.find((task) => task.stableKey === candidate.stableKey) || null;
 }
 
 function findRelatedReopenableTask(tasks, candidate) {
   const reopenable = tasks.filter((task) => ['done', 'dropped', 'superseded', 'blocked'].includes(task.status));
-  return reopenable.find((task) => task.stableKey === candidate.stableKey)
-    || reopenable.find((task) => relatedTaskScore(task, candidate) >= 0.72)
-    || null;
+  return reopenable.find((task) => task.stableKey === candidate.stableKey) || null;
+}
+
+function assertTaskListTransitions(beforeTasks, afterTasks) {
+  const beforeById = new Map(beforeTasks.map((task) => [task.id, task]));
+  for (const task of afterTasks) {
+    const before = beforeById.get(task.id);
+    if (before) assertTaskTransition(before.status, task.status, { taskId: task.id });
+  }
 }
 
 function chooseCurrentTask(tasks, previousCurrentId = null, options = {}) {
-  const open = tasks.filter((task) => task.required && !['done', 'dropped', 'superseded'].includes(task.status));
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  const open = tasks.filter((task) => task.required && !['done', 'dropped', 'superseded'].includes(task.status)
+    && (task.metadata?.dependsOn || []).every((id) => ['done', 'dropped', 'superseded'].includes(byId.get(id)?.status)));
   if (!open.length) return null;
   const previous = open.find((task) => task.id === previousCurrentId);
   if (options.forcePreferred && previous) return previous;
@@ -1010,6 +1346,39 @@ function chooseCurrentTask(tasks, previousCurrentId = null, options = {}) {
   if (active) return active;
   if (previous) return previous;
   return [...open].sort((a, b) => Number(a.sortOrder || 0) - Number(b.sortOrder || 0))[0];
+}
+
+function activateTaskList(tasks, current) {
+  return tasks.map((task) => {
+    if (task.status === 'active' && task.id !== current?.id) return { ...task, status: 'pending', metadata: suspendInternalStepProgress(task.metadata) };
+    if (current && task.id === current.id) return { ...task, status: task.status === 'pending' ? 'active' : task.status, metadata: ensureInternalStepProgress(task.metadata, task.status === 'pending' ? 'active' : task.status) };
+    return task;
+  });
+}
+
+function assertDependenciesTerminal(task, tasks) {
+  const byId = new Map(tasks.map((item) => [item.id, item]));
+  const incomplete = (task.metadata?.dependsOn || []).filter((id) => !['done', 'dropped', 'superseded'].includes(byId.get(id)?.status));
+  assertCondition(incomplete.length === 0, 'Task dependencies must be terminal before activation.', 'DEPENDENCIES_INCOMPLETE', { taskId: task.id, incomplete });
+}
+
+function normalizeDependsOn(value) {
+  if (value == null) return [];
+  assertCondition(Array.isArray(value), 'dependsOn must be an array.', 'INVALID_DEPENDENCIES');
+  assertCondition(value.length <= LIMITS.internalSteps, 'dependsOn exceeds the maximum item count.', 'INPUT_TOO_LARGE');
+  const ids = value.map((id) => assertNonEmptyString(String(id), 'dependency id', LIMITS.id));
+  assertCondition(new Set(ids).size === ids.length, 'dependsOn cannot contain duplicate IDs.', 'DUPLICATE_ID');
+  return ids;
+}
+
+function assertValidDependencies(tasks) {
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  for (const task of tasks) for (const dependencyId of task.metadata?.dependsOn || []) {
+    assertCondition(dependencyId !== task.id && byId.has(dependencyId), 'Task dependency is missing or self-referential.', 'INVALID_DEPENDENCIES');
+  }
+  const visiting = new Set(); const visited = new Set();
+  const visit = (id) => { if (visiting.has(id)) throw new OtmError('Task dependencies contain a cycle.', { code: 'CYCLIC_DEPENDENCIES' }); if (visited.has(id)) return; visiting.add(id); for (const dependencyId of byId.get(id).metadata?.dependsOn || []) visit(dependencyId); visiting.delete(id); visited.add(id); };
+  for (const task of tasks) visit(task.id);
 }
 
 function assertCanSwitchTask(tasks, targetTask, args = {}) {
@@ -1035,24 +1404,6 @@ function resolveTaskForReopen(change, tasks) {
   return null;
 }
 
-function relatedTaskScore(a, b) {
-  const left = taskTokens(a.title);
-  const right = taskTokens(b.title);
-  if (left.size < 2 || right.size < 2) return 0;
-  let overlap = 0;
-  for (const token of left) if (right.has(token)) overlap += 1;
-  if (overlap < 2) return 0;
-  return overlap / Math.min(left.size, right.size);
-}
-
-function taskTokens(title) {
-  const stop = new Set(['the', 'and', 'for', 'with', 'from', 'into', 'route', 'task', 'tasks', 'segment', 'segments', 'work']);
-  const words = String(title || '').toLowerCase().match(/[a-z0-9]+/g) || [];
-  return new Set(words
-    .map((word) => word.replace(/ing$/, '').replace(/ed$/, '').replace(/s$/, ''))
-    .filter((word) => word.length > 2 && !stop.has(word)));
-}
-
 function unionStrings(...groups) {
   const seen = new Set();
   const values = [];
@@ -1065,13 +1416,87 @@ function unionStrings(...groups) {
   return values;
 }
 
+function validateHistoricalImport(document, workspaceRoot) {
+  assertCondition(document && typeof document === 'object' && !Array.isArray(document), 'Import document must be an object.', 'IMPORT_INVALID');
+  assertCondition(document.schemaVersion === 'otm.export.v1', 'Unsupported import document schema.', 'IMPORT_SCHEMA_UNSUPPORTED');
+  assertCondition(sameWorkspace(document.workspaceRoot, workspaceRoot), 'Import document belongs to a different workspace.', 'WORKSPACE_SCOPE_MISMATCH');
+  const collections = ['runs', 'tasks', 'events', 'summaries', 'cache'];
+  for (const collection of collections) {
+    assertCondition(Array.isArray(document[collection]), `Import document has invalid ${collection}.`, 'IMPORT_INVALID');
+    assertUniqueIds(document[collection], collection.slice(0, -1));
+  }
+  const runs = document.runs.map((run) => ({ ...run, workspaceRoot }));
+  const runIds = new Set(runs.map((run) => run.id));
+  for (const run of runs) {
+    assertKnownEnum(run.status, RUN_STATUSES, 'run status');
+    assertCondition(!['active', 'ready_to_finalize', 'blocked', 'paused'].includes(run.status), 'Historical import cannot create an active route. Import finalized, cleared, abandoned, or archived history only.', 'IMPORT_ACTIVE_RUN_FORBIDDEN');
+    assertTimestamp(run.createdAt, 'run.createdAt');
+    assertTimestamp(run.updatedAt, 'run.updatedAt');
+    assertCondition(Boolean(run.finalizedAt), 'Historical imported runs must include finalizedAt.', 'IMPORT_INVALID');
+    assertTimestamp(run.finalizedAt, 'run.finalizedAt');
+  }
+  for (const task of document.tasks) {
+    assertCondition(runIds.has(task.runId), 'Import task references a missing run.', 'IMPORT_INVALID');
+    assertKnownEnum(task.status, TASK_STATUSES, 'task status');
+    assertTimestamp(task.createdAt, 'task.createdAt');
+    assertTimestamp(task.updatedAt, 'task.updatedAt');
+  }
+  for (const event of document.events) {
+    assertCondition(runIds.has(event.runId) && typeof event.idempotencyKey === 'string' && event.idempotencyKey, 'Import event is invalid or references a missing run.', 'IMPORT_INVALID');
+    assertTimestamp(event.createdAt, 'event.createdAt');
+  }
+  for (const summary of document.summaries) {
+    assertCondition(runIds.has(summary.runId) && sameWorkspace(summary.workspaceRoot, workspaceRoot), 'Import summary references a missing run or workspace.', 'IMPORT_INVALID');
+    assertTimestamp(summary.createdAt, 'summary.createdAt');
+  }
+  for (const entry of document.cache) {
+    assertCondition(sameWorkspace(entry.workspaceRoot, workspaceRoot), 'Import memory entry belongs to a different workspace.', 'WORKSPACE_SCOPE_MISMATCH');
+    assertTimestamp(entry.createdAt, 'memory.createdAt');
+    assertTimestamp(entry.updatedAt, 'memory.updatedAt');
+  }
+  return { runs, tasks: document.tasks, events: document.events, summaries: document.summaries, cache: document.cache };
+}
+
+function assertTimestamp(value, name) {
+  assertCondition(typeof value === 'string' && Number.isFinite(Date.parse(value)), `Import field ${name} must be an ISO timestamp.`, 'IMPORT_INVALID');
+}
+
+function importDocumentCounts(document) {
+  return Object.fromEntries(['runs', 'tasks', 'events', 'summaries', 'cache'].map((name) => [name, document[name].length]));
+}
+
 function scoreEntry(entry, query) {
-  if (!query) return entry.scoreHint || 0;
-  const q = String(query).toLowerCase().split(/\s+/).filter(Boolean);
-  const hay = `${entry.title}
-${entry.body}
-${(entry.tags || []).join(' ')}`.toLowerCase();
-  let hits = 0;
-  for (const part of q) if (hay.includes(part)) hits += 1;
-  return hits + (entry.scoreHint || 0);
+  const scoreHint = Number(entry.scoreHint || 0);
+  const reasons = [];
+  const normalizedQuery = String(query || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (!normalizedQuery) {
+    if (scoreHint) reasons.push(`score hint: ${scoreHint}`);
+    return { score: scoreHint, matchReasons: reasons };
+  }
+  const queryTokens = tokenize(normalizedQuery);
+  const title = String(entry.title || '').toLowerCase();
+  const body = String(entry.body || '').toLowerCase();
+  const tags = (entry.tags || []).map((tag) => String(tag).toLowerCase());
+  const titleTokens = new Set(tokenize(title));
+  const bodyTokens = new Set(tokenize(body));
+  const tagTokens = new Set(tokenize(tags.join(' ')));
+  let score = scoreHint;
+  if (title.includes(normalizedQuery) || body.includes(normalizedQuery) || tags.some((tag) => tag.includes(normalizedQuery))) {
+    score += 5;
+    reasons.push('exact phrase');
+  }
+  const titleMatches = queryTokens.filter((token) => titleTokens.has(token));
+  const tagMatches = queryTokens.filter((token) => tagTokens.has(token));
+  const bodyMatches = queryTokens.filter((token) => bodyTokens.has(token));
+  if (titleMatches.length) { score += titleMatches.length * 3; reasons.push(`title: ${titleMatches.join(', ')}`); }
+  if (tagMatches.length) { score += tagMatches.length * 2; reasons.push(`tags: ${tagMatches.join(', ')}`); }
+  if (bodyMatches.length) { score += bodyMatches.length; reasons.push(`body: ${bodyMatches.join(', ')}`); }
+  const updatedAt = Date.parse(entry.updatedAt || entry.createdAt || '');
+  if (Number.isFinite(updatedAt)) {
+    const ageDays = (Date.now() - updatedAt) / 86_400_000;
+    if (ageDays >= 0 && ageDays <= 7) { score += 1; reasons.push('updated within 7 days'); }
+    else if (ageDays >= 0 && ageDays <= 30) { score += 0.5; reasons.push('updated within 30 days'); }
+  }
+  if (scoreHint) reasons.push(`score hint: ${scoreHint}`);
+  return { score, matchReasons: reasons };
 }

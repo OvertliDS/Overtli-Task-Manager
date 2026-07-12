@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { resolveWithinRoot } from '../core/validation.mjs';
 import { AGENTS_BLOCK_BEGIN, AGENTS_BLOCK_END } from '../core/constants.mjs';
 import { readText, atomicWriteText, pathExists } from '../core/fs-utils.mjs';
 
@@ -27,7 +28,7 @@ export function managedAgentsBlock() {
 }
 
 export function chooseAgentsFile(workspaceRoot, explicitTarget = null) {
-  if (explicitTarget) return path.resolve(workspaceRoot, explicitTarget);
+  if (explicitTarget) return resolveWithinRoot(workspaceRoot, explicitTarget);
   return path.join(workspaceRoot, 'AGENTS.md');
 }
 
@@ -35,6 +36,11 @@ export function patchAgentsFile({ workspaceRoot, targetFile = null, dryRun = fal
   const filePath = chooseAgentsFile(workspaceRoot, targetFile);
   const before = readText(filePath, '');
   const block = managedAgentsBlock();
+  const beginCount = markerCount(before, AGENTS_BLOCK_BEGIN);
+  const endCount = markerCount(before, AGENTS_BLOCK_END);
+  if (beginCount > 1 || endCount > 1) {
+    return { ok: false, action: 'conflict', filePath, reason: 'Found duplicate OTM markers. Manual repair is required before automatic patching.' };
+  }
   const begin = before.indexOf(AGENTS_BLOCK_BEGIN);
   const end = before.indexOf(AGENTS_BLOCK_END);
   let after;
@@ -67,6 +73,10 @@ export function patchAgentsFile({ workspaceRoot, targetFile = null, dryRun = fal
     warning: agentsOverrideWarning(workspaceRoot, targetFile),
     preview: dryRun ? after : undefined
   };
+}
+
+function markerCount(text, marker) {
+  return String(text).split(marker).length - 1;
 }
 
 function agentsOverrideWarning(workspaceRoot, explicitTarget = null) {
