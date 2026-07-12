@@ -142,6 +142,7 @@
 - [x] Verified: `npm ci --foreground-scripts` rebuilt and loaded required `better-sqlite3@11.10.0` (SQLite `3.49.2`) without performing global OTM setup.
 - [x] Verified: full test suite passed 131 tests with zero failures or skips. This includes required SQLite conformance/migration lanes, multi-process races, lifecycle/state-machine, installer, CLI/doctor, MCP, path/redaction, hooks, project review, planner, and renderer coverage.
 - [x] Verified: coverage passed at 92.07% overall, with manager 95.74%, JSON 96.61%, SQLite 95.39%, and validation 98.33%; lint, format, checked syntax/type, package dry-run, and diff checks passed.
+- [x] Verified: implementation committed locally as `e9e3219ff437497c851c72c3a79f0c8e16b80837` on `codex/full-production-hardening`; no remote push was requested or performed. The pre-existing deleted `AGENTS.md` and `.codex-plugin/plugin.json` remain intentionally unstaged.
 
 ## 2026-07-11 - Static unsafe-leftover sweep
 

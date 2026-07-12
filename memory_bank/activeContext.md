@@ -35,4 +35,4 @@ Full production-hardening remediation against baseline `24e2ab5d0ce7c8481bdccf01
 
 ## Exact next action
 
-Stage the completed hardening work while preserving the pre-existing deletions of `AGENTS.md` and `.codex-plugin/plugin.json`, create the local remediation commit, and do not push it.
+Production-hardening remediation was committed locally as `e9e3219ff437497c851c72c3a79f0c8e16b80837` without a remote push. The working tree intentionally retains the pre-existing unstaged deletions of `AGENTS.md` and `.codex-plugin/plugin.json`; do not restore, stage, or discard them without explicit user direction.
