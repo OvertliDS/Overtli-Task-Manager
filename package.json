@@ -62,7 +62,8 @@
     "lint": "eslint .",
     "format:check": "prettier --check .",
     "type:check": "tsc --project tsconfig.json",
-    "whitespace:check": "git diff --check"
+    "whitespace:check": "git diff --check",
+    "test:ci": "node ./scripts/run-ci-tests.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",

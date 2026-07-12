@@ -21,3 +21,5 @@ coverage/
 .codex/overtli-task-manager/install.json
 .codex/overtli-task-manager/*.sqlite*
 # OVERTLI-TASK-MANAGER:GITIGNORE:END
+
+ci-test.log
