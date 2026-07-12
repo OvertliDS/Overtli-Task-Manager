@@ -212,3 +212,202 @@ test("CLI migration dry-run inspects legacy SQLite without changing it", async (
     /Unknown flag/,
   );
 });
+
+test("SQLite v4 rebuilds legacy tables with real cascading foreign keys even when user_version is current", () => {
+  const Database = loadBetterSqlite3();
+  assert.ok(
+    Database,
+    "better-sqlite3 is required for the SQLite migration lane",
+  );
+  const stateDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "otm-sqlite-v4-fk-migrate-"),
+  );
+  const dbPath = path.join(stateDir, "state.sqlite");
+  createLegacySchemaWithoutForeignKeys(Database, dbPath);
+
+  const store = new SqliteStore({ stateDir });
+  try {
+    store.init();
+    assert.equal(
+      store.db.pragma("user_version", { simple: true }),
+      SQLITE_SCHEMA_VERSION,
+    );
+    for (const table of ["tasks", "events", "summaries"]) {
+      assert.ok(
+        store.db
+          .pragma(`foreign_key_list(${table})`)
+          .some(
+            (entry) =>
+              entry.table === "runs" &&
+              entry.from === "run_id" &&
+              String(entry.on_delete).toUpperCase() === "CASCADE",
+          ),
+        `${table} must reference runs(id) with ON DELETE CASCADE`,
+      );
+    }
+    assert.equal(store.getTask("task-legacy").title, "Legacy task");
+    assert.equal(store.getEvents("run-legacy", 10)[0].id, "event-legacy");
+    assert.equal(
+      store.listSummaries("C:/workspace", 10)[0].id,
+      "summary-legacy",
+    );
+
+    store.db.prepare("DELETE FROM runs WHERE id = ?").run("run-legacy");
+    assert.equal(
+      store.db.prepare("SELECT COUNT(*) AS count FROM tasks").get().count,
+      0,
+    );
+    assert.equal(
+      store.db.prepare("SELECT COUNT(*) AS count FROM events").get().count,
+      0,
+    );
+    assert.equal(
+      store.db.prepare("SELECT COUNT(*) AS count FROM summaries").get().count,
+      0,
+    );
+  } finally {
+    store.close();
+  }
+  assert.equal(
+    fs
+      .readdirSync(stateDir)
+      .some(
+        (name) =>
+          name.startsWith("state.sqlite.pre-migration-v4-") &&
+          name.endsWith(".bak"),
+      ),
+    true,
+  );
+});
+
+test("SQLite v4 foreign-key rebuild blocks orphaned legacy rows and preserves a recovery backup", () => {
+  const Database = loadBetterSqlite3();
+  assert.ok(
+    Database,
+    "better-sqlite3 is required for the SQLite migration lane",
+  );
+  const stateDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "otm-sqlite-v4-orphan-"),
+  );
+  const dbPath = path.join(stateDir, "state.sqlite");
+  createLegacySchemaWithoutForeignKeys(Database, dbPath, { orphanTask: true });
+
+  const store = new SqliteStore({ stateDir });
+  try {
+    assert.throws(
+      () => store.init(),
+      /migration blocked: orphaned rows found/i,
+    );
+  } finally {
+    store.close();
+  }
+  const preserved = new Database(dbPath, {
+    readonly: true,
+    fileMustExist: true,
+  });
+  try {
+    assert.equal(
+      preserved
+        .prepare("SELECT run_id FROM tasks WHERE id = ?")
+        .get("task-legacy").run_id,
+      "missing-run",
+    );
+    assert.equal(preserved.pragma("user_version", { simple: true }), 4);
+  } finally {
+    preserved.close();
+  }
+  assert.equal(
+    fs
+      .readdirSync(stateDir)
+      .some(
+        (name) =>
+          name.startsWith("state.sqlite.pre-migration-v4-") &&
+          name.endsWith(".bak"),
+      ),
+    true,
+  );
+});
+
+function createLegacySchemaWithoutForeignKeys(
+  Database,
+  dbPath,
+  { orphanTask = false } = {},
+) {
+  const db = new Database(dbPath);
+  const taskRunId = orphanTask ? "missing-run" : "run-legacy";
+  try {
+    db.exec(`
+      PRAGMA foreign_keys = OFF;
+      CREATE TABLE runs (
+        id TEXT PRIMARY KEY, workspace_root TEXT NOT NULL, session_id TEXT,
+        turn_id TEXT, prompt_hash TEXT, goal TEXT NOT NULL, status TEXT NOT NULL,
+        route_revision INTEGER NOT NULL DEFAULT 1, current_task_id TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, finalized_at TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}'
+      );
+      CREATE TABLE tasks (
+        id TEXT PRIMARY KEY, run_id TEXT NOT NULL, parent_id TEXT,
+        stable_key TEXT NOT NULL, title TEXT NOT NULL, description TEXT,
+        status TEXT NOT NULL, required INTEGER NOT NULL DEFAULT 1,
+        priority INTEGER NOT NULL DEFAULT 50, sort_order INTEGER NOT NULL,
+        created_by TEXT NOT NULL, acceptance_criteria_json TEXT NOT NULL DEFAULT '[]',
+        evidence_json TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL, completed_at TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}'
+      );
+      CREATE TABLE events (
+        id TEXT PRIMARY KEY, run_id TEXT NOT NULL, turn_id TEXT,
+        hook_event_name TEXT, event_type TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL UNIQUE, payload_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE summaries (
+        id TEXT PRIMARY KEY, run_id TEXT NOT NULL, workspace_root TEXT NOT NULL,
+        turn_id TEXT, summary_md TEXT NOT NULL, summary_json TEXT NOT NULL,
+        current_cleared INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+      );
+      CREATE TABLE cache_entries (
+        id TEXT PRIMARY KEY, workspace_root TEXT NOT NULL, kind TEXT NOT NULL,
+        title TEXT NOT NULL, body TEXT NOT NULL, tags_json TEXT NOT NULL DEFAULT '[]',
+        source_json TEXT NOT NULL DEFAULT '{}', score_hint REAL NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, expires_at TEXT
+      );
+      INSERT INTO runs (
+        id, workspace_root, session_id, turn_id, prompt_hash, goal, status,
+        route_revision, current_task_id, created_at, updated_at, finalized_at,
+        metadata_json
+      ) VALUES (
+        'run-legacy', 'C:/workspace', 'session-legacy', 'turn-legacy', NULL,
+        'Legacy route', 'completed', 2, NULL, '2026-01-01T00:00:00.000Z',
+        '2026-01-02T00:00:00.000Z', '2026-01-02T00:00:00.000Z', '{}'
+      );
+      INSERT INTO tasks (
+        id, run_id, parent_id, stable_key, title, description, status, required,
+        priority, sort_order, created_by, acceptance_criteria_json, evidence_json,
+        created_at, updated_at, completed_at, metadata_json
+      ) VALUES (
+        'task-legacy', '${taskRunId}', NULL, 'legacy-task', 'Legacy task', NULL,
+        'done', 1, 50, 1, 'migration-test', '[]', '[]',
+        '2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z',
+        '2026-01-02T00:00:00.000Z', '{}'
+      );
+      INSERT INTO events (
+        id, run_id, turn_id, hook_event_name, event_type, idempotency_key,
+        payload_json, created_at
+      ) VALUES (
+        'event-legacy', 'run-legacy', 'turn-legacy', NULL, 'turn_finalized',
+        'legacy-event', '{}', '2026-01-02T00:00:00.000Z'
+      );
+      INSERT INTO summaries (
+        id, run_id, workspace_root, turn_id, summary_md, summary_json,
+        current_cleared, created_at
+      ) VALUES (
+        'summary-legacy', 'run-legacy', 'C:/workspace', 'turn-legacy',
+        'Legacy summary', '{}', 1, '2026-01-02T00:00:00.000Z'
+      );
+      PRAGMA user_version = 4;
+    `);
+  } finally {
+    db.close();
+  }
+}

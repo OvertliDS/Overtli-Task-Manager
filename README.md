@@ -69,7 +69,7 @@ npm install
 | `OTM_AUTO_INSTALL_GLOBAL`      | disabled                                          | Set to `1` only to explicitly permit postinstall global setup.                                                                                                                          |
 | `OTM_RECORD_PRE_TOOL`          | disabled                                          | Set to `1` to record pre-tool observations.                                                                                                                                             |
 | `OTM_TRACK_MCP_EVIDENCE`       | disabled                                          | Set to `1` to record configured MCP tool evidence.                                                                                                                                      |
-| `OTM_STOP_AUTO_FINALIZE`       | disabled                                          | Set to `1` only to use Stop-hook finalization fallback.                                                                                                                                 |
+| `OTM_STOP_AUTO_FINALIZE`       | enabled                                           | Set to `0` to disable default Stop-hook finalization and require manual `otm_finalize_turn` / `otm_clear_current`.                                                                      |
 | `OTM_DEDUPE_HOOKS`             | enabled                                           | Set to `0` to disable cross-install hook deduplication.                                                                                                                                 |
 | `OTM_HOOK_DEDUPE_TTL_MS`       | `10000`                                           | Hook dedupe claim lifetime in milliseconds.                                                                                                                                             |
 | `OTM_PROJECT_REVIEW_MAX_FILES` | `20`                                              | Maximum eligible project-review files read at session start.                                                                                                                            |
@@ -337,24 +337,25 @@ work. Fallback-planner tasks keep their own actionable steps.
 
 ### Hooks And Completion
 
-| Area               | Behavior                                                                                                                                                                                                                   |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| MCP results        | Markdown/plain-text first; full JSON remains available through `otm://current`                                                                                                                                             |
-| Passive hooks      | Touch route state only when the current Codex session is identifiable                                                                                                                                                      |
-| Duplicate installs | Cross-process invocation claims suppress duplicate global/workspace hook output                                                                                                                                            |
-| Evidence tracking  | Defaults to file edits, validation/build commands, failures, and explicit OTM checkpoints                                                                                                                                  |
-| Opt-ins            | `OTM_RECORD_PRE_TOOL=1`, `OTM_TRACK_MCP_EVIDENCE=1`, `OTM_STOP_AUTO_FINALIZE=1`, `OTM_CLAIM_LEGACY_ROUTE=1`; project-instruction sync additionally requires both `OTM_AUTO_SYNC_AGENTS=1` and `OTM_TRUSTED_INSTALLATION=1` |
-| Hook timeouts      | SessionStart 15s, UserPromptSubmit 12s, PreToolUse 8s, PostToolUse 12s, Pre/PostCompact 15s, Stop 45s                                                                                                                      |
+| Area               | Behavior                                                                                                                                                                                       |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| MCP results        | Markdown/plain-text first; full JSON remains available through `otm://current`                                                                                                                 |
+| Passive hooks      | Touch route state only when the current Codex session is identifiable                                                                                                                          |
+| Duplicate installs | Cross-process invocation claims suppress duplicate global/workspace hook output                                                                                                                |
+| Evidence tracking  | Defaults to file edits, validation/build commands, failures, and explicit OTM checkpoints                                                                                                      |
+| Opt-ins            | `OTM_RECORD_PRE_TOOL=1`, `OTM_TRACK_MCP_EVIDENCE=1`, `OTM_CLAIM_LEGACY_ROUTE=1`; project-instruction sync additionally requires both `OTM_AUTO_SYNC_AGENTS=1` and `OTM_TRUSTED_INSTALLATION=1` |
+| Finalization       | Stop-hook finalization is enabled by default; set `OTM_STOP_AUTO_FINALIZE=0` only to require manual finalization and clearing                                                                  |
+| Hook timeouts      | SessionStart 15s, UserPromptSubmit 12s, PreToolUse 8s, PostToolUse 12s, Pre/PostCompact 15s, Stop 45s                                                                                          |
 
-Normal closeout is model-visible: run `otm_audit_stop`, call
-`otm_finalize_turn`, show the returned Markdown summary, then call
-`otm_clear_current`. The Stop hook blocks incomplete routes and, by default,
-also blocks a complete-but-unfinalized route once so the model can show that
-summary before clearing state. A host-marked repeated Stop invocation is always
-released, and Stop-hook execution failures fail open with a warning. These are
-termination safeguards: they prevent an invalid or duplicate hook from burning
-tokens indefinitely while explicit `otm_audit_stop` remains the authoritative
-completion check.
+Normal closeout is automatic and model-visible. Run `otm_audit_stop`; if
+required work remains, continue the active route. Once the audit passes, the
+Stop hook automatically writes the durable summary and checkpoint memory,
+clears the active route, and blocks once with the saved Markdown summary so
+Codex can send the final user-facing reply. The host-marked follow-up Stop is
+released to bound the loop. Set `OTM_STOP_AUTO_FINALIZE=0` only when a client
+must manually call `otm_finalize_turn`, present its summary, and then call
+`otm_clear_current`. Stop-hook execution failures fail open with a warning,
+while explicit `otm_audit_stop` remains the authoritative completion check.
 
 For a substantive new implementation request, `UserPromptSubmit` creates the
 session-scoped OTM route before the model edits files unless

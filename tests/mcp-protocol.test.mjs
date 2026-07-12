@@ -10,6 +10,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { toMcpResult } from "../src/mcp/result.mjs";
 import { tools as mcpTools } from "../src/mcp/tools.mjs";
 import { parseScopedResourceUri, validateMcpArgs } from "../src/mcp/server.mjs";
+import { currentJsonPath } from "../src/core/fs-utils.mjs";
 
 function tempWorkspace(prefix = "otm-mcp-test-") {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -64,6 +65,16 @@ test("MCP schemas close input/output objects and reject nested unsafe arguments"
     mcpTools.find((tool) => tool.name === "otm_snapshot").annotations
       .readOnlyHint,
     true,
+  );
+  assert.equal(
+    mcpTools.find((tool) => tool.name === "otm_audit_stop").annotations
+      .readOnlyHint,
+    true,
+  );
+  assert.equal(
+    mcpTools.find((tool) => tool.name === "otm_project_review").annotations
+      .readOnlyHint,
+    false,
   );
   assert.equal(
     mcpTools.find((tool) => tool.name === "otm_memory_delete").annotations
@@ -197,6 +208,19 @@ test("MCP stdio protocol rejects malformed arguments and returns scoped structur
       0,
       "MCP doctor must not initialize storage",
     );
+    const workspaceBeforeReviewRead = fs.readdirSync(workspaceRoot).sort();
+    const cachedReview = await client.readResource({
+      uri: "otm://project-review",
+    });
+    assert.match(
+      cachedReview.contents[0].text,
+      /No cached OTM project review is available/,
+    );
+    assert.deepEqual(
+      fs.readdirSync(workspaceRoot).sort(),
+      workspaceBeforeReviewRead,
+      "reading the cached project-review resource must not create cache files",
+    );
     const started = await client.callTool({
       name: "otm_start",
       arguments: {
@@ -206,6 +230,27 @@ test("MCP stdio protocol rejects malformed arguments and returns scoped structur
       },
     });
     assert.equal(started.structuredContent.ok, true);
+    const sessionCurrentPath = currentJsonPath(
+      workspaceRoot,
+      "mcp-protocol-session",
+    );
+    const currentBeforeAudit = fs.readFileSync(sessionCurrentPath, "utf8");
+    const mtimeBeforeAudit = fs.statSync(sessionCurrentPath).mtimeMs;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const audit = await client.callTool({
+      name: "otm_audit_stop",
+      arguments: { workspaceRoot },
+    });
+    assert.equal(audit.structuredContent.ok, true);
+    assert.equal(
+      fs.readFileSync(sessionCurrentPath, "utf8"),
+      currentBeforeAudit,
+    );
+    assert.equal(
+      fs.statSync(sessionCurrentPath).mtimeMs,
+      mtimeBeforeAudit,
+      "read-only MCP audit must not rewrite current state files",
+    );
     const scopedUri = `otm://workspace/${encodeURIComponent(workspaceRoot)}/session/mcp-protocol-session/current`;
     const resource = await client.readResource({ uri: scopedUri });
     assert.equal(

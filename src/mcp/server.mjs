@@ -17,6 +17,7 @@ import {
   currentMarkdownPath,
   readText,
   readOtmJsonArtifact,
+  cacheDir,
 } from "../core/fs-utils.mjs";
 import {
   installWorkspace,
@@ -45,7 +46,7 @@ export async function runMcpServer({ env = process.env } = {}) {
     {
       capabilities: { tools: {}, resources: {} },
       instructions:
-        "Overtli Task Manager keeps Codex work organized as route checklists and automatically isolates routes by workspace plus CODEX_THREAD_ID. Before otm_start/otm_reconcile, thoroughly analyze the full user request and pass specific route segments with internalSteps. Before task-scoped OTM calls, use exact task ids from the latest snapshot or its session-scoped current.json; never copy ids from another chat, the workspace index, memory, or prior route state. Use otm_progress to mark internal steps complete as work happens, use otm_complete_task only after internal steps are terminal and segment-level evidence exists, call otm_audit_stop before final answers, then call otm_finalize_turn, show its Markdown summary, and call otm_clear_current.",
+        "Overtli Task Manager keeps Codex work organized as route checklists and automatically isolates routes by workspace plus CODEX_THREAD_ID. Before otm_start/otm_reconcile, thoroughly analyze the full user request and pass specific route segments with internalSteps. Before task-scoped OTM calls, use exact task ids from the latest snapshot or its session-scoped current.json; never copy ids from another chat, the workspace index, memory, or prior route state. Use otm_progress to mark internal steps complete as work happens and otm_complete_task only after internal steps are terminal and segment-level evidence exists. Call otm_audit_stop before final answers. By default the Stop hook automatically finalizes, saves the summary, clears the route, and returns the saved summary for the final user-facing reply; set OTM_STOP_AUTO_FINALIZE=0 only when manual otm_finalize_turn and otm_clear_current behavior is required.",
     },
   );
 
@@ -103,9 +104,10 @@ export async function runMcpServer({ env = process.env } = {}) {
       },
       {
         uri: "otm://project-review",
-        name: "OTM project review",
+        name: "OTM cached project review",
         mimeType: "text/markdown",
-        description: "Lightweight project awareness cache.",
+        description:
+          "Read-only cached project review. Use otm_project_review to refresh it.",
       },
     ],
   }));
@@ -185,13 +187,16 @@ export async function runMcpServer({ env = process.env } = {}) {
       };
     }
     if (request.params.uri === "otm://project-review") {
-      const review = reviewProjectContext({ workspaceRoot });
+      const text = readText(
+        resolve(cacheDir(workspaceRoot), "project-review.md"),
+        "No cached OTM project review is available. Run otm_project_review to refresh it.\n",
+      );
       return {
         contents: [
           {
             uri: request.params.uri,
             mimeType: "text/markdown",
-            text: review.summary,
+            text,
           },
         ],
       };
@@ -431,7 +436,7 @@ async function dispatchTool({ name, args, manager, packageRoot, env }) {
     case "otm_drop_task":
       return manager.dropTask(args);
     case "otm_audit_stop":
-      return manager.auditStop(args);
+      return manager.auditStop({ ...args, write: false });
     case "otm_finalize_turn":
       return manager.finalizeTurn(args);
     case "otm_clear_current":

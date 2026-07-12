@@ -23,7 +23,7 @@ Use this skill when the user asks Codex to build, fix, refactor, research, revie
 12. If the user changes direction, immediately call `otm_reconcile`; drop or supersede stale segments instead of leaving contradictory work open.
 13. Before final response, call `otm_audit_stop`.
 14. If the audit says stop is blocked, keep working on the listed required segments.
-15. When the audit passes, call `otm_finalize_turn`, show its Markdown summary to the user, then call `otm_clear_current`.
+15. When the audit passes, send the final response. By default the Stop hook automatically finalizes the route, saves the summary and checkpoint memory, clears active state, and returns the saved summary for the final user-facing reply. If `OTM_STOP_AUTO_FINALIZE=0`, call `otm_finalize_turn`, show its Markdown summary, then call `otm_clear_current`.
 
 OTM hooks enforce only a resolved Codex session. Never substitute the
 workspace index or a legacy unscoped route when a hook lacks session identity.

@@ -2316,17 +2316,16 @@ test("project review counts only eligible files, reports limits, and cannot foll
   assert.doesNotMatch(broad.summary, /MUST_NOT_APPEAR/);
 });
 
-test("stop hook requires model-visible finalization before clearing current state by default", async () => {
-  const workspaceRoot = tempWorkspace("otm-stop-finalize-");
+test("stop hook auto-finalizes and clears by default while returning the saved summary", async () => {
+  const workspaceRoot = tempWorkspace("otm-stop-auto-finalize-");
   const env = {
-    ...testEnv("otm-stop-finalize"),
-    CODEX_THREAD_ID: "stop-finalize-session",
+    ...testEnv("otm-stop-auto-finalize"),
+    CODEX_THREAD_ID: "stop-auto-finalize-session",
   };
   const manager = createTaskManager({ cwd: workspaceRoot, env });
   const started = manager.start({
     workspaceRoot,
-    replaceExisting: true,
-    goal: "Complete route",
+    goal: "Complete route automatically",
     tasks: [
       { title: "Finish one task", internalSteps: ["Inspect", "Validate"] },
     ],
@@ -2339,6 +2338,76 @@ test("stop hook requires model-visible finalization before clearing current stat
     evidence: { kind: "test_result", summary: "Route task passed." },
   });
 
+  const finalized = await withCapturedStdout(() =>
+    runHookScript("stop", {
+      cwd: workspaceRoot,
+      env,
+      stdin: JSON.stringify({
+        cwd: workspaceRoot,
+        hook_event_name: "Stop",
+        turn_id: "turn-stop-auto",
+        session_id: "stop-auto-finalize-session",
+      }),
+    }),
+  );
+  assert.equal(finalized.result.decision, "block");
+  assert.match(finalized.result.reason, /automatically finalized/i);
+  assert.match(finalized.result.reason, /## ✅ Overtli Task Manager summary/);
+  assert.match(finalized.result.reason, /Route task passed/);
+  assert.equal(manager.store.getRun(started.run.id).status, "cleared");
+  assert.equal(
+    manager.store
+      .listSummaries(workspaceRoot, 20)
+      .find((item) => item.runId === started.run.id).currentCleared,
+    true,
+  );
+  assert.equal(
+    manager.snapshot({
+      workspaceRoot,
+      sessionId: "stop-auto-finalize-session",
+      write: false,
+    }).run,
+    null,
+  );
+
+  const released = await withCapturedStdout(() =>
+    runHookScript("stop", {
+      cwd: workspaceRoot,
+      env,
+      stdin: JSON.stringify({
+        cwd: workspaceRoot,
+        hook_event_name: "Stop",
+        turn_id: "turn-stop-auto",
+        session_id: "stop-auto-finalize-session",
+        stop_hook_active: true,
+      }),
+    }),
+  );
+  assert.equal(released.result.continue, true);
+  assert.equal(released.result.decision, undefined);
+});
+
+test("stop hook supports explicit manual finalization opt-out", async () => {
+  const workspaceRoot = tempWorkspace("otm-stop-manual-finalize-");
+  const env = {
+    ...testEnv("otm-stop-manual-finalize"),
+    CODEX_THREAD_ID: "stop-manual-finalize-session",
+    OTM_STOP_AUTO_FINALIZE: "0",
+  };
+  const manager = createTaskManager({ cwd: workspaceRoot, env });
+  const started = manager.start({
+    workspaceRoot,
+    goal: "Complete route manually",
+    tasks: [{ title: "Finish manually" }],
+  });
+  const taskId = started.snapshot.tasks[0].id;
+  finishInternalSteps(manager, workspaceRoot, taskId);
+  manager.completeTask({
+    workspaceRoot,
+    taskId,
+    evidence: { kind: "test_result", summary: "Manual route passed." },
+  });
+
   const blocked = await withCapturedStdout(() =>
     runHookScript("stop", {
       cwd: workspaceRoot,
@@ -2346,40 +2415,16 @@ test("stop hook requires model-visible finalization before clearing current stat
       stdin: JSON.stringify({
         cwd: workspaceRoot,
         hook_event_name: "Stop",
-        turn_id: "turn-stop",
-        session_id: "stop-finalize-session",
+        turn_id: "turn-stop-manual",
+        session_id: "stop-manual-finalize-session",
       }),
     }),
   );
   assert.equal(blocked.result.decision, "block");
-  assert.match(
-    blocked.result.reason,
-    /visible finalization must be model-driven/,
-  );
+  assert.match(blocked.result.reason, /Automatic finalization is disabled/);
   assert.equal(
-    manager.snapshot({ workspaceRoot, write: false }).run.status,
+    manager.store.getRun(started.run.id).status,
     "ready_to_finalize",
-  );
-
-  manager.finalizeTurn({ workspaceRoot, outcome: "completed" });
-  manager.clearCurrent({ workspaceRoot });
-
-  const allowed = await withCapturedStdout(() =>
-    runHookScript("stop", {
-      cwd: workspaceRoot,
-      env,
-      stdin: JSON.stringify({
-        cwd: workspaceRoot,
-        hook_event_name: "Stop",
-        turn_id: "turn-stop",
-        session_id: "stop-finalize-session",
-      }),
-    }),
-  );
-  assert.equal(allowed.result.continue, true);
-  assert.doesNotMatch(
-    allowed.captured,
-    /visible finalization must be model-driven/,
   );
 });
 

@@ -13,7 +13,7 @@ For every non-trivial Codex task in this workspace:
 7. Mark a segment done with `otm_complete_task` only after every required internal step is terminal (`done` or intentionally `skipped`) and segment-level evidence exists, such as changed files, command output, test results, document review, or user confirmation.
 8. If the user changes direction, reconcile the route immediately instead of continuing from stale assumptions.
 9. Before any final response, run the OTM stop audit. If required segments remain open, continue working instead of ending the turn.
-10. At completion, call `otm_finalize_turn`, show its Markdown summary to the user, then call `otm_clear_current`; the Stop hook is only a fallback guard, not the normal final-summary path.
+10. At completion, let the Stop hook automatically finalize, save the summary, clear active state, and return the saved summary for the final reply. If `OTM_STOP_AUTO_FINALIZE=0`, manually call `otm_finalize_turn`, show its Markdown summary, then call `otm_clear_current`.
 11. Prefer thorough completion over shallow progress. Do not introduce placeholder logic, intentionally incomplete code, or unverified assumptions unless the user explicitly requests a scaffold.
 
 <!-- OVERTLI-TASK-MANAGER:END -->

@@ -143,15 +143,16 @@ Global and workspace installs may both be active, so a short-lived atomic claim
 deduplicates each host invocation across processes. The first invocation owns
 the output; duplicates return silently.
 
-The Stop hook is the enforcement gate. If required route segments remain open,
-the first invocation returns one block decision and Codex continues the turn
-with the remaining work. A host-marked continuation (`stop_hook_active`) is
-released to bound the loop, missing session identity is never mapped to a legacy
-route, and Stop-hook failures fail open with a warning. Normal closeout remains
-explicit: audit, finalize, present the summary, then clear. Clear recovers the
-just-finalized session run from its canonical snapshot so durable run and
-summary state are marked cleared even when finalize and clear are separate
-calls.
+The Stop hook is the enforcement and default finalization gate. If required
+route segments remain open, the first invocation returns one block decision and
+Codex continues the turn with the remaining work. Once the audit passes, the
+hook automatically finalizes the route, persists the summary and checkpoint
+memory, clears active state, and blocks once with the saved summary so Codex can
+send the final user-facing reply. A host-marked continuation
+(`stop_hook_active`) is released to bound the loop. Set
+`OTM_STOP_AUTO_FINALIZE=0` for the explicit audit, finalize, present, and clear
+workflow. Missing session identity is never mapped to a legacy route, and
+Stop-hook failures fail open with a warning.
 
 An unfinished route is never cleared through the normal completion action.
 Clients must use the explicit abandon operation with a recorded reason

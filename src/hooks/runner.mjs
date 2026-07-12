@@ -399,8 +399,9 @@ function handleStop(manager, input, workspaceRoot, env) {
         "Overtli Task Manager audit passed. Automatic finalization is disabled for this session; call otm_finalize_turn, show its Markdown summary, then call otm_clear_current before the final response.",
     };
   }
+  let finalized;
   try {
-    manager.finalizeTurn({
+    finalized = manager.finalizeTurn({
       workspaceRoot,
       sessionId,
       runId: audit.run.id,
@@ -414,11 +415,18 @@ function handleStop(manager, input, workspaceRoot, env) {
       reason: `OTM finalization failed and needs one repair pass: ${redactSensitiveText(error?.message || String(error))}`,
     };
   }
+  const summary = String(
+    finalized.summaryMd || finalized.markdown || "",
+  ).trim();
   return {
-    continue: true,
-    suppressOutput: true,
-    systemMessage:
-      "Overtli Task Manager finalized the route, saved the summary, and cleared current.json.",
+    decision: "block",
+    reason: [
+      "Overtli Task Manager automatically finalized the completed route, saved its summary and checkpoint memory, and cleared the active route state.",
+      summary,
+      "Send the final user-facing response now using the saved summary above. The route is already finalized and cleared; do not call finalization or clearing tools again.",
+    ]
+      .filter(Boolean)
+      .join("\n\n"),
   };
 }
 

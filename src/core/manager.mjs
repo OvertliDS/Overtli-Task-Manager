@@ -1103,13 +1103,17 @@ export function createTaskManager(options = {}) {
         !["done", "dropped", "superseded"].includes(task.status),
     );
     const stopAllowed = remainingRequired.length === 0;
-    const snapshot = snapshotForRun(run, {
-      kind: "stop_audit",
-      message: stopAllowed
-        ? "Audit passed. All required route segments are complete."
-        : `Audit blocked. ${remainingRequired.length} required route segment${remainingRequired.length === 1 ? "" : "s"} remain.`,
-      at: nowIso(),
-    });
+    const snapshot = snapshotForRun(
+      run,
+      {
+        kind: "stop_audit",
+        message: stopAllowed
+          ? "Audit passed. All required route segments are complete."
+          : `Audit blocked. ${remainingRequired.length} required route segment${remainingRequired.length === 1 ? "" : "s"} remain.`,
+        at: nowIso(),
+      },
+      { write: args.write !== false },
+    );
     return {
       stopAllowed,
       run,

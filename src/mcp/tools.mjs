@@ -199,7 +199,7 @@ export const tools = [
   {
     name: "otm_audit_stop",
     description:
-      "Audit whether Codex may stop. If required segments remain, continue instead of finalizing.",
+      "Read-only audit of whether Codex may stop. If required segments remain, continue working. When it passes, the Stop hook finalizes and clears automatically by default.",
     inputSchema: {
       type: "object",
       properties: {
@@ -212,7 +212,7 @@ export const tools = [
   {
     name: "otm_finalize_turn",
     description:
-      "Write a turn summary and checkpoint memory. Use after otm_audit_stop passes, show the returned Markdown summary to the user, then call otm_clear_current.",
+      "Manually write a turn summary and checkpoint memory. Normal Stop-hook completion does this automatically; use this tool when OTM_STOP_AUTO_FINALIZE=0 or when an explicit manual checkpoint is required, then call otm_clear_current.",
     inputSchema: {
       type: "object",
       properties: {
