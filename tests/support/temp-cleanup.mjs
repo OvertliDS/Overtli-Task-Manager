@@ -10,8 +10,12 @@ const temporaryDirectories = new Set();
 
 fs.mkdtempSync = function trackedMkdtempSync(...args) {
   const directory = originalMkdtempSync(...args);
-  temporaryDirectories.add(directory);
-  return directory;
+  // Windows hosted runners may expose TEMP through an 8.3 alias such as
+  // RUNNER~1 while realpath expands it to runneradmin. Return the canonical
+  // path so test inputs follow the same workspace identity contract as OTM.
+  const canonicalDirectory = fs.realpathSync.native(directory);
+  temporaryDirectories.add(canonicalDirectory);
+  return canonicalDirectory;
 };
 
 after(() => {

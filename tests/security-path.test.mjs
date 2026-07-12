@@ -13,6 +13,7 @@ import {
   resolveWithinRoot,
 } from "../src/core/validation.mjs";
 import { installWorkspace } from "../src/install/install-workspace.mjs";
+import { atomicWriteText } from "../src/core/fs-utils.mjs";
 
 function tempWorkspace(prefix = "otm-security-test-") {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -57,6 +58,31 @@ test("safe path utilities reject traversal, external targets, and symlink escape
     resolveWithinRoot(workspaceRoot, "nested/output.json"),
     path.join(workspaceRoot, "nested", "output.json"),
   );
+});
+
+test("atomic writes retry transient sharing violations before publishing the file", () => {
+  const root = tempWorkspace("otm-atomic-retry-");
+  const output = path.join(root, "state", "current.txt");
+  const originalRename = fs.renameSync;
+  let attempts = 0;
+  fs.renameSync = function transientRename(source, destination) {
+    attempts += 1;
+    if (attempts < 3) {
+      const error = new Error("simulated sharing violation");
+      error.code = "EPERM";
+      error.path = destination;
+      error.syscall = "rename";
+      throw error;
+    }
+    return originalRename(source, destination);
+  };
+  try {
+    assert.equal(atomicWriteText(output, "durable\n"), true);
+  } finally {
+    fs.renameSync = originalRename;
+  }
+  assert.equal(attempts, 3);
+  assert.equal(fs.readFileSync(output, "utf8"), "durable\n");
 });
 
 test("route creation rejects cyclic structured prompt context before planning", () => {

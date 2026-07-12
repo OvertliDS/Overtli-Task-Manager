@@ -31,6 +31,7 @@ import {
   SQLITE_SCHEMA_VERSION,
 } from "../storage/sqlite-store.mjs";
 import { inspectDoctor, renderDoctor } from "./doctor.mjs";
+import { canonicalizeWorkspaceRoot } from "../core/validation.mjs";
 
 export async function handleCli({ argv, cwd, stdin, packageRoot, env }) {
   const command = argv[0] || "help";
@@ -76,9 +77,9 @@ export async function handleCli({ argv, cwd, stdin, packageRoot, env }) {
   const hookEventName = command === "hook" ? argv[1] : null;
   if (command === "hook" && (!hookEventName || hookEventName.startsWith("--")))
     throw new Error("hook requires an event name.");
-  const workspaceRoot = path.resolve(
+  const workspaceRoot = canonicalizeWorkspaceRoot(
     flags.workspace || flags.workspaceRoot || findWorkspaceRoot(cwd),
-  );
+  ).displayPath;
   const sessionId = resolveSessionId({ sessionId: flags.sessionId }, env);
   // Installer lifecycle commands intentionally run before store creation.
   // In particular, their dry-run forms must create neither state directories

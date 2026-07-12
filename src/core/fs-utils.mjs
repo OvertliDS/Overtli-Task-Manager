@@ -86,12 +86,31 @@ export function atomicWriteText(filePath, text, options = {}) {
   );
   try {
     fs.writeFileSync(tmp, text, "utf8");
-    fs.renameSync(tmp, filePath);
+    renameWithTransientRetry(tmp, filePath);
   } catch (error) {
     removeFileIfExists(tmp);
     throw error;
   }
   return true;
+}
+
+function renameWithTransientRetry(source, destination) {
+  const retryable = new Set(["EPERM", "EACCES", "EBUSY"]);
+  const maximumAttempts = 8;
+  for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
+    try {
+      fs.renameSync(source, destination);
+      return;
+    } catch (error) {
+      if (!retryable.has(error?.code) || attempt === maximumAttempts)
+        throw error;
+      // Windows antivirus, search indexing, or a competing snapshot reader may
+      // briefly hold the destination. Keep the temp file intact and retry the
+      // atomic replacement rather than leaking a raw sharing violation.
+      const delayMs = Math.min(20 * 2 ** (attempt - 1), 250);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+    }
+  }
 }
 
 export function atomicWriteJson(filePath, value, options = {}) {

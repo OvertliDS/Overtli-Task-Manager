@@ -34,7 +34,16 @@ const CHILD = `
     if (input.operation === 'complete') result = manager.completeTask(input.args);
     if (input.operation === 'clear') result = manager.clearCurrent(input.args);
     process.stdout.write(JSON.stringify({ ok: true, revision: result.run?.routeRevision || null }));
-  } catch (error) { process.stdout.write(JSON.stringify({ ok: false, code: error.code || error.name })); }
+  } catch (error) {
+    process.stdout.write(JSON.stringify({
+      ok: false,
+      code: error.code || error.name,
+      message: error.message || String(error),
+      stack: error.stack || null,
+      path: error.path || null,
+      syscall: error.syscall || null,
+    }));
+  }
 `;
 
 function concurrentChild(packageRoot, env, input) {
