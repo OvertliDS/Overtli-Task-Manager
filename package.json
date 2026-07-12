@@ -59,12 +59,22 @@
     "test": "node --test",
     "coverage": "node ./scripts/coverage-check.mjs",
     "syntax:check": "node ./scripts/syntax-check.mjs",
-    "lint": "npm run syntax:check",
-    "format:check": "git diff --check",
-    "type:check": "node --check ./src/core/manager.mjs && node --check ./src/storage/json-store.mjs && node --check ./src/storage/sqlite-store.mjs"
+    "lint": "eslint .",
+    "format:check": "prettier --check .",
+    "type:check": "tsc --project tsconfig.json",
+    "whitespace:check": "git diff --check"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "better-sqlite3": "^11.9.1"
+    "better-sqlite3": "^11.9.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@types/node": "^24.13.3",
+    "eslint": "^9.39.5",
+    "globals": "^15.15.0",
+    "prettier": "^3.9.5",
+    "typescript": "^5.9.3"
   }
 }

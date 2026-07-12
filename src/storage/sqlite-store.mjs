@@ -1,9 +1,9 @@
-import path from 'node:path';
-import fs from 'node:fs';
-import { createRequire } from 'node:module';
-import { ensureDir } from '../core/fs-utils.mjs';
-import { nowIso } from '../core/ids.mjs';
-import { OtmError } from '../core/errors.mjs';
+import path from "node:path";
+import fs from "node:fs";
+import { createRequire } from "node:module";
+import { ensureDir } from "../core/fs-utils.mjs";
+import { nowIso } from "../core/ids.mjs";
+import { OtmError } from "../core/errors.mjs";
 
 const require = createRequire(import.meta.url);
 /**
@@ -11,11 +11,11 @@ const require = createRequire(import.meta.url);
  * not fold a migration into CREATE TABLE: existing installations must take an
  * ordered, observable upgrade path.
  */
-export const SQLITE_SCHEMA_VERSION = 3;
+export const SQLITE_SCHEMA_VERSION = 4;
 
 export function loadBetterSqlite3() {
   try {
-    return require('better-sqlite3');
+    return require("better-sqlite3");
   } catch {
     return null;
   }
@@ -24,51 +24,110 @@ export function loadBetterSqlite3() {
 export class SqliteStore {
   constructor({ stateDir, readOnly = false }) {
     const BetterSqlite3 = loadBetterSqlite3();
-    if (!BetterSqlite3) throw new Error('better-sqlite3 is not installed');
-    this.kind = 'sqlite';
+    if (!BetterSqlite3) throw new Error("better-sqlite3 is not installed");
+    this.kind = "sqlite";
     this.stateDir = stateDir;
     this.readOnly = readOnly;
     if (!readOnly) ensureDir(stateDir);
-    this.dbPath = path.join(stateDir, 'state.sqlite');
+    this.dbPath = path.join(stateDir, "state.sqlite");
     this.db = readOnly
       ? new BetterSqlite3(this.dbPath, { readonly: true, fileMustExist: true })
       : new BetterSqlite3(this.dbPath);
     if (!readOnly) {
-      this.db.pragma('journal_mode = WAL');
-      this.db.pragma('synchronous = NORMAL');
+      this.db.pragma("journal_mode = WAL");
+      this.db.pragma("synchronous = NORMAL");
     }
-    this.db.pragma('busy_timeout = 5000');
-    this.db.pragma('foreign_keys = ON');
+    this.db.pragma("busy_timeout = 5000");
+    this.db.pragma("foreign_keys = ON");
   }
 
   init() {
-    const currentVersion = Number(this.db.pragma('user_version', { simple: true }) || 0);
+    const currentVersion = Number(
+      this.db.pragma("user_version", { simple: true }) || 0,
+    );
     if (this.readOnly) {
-      if (currentVersion > SQLITE_SCHEMA_VERSION) throw new Error(`SQLite store schema ${currentVersion} is newer than supported schema ${SQLITE_SCHEMA_VERSION}.`);
+      if (currentVersion > SQLITE_SCHEMA_VERSION)
+        throw new Error(
+          `SQLite store schema ${currentVersion} is newer than supported schema ${SQLITE_SCHEMA_VERSION}.`,
+        );
       return;
     }
-    if (currentVersion > SQLITE_SCHEMA_VERSION) throw new Error(`SQLite store schema ${currentVersion} is newer than supported schema ${SQLITE_SCHEMA_VERSION}.`);
-    if (currentVersion < SQLITE_SCHEMA_VERSION && fs.existsSync(this.dbPath)) this.#backupBeforeMigration(currentVersion);
+    if (currentVersion > SQLITE_SCHEMA_VERSION)
+      throw new Error(
+        `SQLite store schema ${currentVersion} is newer than supported schema ${SQLITE_SCHEMA_VERSION}.`,
+      );
+    const foreignKeysMissing = this.#foreignKeysMissing();
+    if (
+      (currentVersion < SQLITE_SCHEMA_VERSION || foreignKeysMissing) &&
+      fs.existsSync(this.dbPath)
+    )
+      this.#backupBeforeMigration(currentVersion);
     this.db.transaction(() => {
       if (currentVersion === 0) this.#createV1Schema();
       // Some early development builds marked a partial schema as v1/v2.
       // Preserve their existing rows while filling missing canonical tables
       // before index/trigger migrations reference them.
-      if (currentVersion > 0 && currentVersion < SQLITE_SCHEMA_VERSION) this.#createV1Schema();
+      if (currentVersion > 0 && currentVersion < SQLITE_SCHEMA_VERSION)
+        this.#createV1Schema();
       if (currentVersion < 2) this.#migrateV1ToV2();
       if (currentVersion < 3) this.#migrateV2ToV3();
+      // CREATE TABLE IF NOT EXISTS cannot retrofit FK constraints. Detect and
+      // rebuild even when a legacy database incorrectly claims a current
+      // user_version.
+      if (foreignKeysMissing) this.#migrateV3ToV4ForeignKeys();
+      this.#assertRequiredForeignKeys();
       this.db.pragma(`user_version = ${SQLITE_SCHEMA_VERSION}`);
     })();
+  }
+
+  #foreignKeysMissing() {
+    for (const table of ["tasks", "events", "summaries"]) {
+      const exists = this.db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?")
+        .get(table);
+      if (!exists) continue;
+      const foreignKeys = this.db.pragma(`foreign_key_list(${table})`);
+      if (
+        !foreignKeys.some(
+          (entry) =>
+            entry.table === "runs" &&
+            entry.from === "run_id" &&
+            String(entry.on_delete).toUpperCase() === "CASCADE",
+        )
+      )
+        return true;
+    }
+    return false;
+  }
+
+  #assertRequiredForeignKeys() {
+    const missing = ["tasks", "events", "summaries"].filter(
+      (table) =>
+        !this.db
+          .pragma(`foreign_key_list(${table})`)
+          .some(
+            (entry) =>
+              entry.table === "runs" &&
+              entry.from === "run_id" &&
+              String(entry.on_delete).toUpperCase() === "CASCADE",
+          ),
+    );
+    if (missing.length)
+      throw new Error(
+        `SQLite migration did not install required foreign keys: ${missing.join(", ")}`,
+      );
   }
 
   #backupBeforeMigration(fromVersion) {
     const backupPath = `${this.dbPath}.pre-migration-v${fromVersion}-${Date.now()}.bak`;
     // Checkpoint before the synchronous copy so a schema/data change in the
     // WAL is included in the recoverable database image.
-    this.db.pragma('wal_checkpoint(TRUNCATE)');
+    this.db.pragma("wal_checkpoint(TRUNCATE)");
     fs.copyFileSync(this.dbPath, backupPath, fs.constants.COPYFILE_EXCL);
     if (!fs.existsSync(backupPath) || fs.statSync(backupPath).size === 0) {
-      throw new Error(`Unable to back up SQLite store before migration: ${backupPath}`);
+      throw new Error(
+        `Unable to back up SQLite store before migration: ${backupPath}`,
+      );
     }
   }
 
@@ -159,11 +218,17 @@ export class SqliteStore {
   #migrateV1ToV2() {
     // SQLite NULL values do not collide in ordinary unique indexes; IFNULL is
     // required to enforce the invariant for legacy unscoped runs as well.
-    const duplicates = this.db.prepare(`SELECT workspace_root, IFNULL(session_id, '') AS session_key, COUNT(*) AS count
+    const duplicates = this.db
+      .prepare(
+        `SELECT workspace_root, IFNULL(session_id, '') AS session_key, COUNT(*) AS count
       FROM runs WHERE status IN ('active','ready_to_finalize','blocked','paused')
-      GROUP BY workspace_root, IFNULL(session_id, '') HAVING COUNT(*) > 1`).all();
+      GROUP BY workspace_root, IFNULL(session_id, '') HAVING COUNT(*) > 1`,
+      )
+      .all();
     if (duplicates.length) {
-      throw new Error(`SQLite migration blocked: duplicate active route scopes detected (${duplicates.length}). Run otm doctor and explicitly resolve duplicate runs before retrying.`);
+      throw new Error(
+        `SQLite migration blocked: duplicate active route scopes detected (${duplicates.length}). Run otm doctor and explicitly resolve duplicate runs before retrying.`,
+      );
     }
     this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_runs_one_active_scope
       ON runs(workspace_root, IFNULL(session_id, ''))
@@ -174,14 +239,20 @@ export class SqliteStore {
     // SQLite cannot add CHECK constraints to an existing table without a
     // destructive table rebuild. These aborting triggers provide the same
     // durable boundary for both migrated and fresh databases.
-    const invalid = this.db.prepare(`
+    const invalid = this.db
+      .prepare(
+        `
       SELECT 'runs' AS collection, id FROM runs WHERE status IS NULL OR status NOT IN ('active','ready_to_finalize','completed','blocked','paused','cleared','abandoned','archived')
       UNION ALL SELECT 'tasks', id FROM tasks WHERE status IS NULL OR status NOT IN ('pending','active','done','blocked','dropped','superseded') OR required IS NULL OR required NOT IN (0, 1)
       UNION ALL SELECT 'summaries', id FROM summaries WHERE current_cleared IS NULL OR current_cleared NOT IN (0, 1)
       LIMIT 10
-    `).all();
+    `,
+      )
+      .all();
     if (invalid.length) {
-      throw new Error(`SQLite migration blocked: invalid status or boolean values found (${invalid.map((row) => `${row.collection}:${row.id}`).join(', ')}). Run otm doctor and restore or repair the database before retrying.`);
+      throw new Error(
+        `SQLite migration blocked: invalid status or boolean values found (${invalid.map((row) => `${row.collection}:${row.id}`).join(", ")}). Run otm doctor and restore or repair the database before retrying.`,
+      );
     }
     this.db.exec(`
       CREATE TRIGGER IF NOT EXISTS otm_runs_status_insert
@@ -211,17 +282,76 @@ export class SqliteStore {
     `);
   }
 
-  integrityCheck() { return this.db.pragma('integrity_check'); }
+  #migrateV3ToV4ForeignKeys() {
+    const orphans = this.db
+      .prepare(
+        `
+      SELECT 'tasks' AS table_name, id FROM tasks WHERE run_id NOT IN (SELECT id FROM runs)
+      UNION ALL SELECT 'events', id FROM events WHERE run_id NOT IN (SELECT id FROM runs)
+      UNION ALL SELECT 'summaries', id FROM summaries WHERE run_id NOT IN (SELECT id FROM runs)
+      LIMIT 10
+    `,
+      )
+      .all();
+    if (orphans.length)
+      throw new Error(
+        `SQLite migration blocked: orphaned rows found (${orphans.map((row) => `${row.table_name}:${row.id}`).join(", ")}). Original database was backed up and remains recoverable.`,
+      );
+    // Drop validation triggers first: their names are global and the rebuilt
+    // tables must receive a clean canonical trigger set afterwards.
+    this.db
+      .exec(`DROP TRIGGER IF EXISTS otm_runs_status_insert; DROP TRIGGER IF EXISTS otm_runs_status_update;
+      DROP TRIGGER IF EXISTS otm_tasks_status_insert; DROP TRIGGER IF EXISTS otm_tasks_status_update;
+      DROP TRIGGER IF EXISTS otm_tasks_required_insert; DROP TRIGGER IF EXISTS otm_tasks_required_update;
+      DROP TRIGGER IF EXISTS otm_summaries_cleared_insert; DROP TRIGGER IF EXISTS otm_summaries_cleared_update;`);
+    const definitions = {
+      tasks: `CREATE TABLE tasks_new (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, parent_id TEXT, stable_key TEXT NOT NULL, title TEXT NOT NULL, description TEXT, status TEXT NOT NULL, required INTEGER NOT NULL DEFAULT 1, priority INTEGER NOT NULL DEFAULT 50, sort_order INTEGER NOT NULL, created_by TEXT NOT NULL, acceptance_criteria_json TEXT NOT NULL DEFAULT '[]', evidence_json TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT, metadata_json TEXT NOT NULL DEFAULT '{}', FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE)`,
+      events: `CREATE TABLE events_new (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, turn_id TEXT, hook_event_name TEXT, event_type TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE, payload_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE)`,
+      summaries: `CREATE TABLE summaries_new (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, workspace_root TEXT NOT NULL, turn_id TEXT, summary_md TEXT NOT NULL, summary_json TEXT NOT NULL, current_cleared INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE)`,
+    };
+    for (const [table, definition] of Object.entries(definitions)) {
+      this.db.exec(definition);
+      const columns = this.db
+        .prepare(`PRAGMA table_info(${table})`)
+        .all()
+        .map((row) => row.name);
+      const expected = this.db
+        .prepare(`PRAGMA table_info(${table}_new)`)
+        .all()
+        .map((row) => row.name);
+      const missing = expected.filter((column) => !columns.includes(column));
+      if (missing.length)
+        throw new Error(
+          `SQLite migration blocked: legacy ${table} table is missing required columns: ${missing.join(", ")}`,
+        );
+      const columnList = expected.join(", ");
+      this.db.exec(
+        `INSERT INTO ${table}_new (${columnList}) SELECT ${columnList} FROM ${table}; DROP TABLE ${table}; ALTER TABLE ${table}_new RENAME TO ${table};`,
+      );
+    }
+    this.#createV1Schema();
+    this.#migrateV2ToV3();
+  }
 
-  close() { this.db.close(); }
+  integrityCheck() {
+    return this.db.pragma("integrity_check");
+  }
+
+  close() {
+    this.db.close();
+  }
 
   transaction(fn) {
     return this.db.transaction(() => fn())();
   }
 
   createRun(run) {
-    this.db.prepare(`INSERT INTO runs (id, workspace_root, session_id, turn_id, prompt_hash, goal, status, route_revision, current_task_id, created_at, updated_at, finalized_at, metadata_json)
-      VALUES (@id, @workspaceRoot, @sessionId, @turnId, @promptHash, @goal, @status, @routeRevision, @currentTaskId, @createdAt, @updatedAt, @finalizedAt, @metadataJson)`).run(toRunRow(run));
+    this.db
+      .prepare(
+        `INSERT INTO runs (id, workspace_root, session_id, turn_id, prompt_hash, goal, status, route_revision, current_task_id, created_at, updated_at, finalized_at, metadata_json)
+      VALUES (@id, @workspaceRoot, @sessionId, @turnId, @promptHash, @goal, @status, @routeRevision, @currentTaskId, @createdAt, @updatedAt, @finalizedAt, @metadataJson)`,
+      )
+      .run(toRunRow(run));
     return run;
   }
 
@@ -231,51 +361,110 @@ export class SqliteStore {
       return this.transaction(() => {
         if (replaceRunId) {
           const prior = this.getRun(replaceRunId);
-          if (!prior) throw new Error('RUN_NOT_FOUND');
+          if (!prior) throw new Error("RUN_NOT_FOUND");
           this.updateRun(replaceRunId, {
-            status: 'abandoned', finalizedAt: run.createdAt, updatedAt: run.createdAt,
-            metadata: { ...(prior.metadata || {}), abandonedReason: 'Replaced by new route' }
+            status: "abandoned",
+            finalizedAt: run.createdAt,
+            updatedAt: run.createdAt,
+            metadata: {
+              ...(prior.metadata || {}),
+              abandonedReason: "Replaced by new route",
+            },
           });
         }
         this.createRun(run);
-        const stmt = this.db.prepare(`INSERT INTO tasks (id, run_id, parent_id, stable_key, title, description, status, required, priority, sort_order, created_by, acceptance_criteria_json, evidence_json, created_at, updated_at, completed_at, metadata_json)
+        const stmt = this.db
+          .prepare(`INSERT INTO tasks (id, run_id, parent_id, stable_key, title, description, status, required, priority, sort_order, created_by, acceptance_criteria_json, evidence_json, created_at, updated_at, completed_at, metadata_json)
           VALUES (@id, @runId, @parentId, @stableKey, @title, @description, @status, @required, @priority, @sortOrder, @createdBy, @acceptanceCriteriaJson, @evidenceJson, @createdAt, @updatedAt, @completedAt, @metadataJson)`);
         for (const task of tasks) stmt.run(toTaskRow(task));
         this.recordEvent(event);
         return run;
       });
     } catch (error) {
-      if (String(error?.message || '').includes('uq_runs_one_active_scope') || String(error?.message || '').includes('UNIQUE constraint failed')) {
-        throw new OtmError('An active route already exists for this workspace and session.', { code: 'ACTIVE_ROUTE_CONFLICT' });
+      if (
+        String(error?.message || "").includes("uq_runs_one_active_scope") ||
+        String(error?.message || "").includes("UNIQUE constraint failed")
+      ) {
+        throw new OtmError(
+          "An active route already exists for this workspace and session.",
+          { code: "ACTIVE_ROUTE_CONFLICT" },
+        );
       }
-      if (error?.message === 'RUN_NOT_FOUND') throw new OtmError('Route selected for replacement no longer exists.', { code: 'RUN_NOT_FOUND' });
+      if (error?.message === "RUN_NOT_FOUND")
+        throw new OtmError("Route selected for replacement no longer exists.", {
+          code: "RUN_NOT_FOUND",
+        });
       throw error;
     }
   }
 
   /** Atomically apply a run revision, one or more full task records, and an event. */
-  commitRunMutation({ run, expectedRevision, tasks = [], newTasks = [], summaries = [], event = null }) {
+  commitRunMutation({
+    run,
+    expectedRevision,
+    tasks = [],
+    newTasks = [],
+    summaries = [],
+    event = null,
+  }) {
     return this.transaction(() => {
       const current = this.getRun(run.id);
-      if (!current) throw new OtmError('Run not found.', { code: 'RUN_NOT_FOUND' });
-      if (expectedRevision !== undefined && Number(current.routeRevision) !== Number(expectedRevision)) {
-        throw new OtmError('Route revision conflict.', { code: 'REVISION_CONFLICT', details: { expectedRevision, currentRevision: current.routeRevision, runId: run.id } });
+      if (!current)
+        throw new OtmError("Run not found.", { code: "RUN_NOT_FOUND" });
+      if (
+        expectedRevision !== undefined &&
+        Number(current.routeRevision) !== Number(expectedRevision)
+      ) {
+        throw new OtmError("Route revision conflict.", {
+          code: "REVISION_CONFLICT",
+          details: {
+            expectedRevision,
+            currentRevision: current.routeRevision,
+            runId: run.id,
+          },
+        });
       }
       for (const task of tasks) {
-        if (task.runId !== run.id || !this.getTask(task.id)) throw new OtmError('Task not found in run.', { code: 'TASK_NOT_FOUND', details: { taskId: task.id, runId: run.id } });
+        if (task.runId !== run.id || !this.getTask(task.id))
+          throw new OtmError("Task not found in run.", {
+            code: "TASK_NOT_FOUND",
+            details: { taskId: task.id, runId: run.id },
+          });
         this.updateTask(task.id, task);
       }
       for (const task of newTasks) {
         if (task.runId !== run.id || this.getTask(task.id)) {
-          throw new OtmError('New task is invalid for this run.', { code: 'TASK_NOT_FOUND', details: { taskId: task.id, runId: run.id } });
+          throw new OtmError("New task is invalid for this run.", {
+            code: "TASK_NOT_FOUND",
+            details: { taskId: task.id, runId: run.id },
+          });
         }
-        this.db.prepare(`INSERT INTO tasks (id, run_id, parent_id, stable_key, title, description, status, required, priority, sort_order, created_by, acceptance_criteria_json, evidence_json, created_at, updated_at, completed_at, metadata_json)
-          VALUES (@id, @runId, @parentId, @stableKey, @title, @description, @status, @required, @priority, @sortOrder, @createdBy, @acceptanceCriteriaJson, @evidenceJson, @createdAt, @updatedAt, @completedAt, @metadataJson)`).run(toTaskRow(task));
+        this.db
+          .prepare(
+            `INSERT INTO tasks (id, run_id, parent_id, stable_key, title, description, status, required, priority, sort_order, created_by, acceptance_criteria_json, evidence_json, created_at, updated_at, completed_at, metadata_json)
+          VALUES (@id, @runId, @parentId, @stableKey, @title, @description, @status, @required, @priority, @sortOrder, @createdBy, @acceptanceCriteriaJson, @evidenceJson, @createdAt, @updatedAt, @completedAt, @metadataJson)`,
+          )
+          .run(toTaskRow(task));
       }
       for (const summary of summaries) this.upsertSummary(summary);
       const next = { ...run, updatedAt: run.updatedAt || nowIso() };
-      const result = this.db.prepare(`UPDATE runs SET workspace_root=@workspaceRoot, session_id=@sessionId, turn_id=@turnId, prompt_hash=@promptHash, goal=@goal, status=@status, route_revision=@routeRevision, current_task_id=@currentTaskId, updated_at=@updatedAt, finalized_at=@finalizedAt, metadata_json=@metadataJson WHERE id=@id AND route_revision=@expectedRevision`).run({ ...toRunRow(next), expectedRevision: expectedRevision ?? current.routeRevision });
-      if (!result.changes) throw new OtmError('Route revision conflict.', { code: 'REVISION_CONFLICT', details: { expectedRevision, currentRevision: current.routeRevision, runId: run.id } });
+      const result = this.db
+        .prepare(
+          `UPDATE runs SET workspace_root=@workspaceRoot, session_id=@sessionId, turn_id=@turnId, prompt_hash=@promptHash, goal=@goal, status=@status, route_revision=@routeRevision, current_task_id=@currentTaskId, updated_at=@updatedAt, finalized_at=@finalizedAt, metadata_json=@metadataJson WHERE id=@id AND route_revision=@expectedRevision`,
+        )
+        .run({
+          ...toRunRow(next),
+          expectedRevision: expectedRevision ?? current.routeRevision,
+        });
+      if (!result.changes)
+        throw new OtmError("Route revision conflict.", {
+          code: "REVISION_CONFLICT",
+          details: {
+            expectedRevision,
+            currentRevision: current.routeRevision,
+            runId: run.id,
+          },
+        });
       if (event) this.recordEvent(event);
       return next;
     });
@@ -284,85 +473,153 @@ export class SqliteStore {
   updateRun(id, patch) {
     const current = this.getRun(id);
     if (!current) return null;
-    const next = { ...current, ...patch, updatedAt: patch.updatedAt || nowIso() };
-    this.db.prepare(`UPDATE runs SET workspace_root=@workspaceRoot, session_id=@sessionId, turn_id=@turnId, prompt_hash=@promptHash, goal=@goal, status=@status,
-      route_revision=@routeRevision, current_task_id=@currentTaskId, updated_at=@updatedAt, finalized_at=@finalizedAt, metadata_json=@metadataJson WHERE id=@id`).run(toRunRow(next));
+    const next = {
+      ...current,
+      ...patch,
+      updatedAt: patch.updatedAt || nowIso(),
+    };
+    this.db
+      .prepare(
+        `UPDATE runs SET workspace_root=@workspaceRoot, session_id=@sessionId, turn_id=@turnId, prompt_hash=@promptHash, goal=@goal, status=@status,
+      route_revision=@routeRevision, current_task_id=@currentTaskId, updated_at=@updatedAt, finalized_at=@finalizedAt, metadata_json=@metadataJson WHERE id=@id`,
+      )
+      .run(toRunRow(next));
     return next;
   }
 
   getRun(id) {
-    const row = this.db.prepare('SELECT * FROM runs WHERE id = ?').get(id);
+    const row = this.db.prepare("SELECT * FROM runs WHERE id = ?").get(id);
     return row ? fromRunRow(row) : null;
   }
 
   getActiveRun(workspaceRoot, sessionId) {
     const scoped = arguments.length >= 2;
     const row = scoped
-      ? this.db.prepare(`SELECT * FROM runs WHERE workspace_root = ? AND session_id IS ? AND status IN ('active','ready_to_finalize','blocked','paused') ORDER BY updated_at DESC LIMIT 1`).get(workspaceRoot, sessionId || null)
-      : this.db.prepare(`SELECT * FROM runs WHERE workspace_root = ? AND status IN ('active','ready_to_finalize','blocked','paused') ORDER BY updated_at DESC LIMIT 1`).get(workspaceRoot);
+      ? this.db
+          .prepare(
+            `SELECT * FROM runs WHERE workspace_root = ? AND session_id IS ? AND status IN ('active','ready_to_finalize','blocked','paused') ORDER BY updated_at DESC LIMIT 1`,
+          )
+          .get(workspaceRoot, sessionId || null)
+      : this.db
+          .prepare(
+            `SELECT * FROM runs WHERE workspace_root = ? AND status IN ('active','ready_to_finalize','blocked','paused') ORDER BY updated_at DESC LIMIT 1`,
+          )
+          .get(workspaceRoot);
     return row ? fromRunRow(row) : null;
   }
 
   listActiveRuns(workspaceRoot) {
-    return this.db.prepare(`SELECT * FROM runs WHERE workspace_root = ? AND status IN ('active','ready_to_finalize','blocked','paused') ORDER BY updated_at DESC`).all(workspaceRoot).map(fromRunRow);
+    return this.db
+      .prepare(
+        `SELECT * FROM runs WHERE workspace_root = ? AND status IN ('active','ready_to_finalize','blocked','paused') ORDER BY updated_at DESC`,
+      )
+      .all(workspaceRoot)
+      .map(fromRunRow);
   }
 
   claimLegacyActiveRun(workspaceRoot, sessionId, metadata = {}) {
     return this.transaction(() => {
-      const row = this.db.prepare(`SELECT * FROM runs WHERE workspace_root = ? AND session_id IS NULL AND status IN ('active','ready_to_finalize','blocked','paused') ORDER BY updated_at DESC LIMIT 1`).get(workspaceRoot);
+      const row = this.db
+        .prepare(
+          `SELECT * FROM runs WHERE workspace_root = ? AND session_id IS NULL AND status IN ('active','ready_to_finalize','blocked','paused') ORDER BY updated_at DESC LIMIT 1`,
+        )
+        .get(workspaceRoot);
       if (!row) return null;
       const run = fromRunRow(row);
-      const result = this.db.prepare(`UPDATE runs SET session_id = ?, metadata_json = ?, updated_at = ? WHERE id = ? AND session_id IS NULL`)
-        .run(sessionId, JSON.stringify({ ...(run.metadata || {}), ...metadata }), nowIso(), run.id);
+      const result = this.db
+        .prepare(
+          `UPDATE runs SET session_id = ?, metadata_json = ?, updated_at = ? WHERE id = ? AND session_id IS NULL`,
+        )
+        .run(
+          sessionId,
+          JSON.stringify({ ...(run.metadata || {}), ...metadata }),
+          nowIso(),
+          run.id,
+        );
       return result.changes ? this.getRun(run.id) : null;
     });
   }
 
   listRuns(workspaceRoot, limit = 20) {
     const stmt = workspaceRoot
-      ? this.db.prepare('SELECT * FROM runs WHERE workspace_root = ? ORDER BY updated_at DESC LIMIT ?')
-      : this.db.prepare('SELECT * FROM runs ORDER BY updated_at DESC LIMIT ?');
-    return (workspaceRoot ? stmt.all(workspaceRoot, limit) : stmt.all(limit)).map(fromRunRow);
+      ? this.db.prepare(
+          "SELECT * FROM runs WHERE workspace_root = ? ORDER BY updated_at DESC LIMIT ?",
+        )
+      : this.db.prepare("SELECT * FROM runs ORDER BY updated_at DESC LIMIT ?");
+    return (
+      workspaceRoot ? stmt.all(workspaceRoot, limit) : stmt.all(limit)
+    ).map(fromRunRow);
   }
 
   exportWorkspace(workspaceRoot) {
-    const runs = this.db.prepare('SELECT * FROM runs WHERE workspace_root = ? ORDER BY created_at ASC').all(workspaceRoot).map(fromRunRow);
+    const runs = this.db
+      .prepare(
+        "SELECT * FROM runs WHERE workspace_root = ? ORDER BY created_at ASC",
+      )
+      .all(workspaceRoot)
+      .map(fromRunRow);
     const runIds = runs.map((run) => run.id);
-    const placeholders = runIds.map(() => '?').join(',');
-    const byRun = (table, mapper) => runIds.length ? this.db.prepare(`SELECT * FROM ${table} WHERE run_id IN (${placeholders}) ORDER BY created_at ASC`).all(...runIds).map(mapper) : [];
+    const placeholders = runIds.map(() => "?").join(",");
+    const byRun = (table, mapper) =>
+      runIds.length
+        ? this.db
+            .prepare(
+              `SELECT * FROM ${table} WHERE run_id IN (${placeholders}) ORDER BY created_at ASC`,
+            )
+            .all(...runIds)
+            .map(mapper)
+        : [];
     return {
       runs,
-      tasks: byRun('tasks', fromTaskRow),
-      events: byRun('events', fromEventRow),
-      summaries: byRun('summaries', fromSummaryRow),
-      cache: this.db.prepare('SELECT * FROM cache_entries WHERE workspace_root = ? ORDER BY created_at ASC').all(workspaceRoot).map(fromCacheRow)
+      tasks: byRun("tasks", fromTaskRow),
+      events: byRun("events", fromEventRow),
+      summaries: byRun("summaries", fromSummaryRow),
+      cache: this.db
+        .prepare(
+          "SELECT * FROM cache_entries WHERE workspace_root = ? ORDER BY created_at ASC",
+        )
+        .all(workspaceRoot)
+        .map(fromCacheRow),
     };
   }
 
   importWorkspace(payload) {
     return this.transaction(() => {
       assertSqliteImportDoesNotConflict(this.db, payload);
-      const insertRun = this.db.prepare(`INSERT INTO runs (id, workspace_root, session_id, turn_id, prompt_hash, goal, status, route_revision, current_task_id, created_at, updated_at, finalized_at, metadata_json)
+      const insertRun = this.db
+        .prepare(`INSERT INTO runs (id, workspace_root, session_id, turn_id, prompt_hash, goal, status, route_revision, current_task_id, created_at, updated_at, finalized_at, metadata_json)
         VALUES (@id, @workspaceRoot, @sessionId, @turnId, @promptHash, @goal, @status, @routeRevision, @currentTaskId, @createdAt, @updatedAt, @finalizedAt, @metadataJson)`);
-      const insertTask = this.db.prepare(`INSERT INTO tasks (id, run_id, parent_id, stable_key, title, description, status, required, priority, sort_order, created_by, acceptance_criteria_json, evidence_json, created_at, updated_at, completed_at, metadata_json)
+      const insertTask = this.db
+        .prepare(`INSERT INTO tasks (id, run_id, parent_id, stable_key, title, description, status, required, priority, sort_order, created_by, acceptance_criteria_json, evidence_json, created_at, updated_at, completed_at, metadata_json)
         VALUES (@id, @runId, @parentId, @stableKey, @title, @description, @status, @required, @priority, @sortOrder, @createdBy, @acceptanceCriteriaJson, @evidenceJson, @createdAt, @updatedAt, @completedAt, @metadataJson)`);
-      const insertEvent = this.db.prepare(`INSERT INTO events (id, run_id, turn_id, hook_event_name, event_type, idempotency_key, payload_json, created_at)
+      const insertEvent = this.db
+        .prepare(`INSERT INTO events (id, run_id, turn_id, hook_event_name, event_type, idempotency_key, payload_json, created_at)
         VALUES (@id, @runId, @turnId, @hookEventName, @eventType, @idempotencyKey, @payloadJson, @createdAt)`);
-      const insertSummary = this.db.prepare(`INSERT INTO summaries (id, run_id, workspace_root, turn_id, summary_md, summary_json, current_cleared, created_at)
+      const insertSummary = this.db
+        .prepare(`INSERT INTO summaries (id, run_id, workspace_root, turn_id, summary_md, summary_json, current_cleared, created_at)
         VALUES (@id, @runId, @workspaceRoot, @turnId, @summaryMd, @summaryJson, @currentCleared, @createdAt)`);
-      const insertCache = this.db.prepare(`INSERT INTO cache_entries (id, workspace_root, kind, title, body, tags_json, source_json, score_hint, created_at, updated_at, expires_at)
+      const insertCache = this.db
+        .prepare(`INSERT INTO cache_entries (id, workspace_root, kind, title, body, tags_json, source_json, score_hint, created_at, updated_at, expires_at)
         VALUES (@id, @workspaceRoot, @kind, @title, @body, @tagsJson, @sourceJson, @scoreHint, @createdAt, @updatedAt, @expiresAt)`);
       payload.runs.forEach((run) => insertRun.run(toRunRow(run)));
       payload.tasks.forEach((task) => insertTask.run(toTaskRow(task)));
       payload.events.forEach((event) => insertEvent.run(toEventRow(event)));
-      payload.summaries.forEach((summary) => insertSummary.run(toSummaryRow(summary)));
+      payload.summaries.forEach((summary) =>
+        insertSummary.run(toSummaryRow(summary)),
+      );
       payload.cache.forEach((entry) => insertCache.run(toCacheRow(entry)));
-      return Object.fromEntries(['runs', 'tasks', 'events', 'summaries', 'cache'].map((name) => [name, payload[name].length]));
+      return Object.fromEntries(
+        ["runs", "tasks", "events", "summaries", "cache"].map((name) => [
+          name,
+          payload[name].length,
+        ]),
+      );
     });
   }
 
   addTasks(tasks) {
-    const stmt = this.db.prepare(`INSERT INTO tasks (id, run_id, parent_id, stable_key, title, description, status, required, priority, sort_order, created_by, acceptance_criteria_json, evidence_json, created_at, updated_at, completed_at, metadata_json)
+    const stmt = this.db
+      .prepare(`INSERT INTO tasks (id, run_id, parent_id, stable_key, title, description, status, required, priority, sort_order, created_by, acceptance_criteria_json, evidence_json, created_at, updated_at, completed_at, metadata_json)
       VALUES (@id, @runId, @parentId, @stableKey, @title, @description, @status, @required, @priority, @sortOrder, @createdBy, @acceptanceCriteriaJson, @evidenceJson, @createdAt, @updatedAt, @completedAt, @metadataJson)`);
     this.transaction(() => tasks.forEach((task) => stmt.run(toTaskRow(task))));
     return tasks;
@@ -371,69 +628,136 @@ export class SqliteStore {
   updateTask(id, patch) {
     const current = this.getTask(id);
     if (!current) return null;
-    const next = { ...current, ...patch, updatedAt: patch.updatedAt || nowIso() };
-    this.db.prepare(`UPDATE tasks SET parent_id=@parentId, stable_key=@stableKey, title=@title, description=@description, status=@status, required=@required,
+    const next = {
+      ...current,
+      ...patch,
+      updatedAt: patch.updatedAt || nowIso(),
+    };
+    this.db
+      .prepare(
+        `UPDATE tasks SET parent_id=@parentId, stable_key=@stableKey, title=@title, description=@description, status=@status, required=@required,
       priority=@priority, sort_order=@sortOrder, created_by=@createdBy, acceptance_criteria_json=@acceptanceCriteriaJson, evidence_json=@evidenceJson,
-      updated_at=@updatedAt, completed_at=@completedAt, metadata_json=@metadataJson WHERE id=@id`).run(toTaskRow(next));
+      updated_at=@updatedAt, completed_at=@completedAt, metadata_json=@metadataJson WHERE id=@id`,
+      )
+      .run(toTaskRow(next));
     return next;
   }
 
   getTask(id) {
-    const row = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id);
+    const row = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id);
     return row ? fromTaskRow(row) : null;
   }
 
   getTasks(runId) {
-    return this.db.prepare('SELECT * FROM tasks WHERE run_id = ? ORDER BY sort_order ASC, created_at ASC').all(runId).map(fromTaskRow);
+    return this.db
+      .prepare(
+        "SELECT * FROM tasks WHERE run_id = ? ORDER BY sort_order ASC, created_at ASC",
+      )
+      .all(runId)
+      .map(fromTaskRow);
   }
 
   recordEvent(event) {
-    this.db.prepare(`INSERT OR IGNORE INTO events (id, run_id, turn_id, hook_event_name, event_type, idempotency_key, payload_json, created_at)
-      VALUES (@id, @runId, @turnId, @hookEventName, @eventType, @idempotencyKey, @payloadJson, @createdAt)`).run(toEventRow(event));
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO events (id, run_id, turn_id, hook_event_name, event_type, idempotency_key, payload_json, created_at)
+      VALUES (@id, @runId, @turnId, @hookEventName, @eventType, @idempotencyKey, @payloadJson, @createdAt)`,
+      )
+      .run(toEventRow(event));
     return event;
   }
 
   getEvents(runId, limit = 100) {
     // Select the newest window, then present it chronologically like the JSON store.
-    return this.db.prepare('SELECT * FROM (SELECT * FROM events WHERE run_id = ? ORDER BY created_at DESC LIMIT ?) ORDER BY created_at ASC').all(runId, limit).map(fromEventRow);
+    return this.db
+      .prepare(
+        "SELECT * FROM (SELECT * FROM events WHERE run_id = ? ORDER BY created_at DESC LIMIT ?) ORDER BY created_at ASC",
+      )
+      .all(runId, limit)
+      .map(fromEventRow);
   }
 
   upsertSummary(summary) {
-    this.db.prepare(`INSERT INTO summaries (id, run_id, workspace_root, turn_id, summary_md, summary_json, current_cleared, created_at)
+    this.db
+      .prepare(
+        `INSERT INTO summaries (id, run_id, workspace_root, turn_id, summary_md, summary_json, current_cleared, created_at)
       VALUES (@id, @runId, @workspaceRoot, @turnId, @summaryMd, @summaryJson, @currentCleared, @createdAt)
-      ON CONFLICT(id) DO UPDATE SET summary_md=excluded.summary_md, summary_json=excluded.summary_json, current_cleared=excluded.current_cleared`).run(toSummaryRow(summary));
+      ON CONFLICT(id) DO UPDATE SET summary_md=excluded.summary_md, summary_json=excluded.summary_json, current_cleared=excluded.current_cleared`,
+      )
+      .run(toSummaryRow(summary));
     return summary;
   }
 
   listSummaries(workspaceRoot, limit = 20) {
-    return this.db.prepare('SELECT * FROM summaries WHERE workspace_root = ? ORDER BY created_at DESC LIMIT ?').all(workspaceRoot, limit).map(fromSummaryRow);
+    return this.db
+      .prepare(
+        "SELECT * FROM summaries WHERE workspace_root = ? ORDER BY created_at DESC LIMIT ?",
+      )
+      .all(workspaceRoot, limit)
+      .map(fromSummaryRow);
   }
 
   upsertCache(entry) {
-    const existing = this.db.prepare('SELECT created_at FROM cache_entries WHERE id = ?').get(entry.id);
-    const next = { ...entry, createdAt: existing?.created_at || entry.createdAt };
-    this.db.prepare(`INSERT INTO cache_entries (id, workspace_root, kind, title, body, tags_json, source_json, score_hint, created_at, updated_at, expires_at)
+    const existing = this.db
+      .prepare("SELECT created_at FROM cache_entries WHERE id = ?")
+      .get(entry.id);
+    const next = {
+      ...entry,
+      createdAt: existing?.created_at || entry.createdAt,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO cache_entries (id, workspace_root, kind, title, body, tags_json, source_json, score_hint, created_at, updated_at, expires_at)
       VALUES (@id, @workspaceRoot, @kind, @title, @body, @tagsJson, @sourceJson, @scoreHint, @createdAt, @updatedAt, @expiresAt)
       ON CONFLICT(id) DO UPDATE SET workspace_root=excluded.workspace_root, kind=excluded.kind, title=excluded.title, body=excluded.body,
-        tags_json=excluded.tags_json, source_json=excluded.source_json, score_hint=excluded.score_hint, updated_at=excluded.updated_at, expires_at=excluded.expires_at`).run(toCacheRow(next));
+        tags_json=excluded.tags_json, source_json=excluded.source_json, score_hint=excluded.score_hint, updated_at=excluded.updated_at, expires_at=excluded.expires_at`,
+      )
+      .run(toCacheRow(next));
     return next;
   }
 
   deleteCache(filter = {}) {
     const clauses = [];
     const params = [];
-    if (filter.id) { clauses.push('id = ?'); params.push(filter.id); }
-    if (filter.workspaceRoot) { clauses.push('workspace_root = ?'); params.push(filter.workspaceRoot); }
-    if (filter.kind) { clauses.push('kind = ?'); params.push(filter.kind); }
-    if (filter.tag) { clauses.push('EXISTS (SELECT 1 FROM json_each(cache_entries.tags_json) WHERE lower(value) = lower(?))'); params.push(filter.tag); }
-    if (filter.expired) { clauses.push('expires_at IS NOT NULL AND expires_at <= ?'); params.push(filter.now || nowIso()); }
-    if (!clauses.length) throw new OtmError('Cache deletion requires at least one selector.', { code: 'CACHE_SELECTOR_REQUIRED' });
-    const result = this.db.prepare(`DELETE FROM cache_entries WHERE ${clauses.join(' AND ')}`).run(...params);
+    if (filter.id) {
+      clauses.push("id = ?");
+      params.push(filter.id);
+    }
+    if (filter.workspaceRoot) {
+      clauses.push("workspace_root = ?");
+      params.push(filter.workspaceRoot);
+    }
+    if (filter.kind) {
+      clauses.push("kind = ?");
+      params.push(filter.kind);
+    }
+    if (filter.tag) {
+      clauses.push(
+        "EXISTS (SELECT 1 FROM json_each(cache_entries.tags_json) WHERE lower(value) = lower(?))",
+      );
+      params.push(filter.tag);
+    }
+    if (filter.expired) {
+      clauses.push("expires_at IS NOT NULL AND expires_at <= ?");
+      params.push(filter.now || nowIso());
+    }
+    if (!clauses.length)
+      throw new OtmError("Cache deletion requires at least one selector.", {
+        code: "CACHE_SELECTOR_REQUIRED",
+      });
+    const result = this.db
+      .prepare(`DELETE FROM cache_entries WHERE ${clauses.join(" AND ")}`)
+      .run(...params);
     return result.changes || 0;
   }
 
   listCache(workspaceRoot, limit = 100) {
-    return this.db.prepare('SELECT * FROM cache_entries WHERE workspace_root = ? ORDER BY updated_at DESC LIMIT ?').all(workspaceRoot, limit).map(fromCacheRow);
+    return this.db
+      .prepare(
+        "SELECT * FROM cache_entries WHERE workspace_root = ? ORDER BY updated_at DESC LIMIT ?",
+      )
+      .all(workspaceRoot, limit)
+      .map(fromCacheRow);
   }
 
   pruneHistory(options = {}) {
@@ -441,35 +765,71 @@ export class SqliteStore {
     const olderThan = options.olderThan;
     const now = options.now || nowIso();
     const dryRun = options.dryRun === true;
-    if (!olderThan) throw new Error('olderThan is required for history pruning');
+    if (!olderThan)
+      throw new Error("olderThan is required for history pruning");
 
     const runWhere = [
       "status NOT IN ('active','ready_to_finalize','blocked','paused')",
-      'COALESCE(finalized_at, updated_at, created_at) < ?'
+      "COALESCE(finalized_at, updated_at, created_at) < ?",
     ];
     const runParams = [olderThan];
     if (workspaceRoot) {
-      runWhere.unshift('workspace_root = ?');
+      runWhere.unshift("workspace_root = ?");
       runParams.unshift(workspaceRoot);
     }
-    const removableRuns = this.db.prepare(`SELECT id FROM runs WHERE ${runWhere.join(' AND ')}`).all(...runParams).map((row) => row.id);
-    const runIdClause = removableRuns.length ? `run_id IN (${removableRuns.map(() => '?').join(',')})` : null;
+    const removableRuns = this.db
+      .prepare(`SELECT id FROM runs WHERE ${runWhere.join(" AND ")}`)
+      .all(...runParams)
+      .map((row) => row.id);
+    const runIdClause = removableRuns.length
+      ? `run_id IN (${removableRuns.map(() => "?").join(",")})`
+      : null;
 
     const counts = {
       runs: removableRuns.length,
-      tasks: runIdClause ? this.db.prepare(`SELECT COUNT(*) AS count FROM tasks WHERE ${runIdClause}`).get(...removableRuns).count : 0,
-      events: runIdClause ? this.db.prepare(`SELECT COUNT(*) AS count FROM events WHERE ${runIdClause}`).get(...removableRuns).count : 0,
-      summaries: runIdClause ? this.db.prepare(`SELECT COUNT(*) AS count FROM summaries WHERE ${runIdClause}`).get(...removableRuns).count : 0,
-      cacheEntries: countPrunableCacheEntries(this.db, { workspaceRoot, olderThan, now })
+      tasks: runIdClause
+        ? this.db
+            .prepare(`SELECT COUNT(*) AS count FROM tasks WHERE ${runIdClause}`)
+            .get(...removableRuns).count
+        : 0,
+      events: runIdClause
+        ? this.db
+            .prepare(
+              `SELECT COUNT(*) AS count FROM events WHERE ${runIdClause}`,
+            )
+            .get(...removableRuns).count
+        : 0,
+      summaries: runIdClause
+        ? this.db
+            .prepare(
+              `SELECT COUNT(*) AS count FROM summaries WHERE ${runIdClause}`,
+            )
+            .get(...removableRuns).count
+        : 0,
+      cacheEntries: countPrunableCacheEntries(this.db, {
+        workspaceRoot,
+        olderThan,
+        now,
+      }),
     };
 
     if (!dryRun) {
       this.transaction(() => {
         if (runIdClause) {
-          this.db.prepare(`DELETE FROM tasks WHERE ${runIdClause}`).run(...removableRuns);
-          this.db.prepare(`DELETE FROM events WHERE ${runIdClause}`).run(...removableRuns);
-          this.db.prepare(`DELETE FROM summaries WHERE ${runIdClause}`).run(...removableRuns);
-          this.db.prepare(`DELETE FROM runs WHERE id IN (${removableRuns.map(() => '?').join(',')})`).run(...removableRuns);
+          this.db
+            .prepare(`DELETE FROM tasks WHERE ${runIdClause}`)
+            .run(...removableRuns);
+          this.db
+            .prepare(`DELETE FROM events WHERE ${runIdClause}`)
+            .run(...removableRuns);
+          this.db
+            .prepare(`DELETE FROM summaries WHERE ${runIdClause}`)
+            .run(...removableRuns);
+          this.db
+            .prepare(
+              `DELETE FROM runs WHERE id IN (${removableRuns.map(() => "?").join(",")})`,
+            )
+            .run(...removableRuns);
         }
         deletePrunableCacheEntries(this.db, { workspaceRoot, olderThan, now });
       });
@@ -480,15 +840,17 @@ export class SqliteStore {
       workspaceRoot,
       olderThan,
       retentionDays: options.retentionDays,
-      deleted: counts
+      deleted: counts,
     };
   }
 }
 
 function cacheWhere({ workspaceRoot }) {
-  const clauses = ['((expires_at IS NOT NULL AND expires_at <= ?) OR COALESCE(updated_at, created_at) < ?)'];
-  if (workspaceRoot) clauses.unshift('workspace_root = ?');
-  return clauses.join(' AND ');
+  const clauses = [
+    "((expires_at IS NOT NULL AND expires_at <= ?) OR COALESCE(updated_at, created_at) < ?)",
+  ];
+  if (workspaceRoot) clauses.unshift("workspace_root = ?");
+  return clauses.join(" AND ");
 }
 
 function cacheParams({ workspaceRoot, olderThan, now }) {
@@ -496,25 +858,58 @@ function cacheParams({ workspaceRoot, olderThan, now }) {
 }
 
 function countPrunableCacheEntries(db, options) {
-  return db.prepare(`SELECT COUNT(*) AS count FROM cache_entries WHERE ${cacheWhere(options)}`).get(...cacheParams(options)).count;
+  return db
+    .prepare(
+      `SELECT COUNT(*) AS count FROM cache_entries WHERE ${cacheWhere(options)}`,
+    )
+    .get(...cacheParams(options)).count;
 }
 
 function deletePrunableCacheEntries(db, options) {
-  return db.prepare(`DELETE FROM cache_entries WHERE ${cacheWhere(options)}`).run(...cacheParams(options)).changes || 0;
+  return (
+    db
+      .prepare(`DELETE FROM cache_entries WHERE ${cacheWhere(options)}`)
+      .run(...cacheParams(options)).changes || 0
+  );
 }
 
 function assertSqliteImportDoesNotConflict(db, payload) {
-  const tables = { runs: 'runs', tasks: 'tasks', events: 'events', summaries: 'summaries', cache: 'cache_entries' };
+  const tables = {
+    runs: "runs",
+    tasks: "tasks",
+    events: "events",
+    summaries: "summaries",
+    cache: "cache_entries",
+  };
   for (const [name, table] of Object.entries(tables)) {
     for (const item of payload[name]) {
       if (db.prepare(`SELECT 1 FROM ${table} WHERE id = ?`).get(item.id)) {
-        throw new OtmError('Historical import conflicts with an existing record.', { code: 'IMPORT_CONFLICT', details: { collection: name, id: item.id } });
+        throw new OtmError(
+          "Historical import conflicts with an existing record.",
+          {
+            code: "IMPORT_CONFLICT",
+            details: { collection: name, id: item.id },
+          },
+        );
       }
     }
   }
   for (const event of payload.events) {
-    if (db.prepare('SELECT 1 FROM events WHERE idempotency_key = ?').get(event.idempotencyKey)) {
-      throw new OtmError('Historical import conflicts with an existing event idempotency key.', { code: 'IMPORT_CONFLICT', details: { collection: 'events', idempotencyKey: event.idempotencyKey } });
+    if (
+      db
+        .prepare("SELECT 1 FROM events WHERE idempotency_key = ?")
+        .get(event.idempotencyKey)
+    ) {
+      throw new OtmError(
+        "Historical import conflicts with an existing event idempotency key.",
+        {
+          code: "IMPORT_CONFLICT",
+          details: {
+            collection: "events",
+            idempotencyKey: event.idempotencyKey,
+          },
+        },
+      );
     }
   }
 }
@@ -522,10 +917,17 @@ function assertSqliteImportDoesNotConflict(db, payload) {
 function parseJson(value, fallback) {
   try {
     const parsed = JSON.parse(value);
-    if ((Array.isArray(fallback) && !Array.isArray(parsed)) || (!Array.isArray(fallback) && (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)))) throw new Error('unexpected JSON shape');
+    if (
+      (Array.isArray(fallback) && !Array.isArray(parsed)) ||
+      (!Array.isArray(fallback) &&
+        (!parsed || typeof parsed !== "object" || Array.isArray(parsed)))
+    )
+      throw new Error("unexpected JSON shape");
     return parsed;
   } catch {
-    throw new Error('SQLite store contains malformed JSON data. Run otm doctor and restore or repair the database.');
+    throw new Error(
+      "SQLite store contains malformed JSON data. Run otm doctor and restore or repair the database.",
+    );
   }
 }
 
@@ -543,7 +945,7 @@ function toRunRow(run) {
     createdAt: run.createdAt,
     updatedAt: run.updatedAt,
     finalizedAt: run.finalizedAt || null,
-    metadataJson: JSON.stringify(run.metadata || {})
+    metadataJson: JSON.stringify(run.metadata || {}),
   };
 }
 
@@ -561,7 +963,7 @@ function fromRunRow(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     finalizedAt: row.finalized_at,
-    metadata: parseJson(row.metadata_json, {})
+    metadata: parseJson(row.metadata_json, {}),
   };
 }
 
@@ -577,13 +979,13 @@ function toTaskRow(task) {
     required: task.required ? 1 : 0,
     priority: task.priority ?? 50,
     sortOrder: task.sortOrder ?? 0,
-    createdBy: task.createdBy || 'manual',
+    createdBy: task.createdBy || "manual",
     acceptanceCriteriaJson: JSON.stringify(task.acceptanceCriteria || []),
     evidenceJson: JSON.stringify(task.evidence || []),
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
     completedAt: task.completedAt || null,
-    metadataJson: JSON.stringify(task.metadata || {})
+    metadataJson: JSON.stringify(task.metadata || {}),
   };
 }
 
@@ -605,7 +1007,7 @@ function fromTaskRow(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     completedAt: row.completed_at,
-    metadata: parseJson(row.metadata_json, {})
+    metadata: parseJson(row.metadata_json, {}),
   };
 }
 
@@ -618,7 +1020,7 @@ function toEventRow(event) {
     eventType: event.eventType,
     idempotencyKey: event.idempotencyKey,
     payloadJson: JSON.stringify(event.payload || {}),
-    createdAt: event.createdAt
+    createdAt: event.createdAt,
   };
 }
 
@@ -631,7 +1033,7 @@ function fromEventRow(row) {
     eventType: row.event_type,
     idempotencyKey: row.idempotency_key,
     payload: parseJson(row.payload_json, {}),
-    createdAt: row.created_at
+    createdAt: row.created_at,
   };
 }
 
@@ -644,7 +1046,7 @@ function toSummaryRow(summary) {
     summaryMd: summary.summaryMd,
     summaryJson: JSON.stringify(summary.summaryJson || {}),
     currentCleared: summary.currentCleared ? 1 : 0,
-    createdAt: summary.createdAt
+    createdAt: summary.createdAt,
   };
 }
 
@@ -657,7 +1059,7 @@ function fromSummaryRow(row) {
     summaryMd: row.summary_md,
     summaryJson: parseJson(row.summary_json, {}),
     currentCleared: Boolean(row.current_cleared),
-    createdAt: row.created_at
+    createdAt: row.created_at,
   };
 }
 
@@ -673,7 +1075,7 @@ function toCacheRow(entry) {
     scoreHint: entry.scoreHint || 0,
     createdAt: entry.createdAt,
     updatedAt: entry.updatedAt,
-    expiresAt: entry.expiresAt || null
+    expiresAt: entry.expiresAt || null,
   };
 }
 
@@ -689,6 +1091,6 @@ function fromCacheRow(row) {
     scoreHint: row.score_hint,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    expiresAt: row.expires_at
+    expiresAt: row.expires_at,
   };
 }

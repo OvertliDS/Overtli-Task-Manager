@@ -1,11 +1,14 @@
-import crypto from 'node:crypto';
+import crypto from "node:crypto";
 
 export function newId(prefix) {
-  return `${prefix}_${crypto.randomBytes(8).toString('hex')}`;
+  return `${prefix}_${crypto.randomBytes(8).toString("hex")}`;
 }
 
 export function sha256(value) {
-  return crypto.createHash('sha256').update(String(value ?? '')).digest('hex');
+  return crypto
+    .createHash("sha256")
+    .update(String(value ?? ""))
+    .digest("hex");
 }
 
 export function shortHash(value, length = 12) {
@@ -13,7 +16,9 @@ export function shortHash(value, length = 12) {
 }
 
 export function stableTaskKey(title, acceptanceCriteria = []) {
-  const normalized = `${String(title || '').trim().toLowerCase()}\n${acceptanceCriteria.map(String).join('\n').trim().toLowerCase()}`;
+  const normalized = `${String(title || "")
+    .trim()
+    .toLowerCase()}\n${acceptanceCriteria.map(String).join("\n").trim().toLowerCase()}`;
   return shortHash(normalized, 16);
 }
 

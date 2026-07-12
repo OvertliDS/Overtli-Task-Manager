@@ -1,5 +1,5 @@
-import fs from 'node:fs';
-import { after } from 'node:test';
+import fs from "node:fs";
+import { after } from "node:test";
 
 // The regression suites deliberately create real filesystem stores, workspaces,
 // SQLite databases, and child-process fixtures. Track every test-process temp
@@ -16,6 +16,13 @@ fs.mkdtempSync = function trackedMkdtempSync(...args) {
 
 after(() => {
   for (const directory of [...temporaryDirectories].reverse()) {
-    try { fs.rmSync(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }); } catch {}
+    try {
+      fs.rmSync(directory, {
+        recursive: true,
+        force: true,
+        maxRetries: 3,
+        retryDelay: 50,
+      });
+    } catch {}
   }
 });

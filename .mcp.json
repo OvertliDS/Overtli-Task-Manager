@@ -2,9 +2,7 @@
   "mcp_servers": {
     "overtli_task_manager": {
       "command": "node",
-      "args": [
-        "${PLUGIN_ROOT}/bin/otm-mcp.mjs"
-      ],
+      "args": ["${PLUGIN_ROOT}/bin/otm-mcp.mjs"],
       "env": {
         "OTM_STORAGE": "auto",
         "OTM_STATE_DIR": "${PLUGIN_DATA}/state"

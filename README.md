@@ -12,24 +12,25 @@ Overtli Task Manager (OTM) structures AI coding sessions into evidence-backed ro
 
 ## Key Capabilities
 
-*   **Route Checklists:** Deconstruct complex goals into discrete segments (`pending` ➔ `active` ➔ `done` / `blocked`).
-*   **Evidence Enforcement:** Tasks can only be marked complete once concrete proof (changed files, test results, command outputs) is provided.
-*   **Chat Integration:** Renders real-time, user-friendly Markdown progress dashboards directly in your Codex chat.
-*   **Persistent Task List:** Keeps a full checked-off task list in chat Markdown and the current chat's session-scoped `current.json.checklist`.
-*   **Concurrent Session Isolation:** Keys routes by normalized workspace plus `CODEX_THREAD_ID` (or explicit `sessionId`), so separate chats and VS Code windows cannot replace each other's work.
-*   **Durable State Cache:** Syncs canonical routes under `.codex/overtli-task-manager/sessions/<session-key>/`; top-level `current.json` and `current.md` provide a workspace-wide session index.
-*   **Optimized Rendering:** Shows a full checklist at route start and finalization, then compact progress cards during routine work.
-*   **Task Normalization:** Keeps one active route segment where possible, blocks manual jumps until the active task is handled, and lets reconciliation intentionally add, merge, reopen, or reorder work.
-*   **Internal Step Gates:** Keeps each route segment honest by requiring internal steps to be checked off as work happens before the parent segment can be completed.
-*   **Lifecycle Hooks:** Intercepts sessions, prompts, tools, and stops to enforce task completion and audit progress.
-*   **Workspace Memory:** Keeps a lightweight, high-signal index of project guides (`AGENTS.md`), memory banks, and schemas.
-*   **Managed Instruction Sync:** Can refresh only OTM's marked `AGENTS.md` block after an explicitly trusted installation opts in; ordinary sessions never modify project instructions.
+- **Route Checklists:** Deconstruct complex goals into discrete segments (`pending` ➔ `active` ➔ `done` / `blocked`).
+- **Evidence Enforcement:** Tasks can only be marked complete once concrete proof (changed files, test results, command outputs) is provided.
+- **Chat Integration:** Renders real-time, user-friendly Markdown progress dashboards directly in your Codex chat.
+- **Persistent Task List:** Keeps a full checked-off task list in chat Markdown and the current chat's session-scoped `current.json.checklist`.
+- **Concurrent Session Isolation:** Keys routes by normalized workspace plus `CODEX_THREAD_ID` (or explicit `sessionId`), so separate chats and VS Code windows cannot replace each other's work.
+- **Durable State Cache:** Syncs canonical routes under `.codex/overtli-task-manager/sessions/<session-key>/`; top-level `current.json` and `current.md` provide a workspace-wide session index.
+- **Optimized Rendering:** Shows a full checklist at route start and finalization, then compact progress cards during routine work.
+- **Task Normalization:** Keeps one active route segment where possible, blocks manual jumps until the active task is handled, and lets reconciliation intentionally add, merge, reopen, or reorder work.
+- **Internal Step Gates:** Keeps each route segment honest by requiring internal steps to be checked off as work happens before the parent segment can be completed.
+- **Lifecycle Hooks:** Intercepts sessions, prompts, tools, and stops to enforce task completion and audit progress.
+- **Workspace Memory:** Keeps a lightweight, high-signal index of project guides (`AGENTS.md`), memory banks, and schemas.
+- **Managed Instruction Sync:** Can refresh only OTM's marked `AGENTS.md` block after an explicitly trusted installation opts in; ordinary sessions never modify project instructions.
 
 ---
 
 ## Installation
 
 ### 1. Install Plugin
+
 Clone the repository directly into the standard Codex plugins directory:
 
 ```bash
@@ -53,27 +54,27 @@ npm install
 
 ### Environment variables
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `OTM_STORAGE` | `auto` | Select `auto`, `sqlite`, or `json`; `sqlite` fails if the native backend is unavailable. |
-| `OTM_STATE_DIR` | `OTM_HOME` or `<CODEX_HOME>/overtli-task-manager` | Override the durable store directory. |
-| `OTM_HOME` | `<CODEX_HOME>/overtli-task-manager` | Base durable state directory when `OTM_STATE_DIR` is not set. |
-| `CODEX_HOME` | `~/.codex` | Codex home used for global installation and the default OTM state location. |
-| `OTM_SESSION_ID` | host supplied | Explicit session identity, after request payload fields and before `CODEX_THREAD_ID`. |
-| `CODEX_THREAD_ID` | host supplied | Fallback session identity when no explicit request/session ID is available. |
-| `OTM_CLAIM_LEGACY_ROUTE` | `0` | Set to `1` only to explicitly adopt a legacy unscoped route. |
-| `OTM_AUTO_SYNC_AGENTS` | disabled | Set to `1` to request managed `AGENTS.md` block synchronization; it also requires `OTM_TRUSTED_INSTALLATION=1`. |
-| `OTM_TRUSTED_INSTALLATION` | disabled | Set to `1` only for a trusted OTM installation. Required together with `OTM_AUTO_SYNC_AGENTS=1` before a session hook may modify `AGENTS.md`. |
-| `OTM_AUTO_START_ROUTE` | enabled | Set to `0` to disable automatic creation of an OTM route for a substantive new prompt. This creates OTM's durable route, not a host-native Codex goal. |
-| `OTM_AUTO_INSTALL_GLOBAL` | disabled | Set to `1` only to explicitly permit postinstall global setup. |
-| `OTM_RECORD_PRE_TOOL` | disabled | Set to `1` to record pre-tool observations. |
-| `OTM_TRACK_MCP_EVIDENCE` | disabled | Set to `1` to record configured MCP tool evidence. |
-| `OTM_STOP_AUTO_FINALIZE` | disabled | Set to `1` only to use Stop-hook finalization fallback. |
-| `OTM_DEDUPE_HOOKS` | enabled | Set to `0` to disable cross-install hook deduplication. |
-| `OTM_HOOK_DEDUPE_TTL_MS` | `10000` | Hook dedupe claim lifetime in milliseconds. |
-| `OTM_PROJECT_REVIEW_MAX_FILES` | `20` | Maximum eligible project-review files read at session start. |
-| `OTM_COMMAND_CAPTURE` | `redacted` | Command-evidence policy: `redacted` stores redacted commands/scratch, `none` stores no command text, and `validation-only` stores command text only for recognized validation commands. |
-| `CI` | unset | Suppresses postinstall global setup even if `OTM_AUTO_INSTALL_GLOBAL=1`; CI never mutates global Codex state. |
+| Variable                       | Default                                           | Purpose                                                                                                                                                                                 |
+| ------------------------------ | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OTM_STORAGE`                  | `auto`                                            | Select `auto`, `sqlite`, or `json`; `sqlite` fails if the native backend is unavailable.                                                                                                |
+| `OTM_STATE_DIR`                | `OTM_HOME` or `<CODEX_HOME>/overtli-task-manager` | Override the durable store directory.                                                                                                                                                   |
+| `OTM_HOME`                     | `<CODEX_HOME>/overtli-task-manager`               | Base durable state directory when `OTM_STATE_DIR` is not set.                                                                                                                           |
+| `CODEX_HOME`                   | `~/.codex`                                        | Codex home used for global installation and the default OTM state location.                                                                                                             |
+| `OTM_SESSION_ID`               | host supplied                                     | Explicit session identity, after request payload fields and before `CODEX_THREAD_ID`.                                                                                                   |
+| `CODEX_THREAD_ID`              | host supplied                                     | Fallback session identity when no explicit request/session ID is available.                                                                                                             |
+| `OTM_CLAIM_LEGACY_ROUTE`       | `0`                                               | Set to `1` only to explicitly adopt a legacy unscoped route.                                                                                                                            |
+| `OTM_AUTO_SYNC_AGENTS`         | disabled                                          | Set to `1` to request managed `AGENTS.md` block synchronization; it also requires `OTM_TRUSTED_INSTALLATION=1`.                                                                         |
+| `OTM_TRUSTED_INSTALLATION`     | disabled                                          | Set to `1` only for a trusted OTM installation. Required together with `OTM_AUTO_SYNC_AGENTS=1` before a session hook may modify `AGENTS.md`.                                           |
+| `OTM_AUTO_START_ROUTE`         | enabled                                           | Set to `0` to disable automatic creation of an OTM route for a substantive new prompt. This creates OTM's durable route, not a host-native Codex goal.                                  |
+| `OTM_AUTO_INSTALL_GLOBAL`      | disabled                                          | Set to `1` only to explicitly permit postinstall global setup.                                                                                                                          |
+| `OTM_RECORD_PRE_TOOL`          | disabled                                          | Set to `1` to record pre-tool observations.                                                                                                                                             |
+| `OTM_TRACK_MCP_EVIDENCE`       | disabled                                          | Set to `1` to record configured MCP tool evidence.                                                                                                                                      |
+| `OTM_STOP_AUTO_FINALIZE`       | disabled                                          | Set to `1` only to use Stop-hook finalization fallback.                                                                                                                                 |
+| `OTM_DEDUPE_HOOKS`             | enabled                                           | Set to `0` to disable cross-install hook deduplication.                                                                                                                                 |
+| `OTM_HOOK_DEDUPE_TTL_MS`       | `10000`                                           | Hook dedupe claim lifetime in milliseconds.                                                                                                                                             |
+| `OTM_PROJECT_REVIEW_MAX_FILES` | `20`                                              | Maximum eligible project-review files read at session start.                                                                                                                            |
+| `OTM_COMMAND_CAPTURE`          | `redacted`                                        | Command-evidence policy: `redacted` stores redacted commands/scratch, `none` stores no command text, and `validation-only` stores command text only for recognized validation commands. |
+| `CI`                           | unset                                             | Suppresses postinstall global setup even if `OTM_AUTO_INSTALL_GLOBAL=1`; CI never mutates global Codex state.                                                                           |
 
 #### Verify the SQLite backend
 
@@ -120,6 +121,7 @@ guides are the authoritative reference for uncommon toolchain failures.
 > On Windows, the standard path is `%USERPROFILE%\.codex\plugins\overtli-task-manager`.
 
 ### 2. Configure Codex
+
 Generate the MCP server block with the installed copy of OTM, then paste the absolute-path output into your global configuration at `~/.codex/config.toml`:
 
 ```bash
@@ -130,6 +132,7 @@ node ./bin/otm.mjs mcp-config
 > Run that command from the OTM installation directory. The generated TOML uses the absolute `bin/otm-mcp.mjs` path so Codex does not depend on `~` expansion.
 
 ### 3. Install in Target Workspace
+
 Initialize OTM in any target repository to patch its `AGENTS.md`, hooks, skills, and `.gitignore`:
 
 ```bash
@@ -172,6 +175,7 @@ node ~/.codex/plugins/overtli-task-manager/bin/otm.mjs uninstall --global --conf
 When the plugin's `SessionStart` hook is active, it leaves `AGENTS.md` untouched by default. A deliberately trusted installation may opt into synchronization with both `OTM_AUTO_SYNC_AGENTS=1` and `OTM_TRUSTED_INSTALLATION=1`; only then does OTM create or refresh its managed block in the enclosing Git workspace. Existing content outside markers is preserved, incomplete marker pairs are reported without being overwritten, and nested package manifests do not shadow the enclosing Git root.
 
 To verify the setup:
+
 ```bash
 node ~/.codex/plugins/overtli-task-manager/bin/otm.mjs doctor
 ```
@@ -181,30 +185,32 @@ node ~/.codex/plugins/overtli-task-manager/bin/otm.mjs doctor
 ## Developer Reference
 
 ### MCP Tools
-| Tool | Category | Purpose |
-|---|---|---|
-| `otm_start` | Route Control | Initialize a new route with goals and subtasks |
-| `otm_reconcile` | Route Control | Update the route when goals steer or scope changes |
-| `otm_snapshot` | Route Control | Get current route state as Markdown/JSON |
-| `otm_start_task` | Progress | Set a specific route segment as active |
-| `otm_progress` | Progress | Record checkpoints and update progress |
-| `otm_complete_task` | Progress | Mark a segment as done with required evidence |
-| `otm_block_task` | Progress | Mark a segment as blocked with blocker details |
-| `otm_drop_task` | Progress | Drop or supersede stale/unneeded segments |
-| `otm_audit_stop` | Completion | Check if all required route segments are completed |
-| `otm_finalize_turn` | Completion | Save turn summary and update project memory |
-| `otm_clear_current` | Completion | Clear active route state files |
-| `otm_abandon` | Completion | Explicitly abandon unfinished route work with a recorded reason |
-| `otm_cleanup_workspace` | Completion | Clean OTM-owned temp and scratch artifacts |
-| `otm_prune_history` | Completion | Prune durable run/task/event/summary/cache history older than retention |
-| `otm_project_review`| Memory | Index high-signal repository context |
-| `otm_memory_search` | Memory | Search stored checkpoints and decision records |
-| `otm_memory_upsert` | Admin / Memory Maintenance | Create or update concise project memory entries |
-| `otm_memory_delete` | Admin / Memory Maintenance | Delete stale project memory entries by id, kind, or tag |
-| `otm_install_workspace` | Admin / Install | Idempotently install OTM into a repository |
-| `otm_doctor` | Admin / Diagnostics | Diagnose OTM storage, active route state, current files, and install state |
+
+| Tool                    | Category                   | Purpose                                                                    |
+| ----------------------- | -------------------------- | -------------------------------------------------------------------------- |
+| `otm_start`             | Route Control              | Initialize a new route with goals and subtasks                             |
+| `otm_reconcile`         | Route Control              | Update the route when goals steer or scope changes                         |
+| `otm_snapshot`          | Route Control              | Get current route state as Markdown/JSON                                   |
+| `otm_start_task`        | Progress                   | Set a specific route segment as active                                     |
+| `otm_progress`          | Progress                   | Record checkpoints and update progress                                     |
+| `otm_complete_task`     | Progress                   | Mark a segment as done with required evidence                              |
+| `otm_block_task`        | Progress                   | Mark a segment as blocked with blocker details                             |
+| `otm_drop_task`         | Progress                   | Drop or supersede stale/unneeded segments                                  |
+| `otm_audit_stop`        | Completion                 | Check if all required route segments are completed                         |
+| `otm_finalize_turn`     | Completion                 | Save turn summary and update project memory                                |
+| `otm_clear_current`     | Completion                 | Clear active route state files                                             |
+| `otm_abandon`           | Completion                 | Explicitly abandon unfinished route work with a recorded reason            |
+| `otm_cleanup_workspace` | Completion                 | Clean OTM-owned temp and scratch artifacts                                 |
+| `otm_prune_history`     | Completion                 | Prune durable run/task/event/summary/cache history older than retention    |
+| `otm_project_review`    | Memory                     | Index high-signal repository context                                       |
+| `otm_memory_search`     | Memory                     | Search stored checkpoints and decision records                             |
+| `otm_memory_upsert`     | Admin / Memory Maintenance | Create or update concise project memory entries                            |
+| `otm_memory_delete`     | Admin / Memory Maintenance | Delete stale project memory entries by id, kind, or tag                    |
+| `otm_install_workspace` | Admin / Install            | Idempotently install OTM into a repository                                 |
+| `otm_doctor`            | Admin / Diagnostics        | Diagnose OTM storage, active route state, current files, and install state |
 
 ### CLI Interface
+
 ```bash
 otm install [--workspace PATH] [--dry-run] [--with-project-mcp-config]
             [--agents-file AGENTS.override.md]
@@ -252,14 +258,14 @@ Workspace State (.codex/overtli-task-manager/)
 
 ### State Files
 
-| File / Folder | Purpose |
-|---|---|
-| `current.json` / `current.md` | Workspace-wide index; never use it as a mutable route when session scoping is active |
-| `sessions/<session-key>/current.md` | Chat-friendly canonical route checklist for one Codex session |
-| `sessions/<session-key>/current.json.checklist` | Compact machine-readable checklist for that session's UIs and hooks |
-| `cache/tmp` | Atomic write staging and stale `current.*.tmp` cleanup |
-| `cache/scratch` | Short-lived raw tool payloads referenced by route evidence |
-| `summaries/` | Historical turn summaries |
+| File / Folder                                   | Purpose                                                                              |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `current.json` / `current.md`                   | Workspace-wide index; never use it as a mutable route when session scoping is active |
+| `sessions/<session-key>/current.md`             | Chat-friendly canonical route checklist for one Codex session                        |
+| `sessions/<session-key>/current.json.checklist` | Compact machine-readable checklist for that session's UIs and hooks                  |
+| `cache/tmp`                                     | Atomic write staging and stale `current.*.tmp` cleanup                               |
+| `cache/scratch`                                 | Short-lived raw tool payloads referenced by route evidence                           |
+| `summaries/`                                    | Historical turn summaries                                                            |
 
 `otm_clear_current` cleans active state plus OTM-owned temp/scratch files at
 route completion. `otm_cleanup_workspace` exposes the same cleanup directly.
@@ -269,12 +275,12 @@ preserving active, blocked, and paused routes.
 
 ### Route Display
 
-| Moment | Rendered Output |
-|---|---|
-| Route start | Full checklist |
-| Routine progress | Compact status card |
-| Steering or manual status | Full snapshot |
-| Finalization | Full completion summary |
+| Moment                    | Rendered Output         |
+| ------------------------- | ----------------------- |
+| Route start               | Full checklist          |
+| Routine progress          | Compact status card     |
+| Steering or manual status | Full snapshot           |
+| Finalization              | Full completion summary |
 
 Each session-scoped `current.json` tracks render metadata (`renderRevision`, `lastRenderedMode`,
 `lastRenderedTaskId`, `lastRenderedHash`) so agents and UIs can avoid repeating
@@ -318,12 +324,12 @@ override allows it.
 
 ### Internal Step Gates
 
-| Rule | Effect |
-|---|---|
-| Internal steps normalize to `{ id, title, status }` records | Handoffs can resume at the exact checkpoint |
-| `otm_progress` updates steps by id, title, index, or object | Step status changes are visible as work happens |
-| `done` and `skipped` are terminal | Pending, active, or blocked steps prevent parent completion |
-| `otm_complete_task` still needs segment evidence | Internal steps alone do not open the stop gate |
+| Rule                                                        | Effect                                                      |
+| ----------------------------------------------------------- | ----------------------------------------------------------- |
+| Internal steps normalize to `{ id, title, status }` records | Handoffs can resume at the exact checkpoint                 |
+| `otm_progress` updates steps by id, title, index, or object | Step status changes are visible as work happens             |
+| `done` and `skipped` are terminal                           | Pending, active, or blocked steps prevent parent completion |
+| `otm_complete_task` still needs segment evidence            | Internal steps alone do not open the stop gate              |
 
 When a task has no explicit internal steps, OTM creates category-aware defaults
 for implementation, docs/review, validation, install/setup, and final-summary
@@ -331,14 +337,14 @@ work. Fallback-planner tasks keep their own actionable steps.
 
 ### Hooks And Completion
 
-| Area | Behavior |
-|---|---|
-| MCP results | Markdown/plain-text first; full JSON remains available through `otm://current` |
-| Passive hooks | Touch route state only when the current Codex session is identifiable |
-| Duplicate installs | Cross-process invocation claims suppress duplicate global/workspace hook output |
-| Evidence tracking | Defaults to file edits, validation/build commands, failures, and explicit OTM checkpoints |
-| Opt-ins | `OTM_RECORD_PRE_TOOL=1`, `OTM_TRACK_MCP_EVIDENCE=1`, `OTM_STOP_AUTO_FINALIZE=1`, `OTM_CLAIM_LEGACY_ROUTE=1`; project-instruction sync additionally requires both `OTM_AUTO_SYNC_AGENTS=1` and `OTM_TRUSTED_INSTALLATION=1` |
-| Hook timeouts | SessionStart 15s, UserPromptSubmit 12s, PreToolUse 8s, PostToolUse 12s, Pre/PostCompact 15s, Stop 45s |
+| Area               | Behavior                                                                                                                                                                                                                   |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| MCP results        | Markdown/plain-text first; full JSON remains available through `otm://current`                                                                                                                                             |
+| Passive hooks      | Touch route state only when the current Codex session is identifiable                                                                                                                                                      |
+| Duplicate installs | Cross-process invocation claims suppress duplicate global/workspace hook output                                                                                                                                            |
+| Evidence tracking  | Defaults to file edits, validation/build commands, failures, and explicit OTM checkpoints                                                                                                                                  |
+| Opt-ins            | `OTM_RECORD_PRE_TOOL=1`, `OTM_TRACK_MCP_EVIDENCE=1`, `OTM_STOP_AUTO_FINALIZE=1`, `OTM_CLAIM_LEGACY_ROUTE=1`; project-instruction sync additionally requires both `OTM_AUTO_SYNC_AGENTS=1` and `OTM_TRUSTED_INSTALLATION=1` |
+| Hook timeouts      | SessionStart 15s, UserPromptSubmit 12s, PreToolUse 8s, PostToolUse 12s, Pre/PostCompact 15s, Stop 45s                                                                                                                      |
 
 Normal closeout is model-visible: run `otm_audit_stop`, call
 `otm_finalize_turn`, show the returned Markdown summary, then call

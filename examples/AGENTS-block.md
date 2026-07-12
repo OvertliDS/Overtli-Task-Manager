@@ -1,4 +1,5 @@
 <!-- OVERTLI-TASK-MANAGER:BEGIN v1 -->
+
 ## Overtli Task Manager protocol
 
 For every non-trivial Codex task in this workspace:
