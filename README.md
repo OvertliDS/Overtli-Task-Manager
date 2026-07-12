@@ -64,6 +64,7 @@ npm install
 | `OTM_CLAIM_LEGACY_ROUTE` | `0` | Set to `1` only to explicitly adopt a legacy unscoped route. |
 | `OTM_AUTO_SYNC_AGENTS` | disabled | Set to `1` to request managed `AGENTS.md` block synchronization; it also requires `OTM_TRUSTED_INSTALLATION=1`. |
 | `OTM_TRUSTED_INSTALLATION` | disabled | Set to `1` only for a trusted OTM installation. Required together with `OTM_AUTO_SYNC_AGENTS=1` before a session hook may modify `AGENTS.md`. |
+| `OTM_AUTO_START_ROUTE` | enabled | Set to `0` to disable automatic creation of an OTM route for a substantive new prompt. This creates OTM's durable route, not a host-native Codex goal. |
 | `OTM_AUTO_INSTALL_GLOBAL` | disabled | Set to `1` only to explicitly permit postinstall global setup. |
 | `OTM_RECORD_PRE_TOOL` | disabled | Set to `1` to record pre-tool observations. |
 | `OTM_TRACK_MCP_EVIDENCE` | disabled | Set to `1` to record configured MCP tool evidence. |
@@ -348,6 +349,15 @@ released, and Stop-hook execution failures fail open with a warning. These are
 termination safeguards: they prevent an invalid or duplicate hook from burning
 tokens indefinitely while explicit `otm_audit_stop` remains the authoritative
 completion check.
+
+For a substantive new implementation request, `UserPromptSubmit` creates the
+session-scoped OTM route before the model edits files unless
+`OTM_AUTO_START_ROUTE=0`. The route planner keeps listed phases as ordered
+segments and activates one segment at a time. Completing a task requires its
+terminal internal steps plus evidence; completion then atomically activates the
+next eligible task. OTM preserves this durable route across pauses and session
+reloads. It cannot create Codex platform-native goals because the host does not
+expose that capability to MCP servers or hook scripts.
 
 ---
 

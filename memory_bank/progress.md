@@ -144,6 +144,12 @@
 - [x] Verified: coverage passed at 92.07% overall, with manager 95.74%, JSON 96.61%, SQLite 95.39%, and validation 98.33%; lint, format, checked syntax/type, package dry-run, and diff checks passed.
 - [x] Verified: implementation committed locally as `e9e3219ff437497c851c72c3a79f0c8e16b80837` on `codex/full-production-hardening`; no remote push was requested or performed. The pre-existing deleted `AGENTS.md` and `.codex-plugin/plugin.json` remain intentionally unstaged.
 
+## 2026-07-11 - Automatic route start and continuation flow
+
+- [x] Verified: UserPromptSubmit now auto-creates one durable OTM route for a substantive new request (unless `OTM_AUTO_START_ROUTE=0`), returns the active segment in host guidance, and explicitly directs Codex to continue to the next returned active task after an evidence-gated completion.
+- [x] Verified: OTM still cannot create a host-native Codex goal because the platform does not expose that private capability to MCP/hooks; documentation distinguishes the durable OTM route from a native goal.
+- [x] Verified: explicit “only phase/task” phrasing constrains planner extraction so unrelated listed phases are not promoted into required execution work.
+
 ## 2026-07-11 - Static unsafe-leftover sweep
 
 - [x] Verified: repository sweep found no `INSERT OR REPLACE`, unguarded raw external IDs in filesystem paths, or placeholder/TODO implementation markers in runtime code.

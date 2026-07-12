@@ -42,6 +42,45 @@ test('duplicate hook commands emit user guidance only once per host invocation',
   assert.equal(duplicate.result.hookSpecificOutput, undefined);
 });
 
+test('a substantive new prompt creates one durable route and directs Codex to continue its active segment', async () => {
+  const workspaceRoot = workspace();
+  const hookEnv = { ...env('otm-hook-auto-start'), CODEX_THREAD_ID: 'auto-start-session' };
+  const payload = {
+    cwd: workspaceRoot,
+    hook_event_name: 'UserPromptSubmit',
+    invocation_id: 'auto-start-invocation',
+    session_id: 'auto-start-session',
+    prompt: 'Implement the following large release: Phase 1: repair the lifecycle. Phase 2: add migration tests. Phase 3: update documentation.'
+  };
+  const first = await capture(() => runHookScript('user-prompt-submit', { cwd: workspaceRoot, env: hookEnv, stdin: JSON.stringify(payload) }));
+  const manager = createTaskManager({ cwd: workspaceRoot, env: hookEnv });
+  const snapshot = manager.snapshot({ workspaceRoot, sessionId: 'auto-start-session', write: false }).snapshot;
+  assert.ok(first.result.otmRoute?.runId);
+  assert.equal(snapshot.status, 'active');
+  assert.ok(snapshot.tasks.length >= 3);
+  assert.equal(snapshot.tasks.filter((task) => task.status === 'active').length, 1);
+  assert.equal(snapshot.currentTaskId, first.result.otmRoute.currentTaskId);
+  assert.match(first.result.hookSpecificOutput.additionalContext, /route was created automatically/i);
+  assert.match(first.result.hookSpecificOutput.additionalContext, /immediately continue work on the returned active next segment/i);
+
+  const duplicate = await capture(() => runHookScript('user-prompt-submit', { cwd: workspaceRoot, env: hookEnv, stdin: JSON.stringify(payload) }));
+  assert.equal(duplicate.result.otmRoute, undefined);
+  assert.equal(manager.store.listActiveRuns(workspaceRoot).filter((run) => run.sessionId === 'auto-start-session').length, 1);
+});
+
+test('auto-start can be explicitly disabled without weakening existing-route continuation', async () => {
+  const workspaceRoot = workspace();
+  const hookEnv = { ...env('otm-hook-auto-start-disabled'), CODEX_THREAD_ID: 'auto-start-disabled', OTM_AUTO_START_ROUTE: '0' };
+  const result = await capture(() => runHookScript('user-prompt-submit', {
+    cwd: workspaceRoot,
+    env: hookEnv,
+    stdin: JSON.stringify({ cwd: workspaceRoot, session_id: 'auto-start-disabled', prompt: 'Implement a significant hook and lifecycle repair.' })
+  }));
+  const manager = createTaskManager({ cwd: workspaceRoot, env: hookEnv });
+  assert.equal(manager.snapshot({ workspaceRoot, sessionId: 'auto-start-disabled', write: false }).run, null);
+  assert.match(result.result.hookSpecificOutput.additionalContext, /call otm_start/i);
+});
+
 test('repeated Stop feedback is released and cannot create an unbounded loop', async () => {
   const workspaceRoot = workspace();
   const hookEnv = { ...env('otm-stop-repeat'), CODEX_THREAD_ID: 'repeat-session', OTM_DEDUPE_HOOKS: '0' };

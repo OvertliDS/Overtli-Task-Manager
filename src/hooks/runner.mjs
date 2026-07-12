@@ -8,6 +8,7 @@ import { reviewProjectContext } from '../context/project-review.mjs';
 import { patchAgentsFile } from '../install/agent-block.mjs';
 import { resolveSessionId } from '../core/session-scope.mjs';
 import { redactSensitiveText } from '../core/validation.mjs';
+import { compactOneLine } from '../core/text-utils.mjs';
 
 export async function runHookScript(eventName, { stdin = '', cwd = process.cwd(), env = process.env } = {}) {
   const input = parseJson(stdin, {});
@@ -93,24 +94,56 @@ function handleUserPromptSubmit(manager, input, workspaceRoot, env) {
   if (classification === 'empty' || classification === 'simple') {
     return { continue: true, suppressOutput: true };
   }
+  // The MCP server cannot create a host-native Codex goal, but it can create
+  // the durable, session-scoped OTM route immediately. That removes the
+  // fragile "model must remember to call otm_start" gap for substantive new
+  // requests while retaining model-controlled evidence and task completion.
+  let autoRoute = null;
+  if (!active && classification === 'new_route' && env.OTM_AUTO_START_ROUTE !== '0') {
+    const prompt = String(input.prompt || '').trim();
+    autoRoute = manager.start({
+      workspaceRoot,
+      sessionId,
+      turnId: input.turn_id || input.turnId || null,
+      goal: compactOneLine(prompt, 180) || 'Complete the requested Codex work',
+      prompt,
+      context: input.context,
+      promptContext: input.prompt_context || input.promptContext,
+      attachments: input.attachments,
+      screenshots: input.screenshots || input.images,
+      source: 'hook-auto-start',
+      hookEventName: input.hook_event_name || input.hookEventName || 'UserPromptSubmit',
+      invocationId: input.invocation_id || input.invocationId || input.hook_id || input.hookId || null,
+      operationId: input.invocation_id || input.invocationId || input.hook_id || input.hookId || null
+    });
+  }
   const action = active && ['continue', 'steer'].includes(classification) ? 'otm_reconcile' : 'otm_start';
+  const effectiveRun = autoRoute?.run || active;
+  const activeTask = autoRoute?.snapshot?.tasks?.find((task) => task.id === autoRoute.snapshot.currentTaskId) || null;
   const additionalContext = [
     'Overtli Task Manager protocol is active for this turn.',
     `Prompt classification: ${classification}.`,
-    `Before editing files or running implementation commands, call ${action} with workspaceRoot set to ${workspaceRoot}.`,
+    autoRoute
+      ? `A durable OTM route was ${autoRoute.reused ? 'reused' : 'created'} automatically for this substantive request. Begin the active segment now${activeTask ? `: ${activeTask.title}` : ''}.`
+      : `Before editing files or running implementation commands, call ${action} with workspaceRoot set to ${workspaceRoot}.`,
     `This Codex chat is isolated as session ${sessionId || '(unscoped legacy client)'}; OTM tools resolve CODEX_THREAD_ID automatically, so do not reuse route ids from another chat or workspace.`,
     'Before that call, thoroughly analyze the full user request and all context available to you, including inline chat text, attached files, screenshots/images you can inspect, OCR/descriptions, IDE context, and prior steering in this turn.',
     'Create route segments from the main current-scope phases, steps, issues, problems, and deliverables the model identifies; do not collapse distinct requested work into a vague segment like "fix all issues".',
     'Pass those model-derived route segments in the tasks array, with concise titles plus metadata.internalSteps or internalSteps for explicit, inferred, researched, and discovered subwork.',
     'If the user is only asking for a phase plan, roadmap, review, or documentation rather than implementation now, make the route reflect that planning/documentation task instead of converting it into implementation work.',
     'Show the returned Markdown checklist snapshot in chat.',
-    'Keep exactly one active route segment when possible; mark completion only with concrete evidence.',
+    'Keep exactly one active route segment when possible; mark completion only with concrete evidence. After a valid otm_complete_task call, immediately continue work on the returned active next segment instead of stopping or sending a final answer.',
     'Before task-scoped OTM calls, use exact task ids from the latest OTM snapshot/current.json; never guess ids from titles, memory, or prior route state.',
     'Mark internal steps complete with otm_progress as the work happens; complete the parent task only after all required internal steps are terminal and segment-level evidence exists.',
-    'If the user steers, reconcile before continuing. Before final response, call otm_audit_stop. If required tasks remain, continue working.',
+    'If the user steers, reconcile before continuing. A pause preserves this route by workspace/session; on a later continue/resume prompt, load the active snapshot and proceed from its current task. Before final response, call otm_audit_stop. If required tasks remain, continue working.',
     'When the audit passes, call otm_finalize_turn, show the returned Markdown summary to the user, then call otm_clear_current.'
   ].join('\n');
-  return { continue: true, suppressOutput: true, hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext } };
+  return {
+    continue: true,
+    suppressOutput: true,
+    hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext },
+    ...(autoRoute ? { otmRoute: { runId: effectiveRun.id, currentTaskId: autoRoute.snapshot.currentTaskId, reused: autoRoute.reused } } : {})
+  };
 }
 
 function handlePreToolUse(manager, input, workspaceRoot, env) {

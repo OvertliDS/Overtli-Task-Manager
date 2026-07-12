@@ -72,3 +72,16 @@ test('planner preserves overflow and excludes constraints/non-goals from require
   assert.equal(plan.metadata.omittedItemCount, 0);
   assert.ok(Array.isArray(plan.metadata.reasons));
 });
+
+test('planner honors an explicit only-phase execution scope inside a larger pasted phase list', () => {
+  const plan = planFallbackRoute(`
+Only complete Phase 2.
+Phase 1: Refactor the storage contract.
+Phase 2: Repair hook continuation and test it.
+Phase 3: Publish the release notes.
+`, { goal: 'Complete only phase 2' });
+  const requested = plan.tasks.filter((task) => /Phase|Repair hook continuation|storage contract|release notes/i.test(task.title));
+  assert.equal(requested.length, 1);
+  assert.match(requested[0].title, /Repair hook continuation/i);
+  assert.doesNotMatch(JSON.stringify(requested), /storage contract|release notes/i);
+});

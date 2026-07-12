@@ -115,8 +115,28 @@ function extractRoutePoints(text) {
   points.push(...extractSequencedActionPoints(text));
   // Do not silently drop requested work.  The manager enforces the durable
   // maximum and can return structured overflow when a caller configures one.
-  const unique = dedupePoints(points);
-  return unique.length >= 2 ? unique : [];
+  const unique = filterExplicitExecutionScope(dedupePoints(points), text);
+  return unique;
+}
+
+function filterExplicitExecutionScope(points, text) {
+  // A large pasted plan may deliberately narrow execution to one numbered
+  // phase/task. Do not promote the rest of that plan into required work just
+  // because it shares the same prompt. Keep the original item when it is the
+  // only actionable point so fallback planning can still construct a route.
+  const match = /\b(?:only|just)\s+(?:complete|implement|work\s+on|do|handle|fix|finish)?\s*(?:the\s+)?(phase|step|task)\s*([a-z0-9][\w.-]*)\b/i.exec(String(text || ''));
+  if (!match) return points;
+  const [, kind, identifier] = match;
+  // A trailing period in prose ("only complete Phase 2.") is not the
+  // numbered route item itself. Require a route-style separator so that prose
+  // mention cannot accidentally capture the following Phase 1 line.
+  const directItem = new RegExp(`^\\s*(?:[-*+]\\s+|\\d+[.)]\\s+)?${escapeRegExp(kind)}\\s*${escapeRegExp(identifier)}\\s*[:)\\-]`, 'i');
+  const scoped = points.filter((point) => directItem.test(String(point.original || '')));
+  return scoped.length ? scoped : points;
+}
+
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function routePointFromLine(line) {

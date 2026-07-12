@@ -44,6 +44,15 @@ Session hooks do not mutate project instructions by default. Managed
 sync is disabled and leaves project files unchanged. The explicit workspace
 installer remains the normal way to add OTM-managed instruction blocks.
 
+For substantive new prompts, the `UserPromptSubmit` hook creates the durable
+OTM route directly unless `OTM_AUTO_START_ROUTE=0`. This is deliberately an
+OTM domain route rather than a host-native Codex goal: MCP servers and hooks
+cannot invoke Codex's private goal-control API. The manager, not the hook,
+remains the authority for task completion. It requires terminal internal steps
+and completion evidence, then atomically marks the completed task done and
+activates the next eligible task in route order. A pause leaves the scoped run
+durable; session/continuation hooks reload its active checkpoint.
+
 Tasks are the stop-gated route checkpoints. Each task may also carry
 `metadata.internalSteps`, which are normalized from model-supplied strings or
 objects into durable `{ id, title, status }` records. These records preserve the

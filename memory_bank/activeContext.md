@@ -26,13 +26,12 @@ Full production-hardening remediation against baseline `24e2ab5d0ce7c8481bdccf01
 
 ## Latest verification
 
-- `npm ci --foreground-scripts`: completed cleanly; `better-sqlite3@11.10.0` compiled and loaded as SQLite `3.49.2` under Node `24.14.1`. Postinstall explicitly skipped global setup.
-- `npm test`: 131 pass, 0 fail, 0 skipped (SQLite required), including JSON/SQLite conformance, migration, process-race, MCP, installer, security/path, hook, project-review, planner, and renderer suites.
-- `npm run coverage`: passed at 92.07% overall; manager 95.74%, JSON 96.61%, SQLite 95.39%, and validation 98.33%, exceeding critical-module line gates of >=90% and the overall >=85% gate.
+- `npm test`: 134 pass, 0 fail, 0 skipped (SQLite required), including automatic route-start/continuation and only-phase planner regressions in addition to JSON/SQLite conformance, migration, process-race, MCP, installer, security/path, hook, project-review, planner, and renderer suites.
+- `npm run coverage`: passed at 91.85% overall; manager 94.14%, JSON 96.16%, SQLite 95.39%, and validation 98.33%, exceeding critical-module line gates of >=90% and the overall >=85% gate.
 - `npm run lint`, `npm run format:check`, `npm run type:check`, and `npm run syntax:check` passed (61 modules).
 - `npm pack --dry-run`: completed successfully for `@overtli/task-manager@0.2.0` (81 packaged files).
 - `git diff --check`: completed; only Git line-ending warnings were emitted.
 
 ## Exact next action
 
-Production-hardening remediation was committed locally as `e9e3219ff437497c851c72c3a79f0c8e16b80837` without a remote push. The working tree intentionally retains the pre-existing unstaged deletions of `AGENTS.md` and `.codex-plugin/plugin.json`; do not restore, stage, or discard them without explicit user direction.
+Commit the verified automatic OTM route-start/continuation follow-up without pushing it. The working tree intentionally retains the pre-existing unstaged deletions of `AGENTS.md` and `.codex-plugin/plugin.json`; do not restore, stage, or discard them without explicit user direction.
