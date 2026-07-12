@@ -9,6 +9,7 @@
 - Keep README and skills aligned with actual tool behavior.
 
 <!-- OVERTLI-TASK-MANAGER:BEGIN v1 -->
+
 ## Overtli Task Manager protocol
 
 For every non-trivial Codex task in this workspace:

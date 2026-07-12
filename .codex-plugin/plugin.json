@@ -9,14 +9,7 @@
   "homepage": "https://github.com/OvertliDS/Overtli-Task-Manager",
   "repository": "https://github.com/OvertliDS/Overtli-Task-Manager",
   "license": "MIT",
-  "keywords": [
-    "codex",
-    "mcp",
-    "checklist",
-    "task-manager",
-    "hooks",
-    "skills"
-  ],
+  "keywords": ["codex", "mcp", "checklist", "task-manager", "hooks", "skills"],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "hooks": "./hooks/hooks.json",
@@ -26,10 +19,7 @@
     "longDescription": "Keep Codex organized with evidence-backed route segments, chat-visible progress, project-specific context cache, lifecycle hooks, and stop-audit enforcement.",
     "developerName": "OvertliDS",
     "category": "Productivity",
-    "capabilities": [
-      "Read",
-      "Write"
-    ],
+    "capabilities": ["Read", "Write"],
     "websiteURL": "https://github.com/OvertliDS/Overtli-Task-Manager",
     "brandColor": "#111827",
     "defaultPrompt": [
