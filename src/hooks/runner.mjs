@@ -382,19 +382,21 @@ function handleStop(manager, input, workspaceRoot, env) {
   });
   if (!audit.run) return { continue: true, suppressOutput: true };
   if (!audit.stopAllowed) {
-    const remaining = audit.remainingRequired
-      .map((task) => `- ${task.title} (${task.status})`)
-      .join("\n");
+    const current =
+      audit.remainingRequired.find(
+        (task) => task.id === audit.run.currentTaskId,
+      ) || audit.remainingRequired[0];
+    const remainingCount = audit.remainingRequired.length;
     return {
       decision: "block",
-      reason: `Overtli Task Manager audit blocked the stop. Continue the route until required segments are complete:\n${remaining}\n\nUse OTM progress updates, complete tasks only with evidence, then run otm_audit_stop again.`,
+      reason: `Overtli Task Manager audit blocked the stop. Continue the current route segment: ${current.title} (${current.status}). ${remainingCount > 1 ? `${remainingCount - 1} later required segment${remainingCount === 2 ? "" : "s"} remain queued.` : "This is the final required segment."}\n\nRecord the next concrete internal-step evidence, complete this segment only when its required internal steps are terminal, then continue directly to the returned next segment. The hook will finalize and clear automatically once the audit passes.`,
     };
   }
-  if (env.OTM_STOP_AUTO_FINALIZE !== "1") {
+  if (env.OTM_STOP_AUTO_FINALIZE === "0") {
     return {
       decision: "block",
       reason:
-        "Overtli Task Manager audit passed, but visible finalization must be model-driven. Call otm_finalize_turn, show its Markdown summary to the user, then call otm_clear_current before sending the final response. Set OTM_STOP_AUTO_FINALIZE=1 only when you intentionally want the Stop hook to auto-finalize as a fallback.",
+        "Overtli Task Manager audit passed. Automatic finalization is disabled for this session; call otm_finalize_turn, show its Markdown summary, then call otm_clear_current before the final response.",
     };
   }
   try {
