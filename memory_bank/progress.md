@@ -155,6 +155,7 @@
 - [x] Verified: Installed `SessionStart` and `UserPromptSubmit` hooks now create or refresh only OTM's marker-delimited root `AGENTS.md` block by default; `OTM_AUTO_SYNC_AGENTS=0` is the explicit opt-out. The focused and full suites cover creation, safe refresh, and opt-out behavior.
 - [x] Verified: The managed block and substantive-prompt context direct the Codex agent to create one host-native goal when available, keep it active across every OTM route segment, and terminally update it only after the OTM stop audit. Hooks/MCP remain unable to invoke the private host goal API directly; the full suite covers the emitted handoff context.
 - [x] Verified: The active global plugin checkout received the two runtime files and passed live disposable-workspace smokes for both SessionStart creation and UserPromptSubmit repair/native-goal handoff. No global hook configuration rewrite was required.
+- [x] Verified: Released as `d399d9a20f4d11d62516fc7d23bcf31e857d6f07` (`fix(hooks): sync root agents and native goals`) on `origin/codex/full-production-hardening`. The global plugin checkout was fast-forwarded to the same SHA, `install-global` completed, all seven managed hook events and four packaged skills were confirmed, the `overtli_task_manager` MCP registration remained enabled, and an installed prompt-hook smoke recreated `AGENTS.md` with native-goal guidance.
 
 ## 2026-07-11 - Static unsafe-leftover sweep
 

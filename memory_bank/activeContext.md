@@ -38,4 +38,4 @@ This follow-up additionally changes `src/install/agent-block.mjs`, `src/hooks/ru
 
 ## Exact next action
 
-No required implementation work remains. The source and installed global plugin each retain the uncommitted runtime changes to `src/hooks/runner.mjs` and `src/install/agent-block.mjs`; the source worktree also retains pre-existing unstaged deletions of `AGENTS.md` and `.codex-plugin/plugin.json`. Do not restore, stage, discard, commit, or push those files without explicit user direction.
+No required implementation work remains. Commit `d399d9a20f4d11d62516fc7d23bcf31e857d6f07` (`fix(hooks): sync root agents and native goals`) is pushed to `origin/codex/full-production-hardening`; the installed global plugin was fast-forwarded to the same commit and `install-global` completed. The source worktree retains only the pre-existing unstaged deletion of `.codex-plugin/plugin.json`; do not restore, stage, discard, commit, or push that file without explicit user direction.
