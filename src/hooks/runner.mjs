@@ -133,20 +133,13 @@ function handleSessionStart(manager, input, workspaceRoot, env) {
 }
 
 function syncAgentsInstructions(workspaceRoot, env) {
-  // Session hooks run in repositories that may not have been explicitly
-  // installed or trusted for OTM-managed files. Never create or alter an
-  // AGENTS file merely because a hook was discovered: both synchronization
-  // and trust must be deliberately opted in by the installation owner.
-  if (env.OTM_AUTO_SYNC_AGENTS !== "1") {
+  // An installed OTM hook owns only its marker-delimited block and is the
+  // reliable place to keep its instructions current. An explicit opt-out is
+  // still available for repositories that must not receive managed guidance.
+  if (env.OTM_AUTO_SYNC_AGENTS === "0") {
     return {
       ok: true,
-      action: "disabled (set OTM_AUTO_SYNC_AGENTS=1 to enable)",
-    };
-  }
-  if (env.OTM_TRUSTED_INSTALLATION !== "1") {
-    return {
-      ok: true,
-      action: "not synchronized because OTM_TRUSTED_INSTALLATION=1 is required",
+      action: "disabled (set OTM_AUTO_SYNC_AGENTS=1 to re-enable)",
     };
   }
   try {
@@ -158,6 +151,10 @@ function syncAgentsInstructions(workspaceRoot, env) {
 
 function handleUserPromptSubmit(manager, input, workspaceRoot, env) {
   const sessionId = resolveSessionId(input, env);
+  // SessionStart can be skipped by clients that attach hooks after opening a
+  // workspace. Recheck here so the first substantive prompt still creates or
+  // refreshes the root instruction block.
+  const agentsSync = syncAgentsInstructions(workspaceRoot, env);
   const active = sessionId
     ? manager.snapshot({ workspaceRoot, sessionId, write: false }).run
     : null;
@@ -215,6 +212,9 @@ function handleUserPromptSubmit(manager, input, workspaceRoot, env) {
   const additionalContext = [
     "Overtli Task Manager protocol is active for this turn.",
     `Prompt classification: ${classification}.`,
+    agentsSync.ok
+      ? `Root AGENTS.md managed instructions: ${agentsSync.action}.`
+      : `Root AGENTS.md managed instructions were not synchronized: ${agentsSync.reason}`,
     autoRoute
       ? `A durable OTM route was ${autoRoute.reused ? "reused" : "created"} automatically for this substantive request. Begin the active segment now${activeTask ? `: ${activeTask.title}` : ""}.`
       : `Before editing files or running implementation commands, call ${action} with workspaceRoot set to ${workspaceRoot}.`,
@@ -224,6 +224,7 @@ function handleUserPromptSubmit(manager, input, workspaceRoot, env) {
     "Pass those model-derived route segments in the tasks array, with concise titles plus metadata.internalSteps or internalSteps for explicit, inferred, researched, and discovered subwork.",
     "If the user is only asking for a phase plan, roadmap, review, or documentation rather than implementation now, make the route reflect that planning/documentation task instead of converting it into implementation work.",
     "Show the returned Markdown checklist snapshot in chat.",
+    "Use Codex native goal control now when it is available: create one goal if this chat has none, with an objective that requires completion of every requested phase and task. Keep that goal active while OTM tracks detailed route progress; only mark it complete after the OTM stop audit passes, or blocked after a genuine unresolved blocker.",
     "Keep exactly one active route segment when possible; mark completion only with concrete evidence. After a valid otm_complete_task call, immediately continue work on the returned active next segment instead of stopping or sending a final answer.",
     "Before task-scoped OTM calls, use exact task ids from the latest OTM snapshot/current.json; never guess ids from titles, memory, or prior route state.",
     "Mark internal steps complete with otm_progress as the work happens; complete the parent task only after all required internal steps are terminal and segment-level evidence exists.",

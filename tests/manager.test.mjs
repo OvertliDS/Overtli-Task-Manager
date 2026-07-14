@@ -44,6 +44,8 @@ function testEnv(name) {
   const env = { ...process.env, OTM_STORAGE: "json", OTM_STATE_DIR: stateDir };
   delete env.CODEX_THREAD_ID;
   delete env.OTM_SESSION_ID;
+  delete env.OTM_AUTO_SYNC_AGENTS;
+  delete env.OTM_TRUSTED_INSTALLATION;
   return env;
 }
 
@@ -2061,11 +2063,7 @@ test("workspace discovery prefers the enclosing git root over nested package man
 
 test("session start creates and refreshes only the managed AGENTS.md block", async () => {
   const emptyWorkspace = tempWorkspace("otm-session-agents-create-");
-  const env = {
-    ...testEnv("session-agents"),
-    OTM_AUTO_SYNC_AGENTS: "1",
-    OTM_TRUSTED_INSTALLATION: "1",
-  };
+  const env = testEnv("session-agents");
   const created = await withCapturedStdout(() =>
     runHookScript("session-start", {
       cwd: emptyWorkspace,
@@ -2146,10 +2144,13 @@ test("session start creates and refreshes only the managed AGENTS.md block", asy
   );
 });
 
-test("session start never creates or mutates AGENTS.md without explicit trusted synchronization", async () => {
-  const emptyWorkspace = tempWorkspace("otm-session-agents-default-disabled-");
-  const env = testEnv("session-agents-default-disabled");
-  const emptyResult = await withCapturedStdout(() =>
+test("session start honors explicit AGENTS.md synchronization opt-out", async () => {
+  const emptyWorkspace = tempWorkspace("otm-session-agents-opt-out-");
+  const env = {
+    ...testEnv("session-agents-opt-out"),
+    OTM_AUTO_SYNC_AGENTS: "0",
+  };
+  const result = await withCapturedStdout(() =>
     runHookScript("session-start", {
       cwd: emptyWorkspace,
       env,
@@ -2162,32 +2163,40 @@ test("session start never creates or mutates AGENTS.md without explicit trusted 
   );
   assert.equal(fs.existsSync(path.join(emptyWorkspace, "AGENTS.md")), false);
   assert.match(
-    emptyResult.result.systemMessage,
+    result.result.systemMessage,
     /AGENTS\.md managed instructions: disabled/,
   );
+});
 
-  const workspaceRoot = tempWorkspace("otm-session-agents-untrusted-");
-  const agentsPath = path.join(workspaceRoot, "AGENTS.md");
-  const original = "# Existing guidance\n\nDo not change this file.\n";
-  fs.writeFileSync(agentsPath, original, "utf8");
-  const untrusted = await withCapturedStdout(() =>
-    runHookScript("session-start", {
+test("substantive prompt repairs root AGENTS.md and requests a native Codex goal", async () => {
+  const workspaceRoot = tempWorkspace("otm-prompt-agents-goal-");
+  const env = {
+    ...testEnv("prompt-agents-goal"),
+    CODEX_THREAD_ID: "prompt-agents-goal-session",
+  };
+  const result = await withCapturedStdout(() =>
+    runHookScript("user-prompt-submit", {
       cwd: workspaceRoot,
-      env: {
-        ...testEnv("session-agents-untrusted"),
-        OTM_AUTO_SYNC_AGENTS: "1",
-      },
+      env,
       stdin: JSON.stringify({
         cwd: workspaceRoot,
-        hook_event_name: "SessionStart",
-        invocation_id: "agents-untrusted",
+        session_id: "prompt-agents-goal-session",
+        hook_event_name: "UserPromptSubmit",
+        invocation_id: "prompt-agents-goal",
+        prompt: "Implement and verify every phase of the requested release.",
       }),
     }),
   );
-  assert.equal(fs.readFileSync(agentsPath, "utf8"), original);
+  const agents = fs.readFileSync(path.join(workspaceRoot, "AGENTS.md"), "utf8");
+  assert.match(agents, /OVERTLI-TASK-MANAGER:BEGIN/);
+  assert.match(agents, /native goal controls/);
   assert.match(
-    untrusted.result.systemMessage,
-    /OTM_TRUSTED_INSTALLATION=1 is required/,
+    result.result.hookSpecificOutput.additionalContext,
+    /Use Codex native goal control now/i,
+  );
+  assert.match(
+    result.result.hookSpecificOutput.additionalContext,
+    /only mark it complete after the OTM stop audit passes/i,
   );
 });
 

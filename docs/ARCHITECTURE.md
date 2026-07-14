@@ -38,20 +38,24 @@ protects common secret forms,
 but OTM is not a credential store and users must not intentionally supply
 secrets as route input.
 
-Session hooks do not mutate project instructions by default. Managed
-`AGENTS.md` synchronization requires both `OTM_AUTO_SYNC_AGENTS=1` and
-`OTM_TRUSTED_INSTALLATION=1`; when either is absent, the hook reports that
-sync is disabled and leaves project files unchanged. The explicit workspace
-installer remains the normal way to add OTM-managed instruction blocks.
+Installed session hooks create or refresh only OTM's marker-delimited root
+`AGENTS.md` block by default. `UserPromptSubmit` repeats the repair so a
+workspace opened before the hook was installed still receives current guidance
+on its first substantive prompt. Existing content outside the markers is
+preserved; malformed marker pairs are reported without being overwritten. Set
+`OTM_AUTO_SYNC_AGENTS=0` to opt out.
 
 For substantive new prompts, the `UserPromptSubmit` hook creates the durable
 OTM route directly unless `OTM_AUTO_START_ROUTE=0`. This is deliberately an
 OTM domain route rather than a host-native Codex goal: MCP servers and hooks
-cannot invoke Codex's private goal-control API. The manager, not the hook,
-remains the authority for task completion. It requires terminal internal steps
-and completion evidence, then atomically marks the completed task done and
-activates the next eligible task in route order. A pause leaves the scoped run
-durable; session/continuation hooks reload its active checkpoint.
+cannot invoke Codex's private goal-control API. They instead inject explicit
+goal-control guidance for the Codex agent: create one native goal when the host
+offers that control, keep it active through every OTM segment, and terminally
+update it only after the OTM stop audit. The manager remains the authority for
+task completion. It requires terminal internal steps and completion evidence,
+then atomically marks the completed task done and activates the next eligible
+task in route order. A pause leaves the scoped run durable;
+session/continuation hooks reload its active checkpoint.
 
 Tasks are the stop-gated route checkpoints. Each task may also carry
 `metadata.internalSteps`, which are normalized from model-supplied strings or

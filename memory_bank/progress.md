@@ -110,10 +110,10 @@
 - [x] Verified: finalization now derives turn-summary memory IDs from durable run and summary IDs, so separate routes with the same goal cannot overwrite one another while retries retain one record for the same operation.
 - Verification: focused lifecycle and manager suites, syntax check, and diff check passed.
 
-## 2026-07-11 - Trusted AGENTS synchronization
+## 2026-07-11 - Trusted AGENTS synchronization (Superseded 2026-07-13)
 
-- [x] Implemented - Unverified: SessionStart leaves `AGENTS.md` unmodified by default. Managed instruction synchronization now requires both `OTM_AUTO_SYNC_AGENTS=1` and `OTM_TRUSTED_INSTALLATION=1`, while the explicit workspace installer remains available for intentional setup.
-- [x] Implemented - Unverified: regression coverage exercises a missing `AGENTS.md` and an existing untrusted file, in addition to the trusted marker-only refresh path. README and architecture documentation now describe the two-flag contract.
+- [x] Superseded: SessionStart formerly left `AGENTS.md` unmodified by default and required both `OTM_AUTO_SYNC_AGENTS=1` and `OTM_TRUSTED_INSTALLATION=1`.
+- [x] Superseded: the former trusted-marker regression contract was replaced by default managed sync plus an explicit `OTM_AUTO_SYNC_AGENTS=0` opt-out.
 
 ## 2026-07-11 - Fail-closed current snapshot handling
 
@@ -149,6 +149,12 @@
 - [x] Verified: UserPromptSubmit now auto-creates one durable OTM route for a substantive new request (unless `OTM_AUTO_START_ROUTE=0`), returns the active segment in host guidance, and explicitly directs Codex to continue to the next returned active task after an evidence-gated completion.
 - [x] Verified: OTM still cannot create a host-native Codex goal because the platform does not expose that private capability to MCP/hooks; documentation distinguishes the durable OTM route from a native goal.
 - [x] Verified: explicit “only phase/task” phrasing constrains planner extraction so unrelated listed phases are not promoted into required execution work.
+
+## 2026-07-13 - Root instruction synchronization and native-goal handoff
+
+- [x] Verified: Installed `SessionStart` and `UserPromptSubmit` hooks now create or refresh only OTM's marker-delimited root `AGENTS.md` block by default; `OTM_AUTO_SYNC_AGENTS=0` is the explicit opt-out. The focused and full suites cover creation, safe refresh, and opt-out behavior.
+- [x] Verified: The managed block and substantive-prompt context direct the Codex agent to create one host-native goal when available, keep it active across every OTM route segment, and terminally update it only after the OTM stop audit. Hooks/MCP remain unable to invoke the private host goal API directly; the full suite covers the emitted handoff context.
+- [x] Verified: The active global plugin checkout received the two runtime files and passed live disposable-workspace smokes for both SessionStart creation and UserPromptSubmit repair/native-goal handoff. No global hook configuration rewrite was required.
 
 ## 2026-07-11 - Static unsafe-leftover sweep
 

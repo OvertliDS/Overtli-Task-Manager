@@ -63,8 +63,7 @@ npm install
 | `OTM_SESSION_ID`               | host supplied                                     | Explicit session identity, after request payload fields and before `CODEX_THREAD_ID`.                                                                                                   |
 | `CODEX_THREAD_ID`              | host supplied                                     | Fallback session identity when no explicit request/session ID is available.                                                                                                             |
 | `OTM_CLAIM_LEGACY_ROUTE`       | `0`                                               | Set to `1` only to explicitly adopt a legacy unscoped route.                                                                                                                            |
-| `OTM_AUTO_SYNC_AGENTS`         | disabled                                          | Set to `1` to request managed `AGENTS.md` block synchronization; it also requires `OTM_TRUSTED_INSTALLATION=1`.                                                                         |
-| `OTM_TRUSTED_INSTALLATION`     | disabled                                          | Set to `1` only for a trusted OTM installation. Required together with `OTM_AUTO_SYNC_AGENTS=1` before a session hook may modify `AGENTS.md`.                                           |
+| `OTM_AUTO_SYNC_AGENTS`         | enabled                                           | Set to `0` to stop hooks from creating or refreshing OTM's marker-delimited root `AGENTS.md` block.                                                                                     |
 | `OTM_AUTO_START_ROUTE`         | enabled                                           | Set to `0` to disable automatic creation of an OTM route for a substantive new prompt. This creates OTM's durable route, not a host-native Codex goal.                                  |
 | `OTM_AUTO_INSTALL_GLOBAL`      | disabled                                          | Set to `1` only to explicitly permit postinstall global setup.                                                                                                                          |
 | `OTM_RECORD_PRE_TOOL`          | disabled                                          | Set to `1` to record pre-tool observations.                                                                                                                                             |
@@ -172,7 +171,7 @@ node ~/.codex/plugins/overtli-task-manager/bin/otm.mjs uninstall --global --dry-
 node ~/.codex/plugins/overtli-task-manager/bin/otm.mjs uninstall --global --confirm
 ```
 
-When the plugin's `SessionStart` hook is active, it leaves `AGENTS.md` untouched by default. A deliberately trusted installation may opt into synchronization with both `OTM_AUTO_SYNC_AGENTS=1` and `OTM_TRUSTED_INSTALLATION=1`; only then does OTM create or refresh its managed block in the enclosing Git workspace. Existing content outside markers is preserved, incomplete marker pairs are reported without being overwritten, and nested package manifests do not shadow the enclosing Git root.
+When the plugin's `SessionStart` hook is active, it creates or refreshes only OTM's marker-delimited block in the root `AGENTS.md`. `UserPromptSubmit` repeats that check so a workspace opened before the hook was installed self-repairs on its first prompt. Existing content outside markers is preserved, incomplete marker pairs are reported without being overwritten, and nested package manifests do not shadow the enclosing Git root. Set `OTM_AUTO_SYNC_AGENTS=0` to opt out for a workspace or host environment.
 
 To verify the setup:
 
@@ -337,15 +336,15 @@ work. Fallback-planner tasks keep their own actionable steps.
 
 ### Hooks And Completion
 
-| Area               | Behavior                                                                                                                                                                                       |
-| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| MCP results        | Markdown/plain-text first; full JSON remains available through `otm://current`                                                                                                                 |
-| Passive hooks      | Touch route state only when the current Codex session is identifiable                                                                                                                          |
-| Duplicate installs | Cross-process invocation claims suppress duplicate global/workspace hook output                                                                                                                |
-| Evidence tracking  | Defaults to file edits, validation/build commands, failures, and explicit OTM checkpoints                                                                                                      |
-| Opt-ins            | `OTM_RECORD_PRE_TOOL=1`, `OTM_TRACK_MCP_EVIDENCE=1`, `OTM_CLAIM_LEGACY_ROUTE=1`; project-instruction sync additionally requires both `OTM_AUTO_SYNC_AGENTS=1` and `OTM_TRUSTED_INSTALLATION=1` |
-| Finalization       | Stop-hook finalization is enabled by default; set `OTM_STOP_AUTO_FINALIZE=0` only to require manual finalization and clearing                                                                  |
-| Hook timeouts      | SessionStart 15s, UserPromptSubmit 12s, PreToolUse 8s, PostToolUse 12s, Pre/PostCompact 15s, Stop 45s                                                                                          |
+| Area               | Behavior                                                                                                                                                          |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| MCP results        | Markdown/plain-text first; full JSON remains available through `otm://current`                                                                                    |
+| Passive hooks      | Touch route state only when the current Codex session is identifiable                                                                                             |
+| Duplicate installs | Cross-process invocation claims suppress duplicate global/workspace hook output                                                                                   |
+| Evidence tracking  | Defaults to file edits, validation/build commands, failures, and explicit OTM checkpoints                                                                         |
+| Opt-ins            | `OTM_RECORD_PRE_TOOL=1`, `OTM_TRACK_MCP_EVIDENCE=1`, `OTM_CLAIM_LEGACY_ROUTE=1`; set `OTM_AUTO_SYNC_AGENTS=0` only to opt out of root instruction synchronization |
+| Finalization       | Stop-hook finalization is enabled by default; set `OTM_STOP_AUTO_FINALIZE=0` only to require manual finalization and clearing                                     |
+| Hook timeouts      | SessionStart 15s, UserPromptSubmit 12s, PreToolUse 8s, PostToolUse 12s, Pre/PostCompact 15s, Stop 45s                                                             |
 
 Normal closeout is automatic and model-visible. Run `otm_audit_stop`; if
 required work remains, continue the active route. Once the audit passes, the
@@ -363,8 +362,10 @@ session-scoped OTM route before the model edits files unless
 segments and activates one segment at a time. Completing a task requires its
 terminal internal steps plus evidence; completion then atomically activates the
 next eligible task. OTM preserves this durable route across pauses and session
-reloads. It cannot create Codex platform-native goals because the host does not
-expose that capability to MCP servers or hook scripts.
+reloads. Hooks and MCP cannot invoke Codex's private goal API themselves, but
+their managed instructions and prompt context direct Codex to create one native
+goal when that control is available, keep it active through all OTM segments,
+and terminally update it only after the OTM stop audit.
 
 ---
 
