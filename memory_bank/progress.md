@@ -23,6 +23,10 @@
       evidence gates, audit, summary, and clear. Installed prompt and Stop hooks
       auto-started an isolated route, synchronized AGENTS, and blocked an
       incomplete stop before explicit disposable cleanup.
+- [x] Verified: the final installed doctor audit exposed and corrected a stale
+      nested-snapshot lookup in workspace index validation. Doctor now counts
+      flattened current session snapshots (and remains legacy compatible), with
+      a regression proving active and blocked sessions reconcile to the index.
 
 ## 2026-07-25 - Full source validation and dependency audit remediation
 

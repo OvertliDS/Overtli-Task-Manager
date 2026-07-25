@@ -166,6 +166,41 @@ test("CLI doctor reports malformed state and raw consistency issues without muta
     inconsistent.checks.find((check) => check.name === "snapshot-index").status,
     "warning",
   );
+  for (const [sessionId, status] of [
+    ["session-one", "active"],
+    ["session-two", "blocked"],
+  ]) {
+    const sessionCurrentPath = currentJsonPath(workspaceRoot, sessionId);
+    fs.mkdirSync(path.dirname(sessionCurrentPath), { recursive: true });
+    fs.writeFileSync(
+      sessionCurrentPath,
+      JSON.stringify({
+        schemaVersion: "otm.current.v1",
+        status,
+        runId: `run-${sessionId}`,
+        sessionId,
+      }),
+      "utf8",
+    );
+  }
+  const consistentSnapshots = JSON.parse(
+    (
+      await capture(() =>
+        handleCli({
+          argv: ["doctor", "--json"],
+          cwd: workspaceRoot,
+          stdin: "",
+          packageRoot,
+          env: { ...process.env, OTM_STORAGE: "json", OTM_STATE_DIR: stateDir },
+        }),
+      )
+    ).at(-1),
+  );
+  assert.equal(
+    consistentSnapshots.checks.find((check) => check.name === "snapshot-index")
+      .status,
+    "ok",
+  );
 
   const lockPath = path.join(jsonDir, "state.lock");
   fs.writeFileSync(

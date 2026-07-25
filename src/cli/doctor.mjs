@@ -407,7 +407,9 @@ function inspectWorkspaceFiles({ workspaceRoot, sessionId, add }) {
         );
         if (
           snapshot.status === "ok" &&
-          ACTIVE_RUN_STATUSES.has(snapshot.value?.run?.status)
+          ACTIVE_RUN_STATUSES.has(
+            snapshot.value?.status ?? snapshot.value?.run?.status,
+          )
         )
           count += 1;
       }

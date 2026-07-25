@@ -53,3 +53,6 @@
   `state.sqlite.pre-migration-v<previous-version>-*.bak` recovery copy is
   retained before each upgrade or corrective rebuild.
 - JSON remains supported as a validated fallback store.
+- Read-only doctor index checks recognize current flattened session snapshots
+  while retaining compatibility with legacy nested snapshots, eliminating a
+  false active-session-count warning.
