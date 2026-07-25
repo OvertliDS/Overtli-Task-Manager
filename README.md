@@ -20,7 +20,9 @@ Overtli Task Manager (OTM) structures AI coding sessions into evidence-backed ro
 - **Durable State Cache:** Syncs canonical routes under `.codex/overtli-task-manager/sessions/<session-key>/`; top-level `current.json` and `current.md` provide a workspace-wide session index.
 - **Optimized Rendering:** Shows a full checklist at route start and finalization, then compact progress cards during routine work.
 - **Task Normalization:** Keeps one active route segment where possible, blocks manual jumps until the active task is handled, and lets reconciliation intentionally add, merge, reopen, or reorder work.
-- **Internal Step Gates:** Keeps each route segment honest by requiring internal steps to be checked off as work happens before the parent segment can be completed.
+- **Model-Guided Three-Tier Routes:** Represents major outcomes as route gates, substantive explicit/inferred work as internal subtasks, and concrete actions as nested mini-steps without prescribing generic domain content.
+- **Recursive Evidence Gates:** Prevents a route gate from closing until model review is current, every required internal subtask and mini-step is terminal with required evidence, and the gate itself has completion evidence.
+- **Accumulated Source Contract:** Normalizes bounded inline/pasted text, structured prompt context, attachment/OCR text, and visual descriptions with provenance and revision digests across steering, restart, summaries, and export/import.
 - **Lifecycle Hooks:** Intercepts sessions, prompts, tools, and stops to enforce task completion and audit progress.
 - **Workspace Memory:** Keeps a lightweight, high-signal index of project guides (`AGENTS.md`), memory banks, and schemas.
 - **Managed Instruction Sync:** Can refresh only OTM's marked `AGENTS.md` block after an explicitly trusted installation opts in; ordinary sessions never modify project instructions.
@@ -65,6 +67,7 @@ npm install
 | `OTM_CLAIM_LEGACY_ROUTE`       | `0`                                               | Set to `1` only to explicitly adopt a legacy unscoped route.                                                                                                                            |
 | `OTM_AUTO_SYNC_AGENTS`         | enabled                                           | Set to `0` to stop hooks from creating or refreshing OTM's marker-delimited root `AGENTS.md` block.                                                                                     |
 | `OTM_AUTO_START_ROUTE`         | enabled                                           | Set to `0` to disable automatic creation of an OTM route for a substantive new prompt. This creates OTM's durable route, not a host-native Codex goal.                                  |
+| `OTM_AUTO_REBUILD_SQLITE`      | enabled                                           | Set to `0` to disable the one-shot `better-sqlite3` rebuild after a detected Node ABI mismatch. CI suppresses the rebuild unless this is explicitly `1`.                                |
 | `OTM_AUTO_INSTALL_GLOBAL`      | disabled                                          | Set to `1` only to explicitly permit postinstall global setup.                                                                                                                          |
 | `OTM_RECORD_PRE_TOOL`          | disabled                                          | Set to `1` to record pre-tool observations.                                                                                                                                             |
 | `OTM_TRACK_MCP_EVIDENCE`       | disabled                                          | Set to `1` to record configured MCP tool evidence.                                                                                                                                      |
@@ -88,8 +91,17 @@ node -e "const Database=require('better-sqlite3'); const db=new Database(':memor
 node ./bin/otm.mjs doctor
 ```
 
-`otm doctor` should report `Storage: sqlite`. To make a missing native module a
-hard error during diagnosis instead of allowing the JSON fallback:
+`OTM_STORAGE=auto` verifies the native binding by opening an in-memory database,
+not merely by loading the package's JavaScript wrapper. If the binding was built
+for a different Node ABI, OTM makes one concurrency-guarded, two-minute rebuild
+attempt with the npm installation associated with the active Node executable,
+then retries SQLite. Global configuration installation remains disabled during
+this repair.
+
+If repair is disabled or unsuccessful, `auto` continues with the JSON backend
+and preserves any existing SQLite file unchanged. `otm doctor` reports the
+fallback and the inactive SQLite path so the backend switch is visible. Set
+`OTM_STORAGE=sqlite` to make any unavailable native runtime a hard error:
 
 ```powershell
 $env:OTM_STORAGE = 'sqlite'
@@ -101,6 +113,14 @@ show native install output:
 
 ```bash
 npm install better-sqlite3@^11.9.1 --foreground-scripts
+```
+
+If the package is present but the load test reports different
+`NODE_MODULE_VERSION` values, rebuild it under the same Node executable that
+launches OTM:
+
+```bash
+npm rebuild better-sqlite3 --foreground-scripts
 ```
 
 Use a supported Node.js release (this project requires Node 20.10 or newer;
@@ -242,7 +262,8 @@ OTM maintains separation between session-level and persistent data:
 
 ```text
 Global Durable Store (~/.codex/overtli-task-manager/)
- └── state.sqlite (SQLite with WAL mode; falls back to JSON if sqlite3 is missing)
+ ├── state.sqlite (SQLite with WAL mode when the native runtime is usable)
+ └── state.json (automatic or explicit JSON backend; SQLite files are preserved)
 
 Workspace State (.codex/overtli-task-manager/)
  ├── current.json / current.md (Workspace index of active Codex sessions)
@@ -257,14 +278,15 @@ Workspace State (.codex/overtli-task-manager/)
 
 ### State Files
 
-| File / Folder                                   | Purpose                                                                              |
-| ----------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `current.json` / `current.md`                   | Workspace-wide index; never use it as a mutable route when session scoping is active |
-| `sessions/<session-key>/current.md`             | Chat-friendly canonical route checklist for one Codex session                        |
-| `sessions/<session-key>/current.json.checklist` | Compact machine-readable checklist for that session's UIs and hooks                  |
-| `cache/tmp`                                     | Atomic write staging and stale `current.*.tmp` cleanup                               |
-| `cache/scratch`                                 | Short-lived raw tool payloads referenced by route evidence                           |
-| `summaries/`                                    | Historical turn summaries                                                            |
+| File / Folder                                   | Purpose                                                                                                |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `current.json` / `current.md`                   | Workspace-wide index; never use it as a mutable route when session scoping is active                   |
+| `sessions/<session-key>/current.md`             | Chat-friendly canonical route checklist for one Codex session                                          |
+| `sessions/<session-key>/current.json`           | Canonical gate/subtask/mini-step hierarchy, accumulated source contract, evidence, and lifecycle state |
+| `sessions/<session-key>/current.json.checklist` | Compact machine-readable gate checklist for that session's UIs and hooks                               |
+| `cache/tmp`                                     | Atomic write staging and stale `current.*.tmp` cleanup                                                 |
+| `cache/scratch`                                 | Short-lived raw tool payloads referenced by route evidence                                             |
+| `summaries/`                                    | Historical turn summaries                                                                              |
 
 `otm_clear_current` cleans active state plus OTM-owned temp/scratch files at
 route completion. `otm_cleanup_workspace` exposes the same cleanup directly.
@@ -307,15 +329,36 @@ chat's evidence.
 
 ### Route Planning
 
-1. Routes should be split into separate segments for the main phases, steps,
-   issues, problems, and deliverables.
-2. Segments can include `internalSteps` or
-   `metadata.internalSteps` for explicit, inferred, researched, and discovered
-   subwork.
-3. Fallback planning splits obvious phases, steps, issues, and deliverables
-   when only a goal or prompt is supplied.
-4. `otm_reconcile` can merge, add, reorder, or reopen tasks when the route
-   changes; reopened tasks keep prior evidence and reopening metadata.
+1. The model reviews the complete accumulated source contract before work:
+   typed/pasted text, structured context, attachment/OCR text, visual
+   descriptions, identifiers, constraints, ordering, and acceptance conditions.
+2. Tier 1 `tasks` are bounded completion gates for major outcomes, such as
+   Phase 3. They carry a concise outcome/gist, dependencies, source references,
+   acceptance conditions, a model-interpreted `workType`, and a gate evidence
+   policy where useful.
+   Mixed prompts keep distinct gate intent: planning, review, research,
+   documentation, implementation, validation, release, deployment, operations,
+   `mixed`, or a justified custom label. The route reports `routeIntent.mode`
+   as `mixed` when its gates differ instead of coercing the whole request into
+   one lossy category.
+3. Tier 2 `internalSteps` preserve explicit children such as Phase 3.1/3.2. If
+   no children are stated, the model infers only the smallest complete
+   outcome-specific subtasks from the whole contract.
+4. Tier 3 `miniSteps` are concrete verifiable actions needed to finish one
+   non-atomic internal subtask. A genuinely atomic subtask sets `atomic=true`
+   and includes `atomicRationale`.
+5. OTM owns structural validation and recursive lifecycle gates; the model
+   owns domain content. It must not populate every gate with the same canned
+   checklist.
+6. The deterministic fallback preserves only a visible
+   `needsModelReview` scaffold. It cannot be completed and must be replaced by
+   a model-authored hierarchy through `otm_reconcile`.
+7. Reconciliation re-reviews all accumulated sources, appends new steering,
+   keeps explicit wording/order and valid IDs/evidence, records supersession,
+   re-evaluates gate work types, and reopens only invalidated work. Completion
+   evidence follows the gate intent: a review can close on evidence-backed
+   findings, while implementation still requires implementation, integration,
+   validation, and synchronized documentation where affected.
 
 OTM keeps one current task whenever possible. Manual task switching is blocked
 while another required task is active unless reconciliation or an explicit
@@ -323,16 +366,14 @@ override allows it.
 
 ### Internal Step Gates
 
-| Rule                                                        | Effect                                                      |
-| ----------------------------------------------------------- | ----------------------------------------------------------- |
-| Internal steps normalize to `{ id, title, status }` records | Handoffs can resume at the exact checkpoint                 |
-| `otm_progress` updates steps by id, title, index, or object | Step status changes are visible as work happens             |
-| `done` and `skipped` are terminal                           | Pending, active, or blocked steps prevent parent completion |
-| `otm_complete_task` still needs segment evidence            | Internal steps alone do not open the stop gate              |
-
-When a task has no explicit internal steps, OTM creates category-aware defaults
-for implementation, docs/review, validation, install/setup, and final-summary
-work. Fallback-planner tasks keep their own actionable steps.
+| Rule                                                                                                                                    | Effect                                                                          |
+| --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| Internal subtasks and mini-steps normalize to durable records with stable IDs, provenance, criteria, dependencies, evidence, and status | Handoffs resume at the exact descendant                                         |
+| Non-atomic internal subtasks require one or more outcome-specific mini-steps                                                            | A subtask cannot hide unfinished concrete work                                  |
+| Atomic subtasks require an explicit rationale                                                                                           | “Atomic” cannot become a silent shortcut                                        |
+| `otm_progress` updates either tier by exact id, title, index, or object                                                                 | Evidence and timestamps stay attached to the work they prove                    |
+| Required descendants must be `done` or intentionally `skipped` with required evidence                                                   | Pending, active, blocked, or unreviewed descendants keep the parent gate closed |
+| `otm_complete_task` still requires gate evidence                                                                                        | Descendant completion never substitutes for segment acceptance                  |
 
 ### Hooks And Completion
 
@@ -356,13 +397,16 @@ must manually call `otm_finalize_turn`, present its summary, and then call
 `otm_clear_current`. Stop-hook execution failures fail open with a warning,
 while explicit `otm_audit_stop` remains the authoritative completion check.
 
-For a substantive new implementation request, `UserPromptSubmit` creates the
-session-scoped OTM route before the model edits files unless
-`OTM_AUTO_START_ROUTE=0`. The route planner keeps listed phases as ordered
-segments and activates one segment at a time. Completing a task requires its
-terminal internal steps plus evidence; completion then atomically activates the
-next eligible task. OTM preserves this durable route across pauses and session
-reloads. Hooks and MCP cannot invoke Codex's private goal API themselves, but
+For a substantive new implementation request, `UserPromptSubmit` creates a
+conservative session-scoped bootstrap route before the model edits files unless
+`OTM_AUTO_START_ROUTE=0`. The hook then instructs the model to re-review the
+complete accumulated source contract and replace the non-completable fallback
+with a three-tier route. Later prompt/attachment/visual steering is appended to
+the canonical contract and marks review pending until a model reconciliation
+updates the hierarchy. Completing a gate requires terminal evidence-backed
+descendants plus gate evidence, then atomically activates the next eligible
+gate. OTM preserves the hierarchy and context across pauses and reloads. Hooks
+and MCP cannot invoke Codex's private goal API themselves, but
 their managed instructions and prompt context direct Codex to create one native
 goal when that control is available, keep it active through all OTM segments,
 and terminally update it only after the OTM stop audit.

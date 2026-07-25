@@ -11,7 +11,9 @@ Codex hooks    ──┘                          ├─ session current.json/cu
 
 ## State
 
-The durable store tracks runs, tasks, events, summaries, and cache entries. SQLite is preferred; JSON is a fallback for machines that cannot install native dependencies.
+The durable store tracks runs, tasks, events, summaries, and cache entries.
+SQLite is preferred; `auto` can use JSON whenever the native runtime is
+unavailable, while explicit `sqlite` remains fail-closed.
 
 Active routes are selected by `(normalized workspaceRoot, sessionId)`. The
 session id resolves from explicit session/thread/conversation hook fields,
@@ -22,6 +24,18 @@ global store. Legacy active rows with no session id remain isolated unless
 `OTM_CLAIM_LEGACY_ROUTE=1` explicitly enables one-time adoption. SQLite uses WAL
 mode and a composite workspace/session/status index; the JSON fallback
 serializes mutations through a short-lived cross-process lock file.
+
+SQLite availability is verified by constructing and querying an in-memory
+database because `better-sqlite3` loads its ABI-specific native binding lazily.
+On a detected Node ABI mismatch, normal store initialization makes one bounded
+automatic rebuild attempt with the active Node installation. A package-local
+lock prevents competing hooks and MCP processes from rebuilding the same addon
+concurrently; stale locks are reclaimed only after their owner is no longer
+live. `OTM_AUTO_REBUILD_SQLITE=0` disables this repair, and CI suppresses it
+unless explicitly enabled. If repair remains unavailable, `OTM_STORAGE=auto`
+uses JSON while leaving existing SQLite state untouched; doctor reports both the
+fallback and inactive SQLite path. Explicit `OTM_STORAGE=sqlite` remains
+fail-closed with Node version, module ABI, and rebuild guidance.
 
 SQLite state carries a schema version independently from the package version.
 Opening an older schema runs ordered transactional migrations after a local
@@ -45,28 +59,58 @@ on its first substantive prompt. Existing content outside the markers is
 preserved; malformed marker pairs are reported without being overwritten. Set
 `OTM_AUTO_SYNC_AGENTS=0` to opt out.
 
-For substantive new prompts, the `UserPromptSubmit` hook creates the durable
-OTM route directly unless `OTM_AUTO_START_ROUTE=0`. This is deliberately an
-OTM domain route rather than a host-native Codex goal: MCP servers and hooks
-cannot invoke Codex's private goal-control API. They instead inject explicit
-goal-control guidance for the Codex agent: create one native goal when the host
-offers that control, keep it active through every OTM segment, and terminally
-update it only after the OTM stop audit. The manager remains the authority for
-task completion. It requires terminal internal steps and completion evidence,
-then atomically marks the completed task done and activates the next eligible
-task in route order. A pause leaves the scoped run durable;
-session/continuation hooks reload its active checkpoint.
+For substantive new prompts, `UserPromptSubmit` creates a conservative durable
+bootstrap route unless `OTM_AUTO_START_ROUTE=0`. That fallback contains one
+visible `needsModelReview` scaffold and is deliberately non-completable. The
+hook instructs the model to review the complete request and reconcile a
+domain-specific route before implementation. For an active route, later typed,
+structured, attachment/OCR, and visual context is appended first; the
+contract-review gate remains pending until the model reconciles the hierarchy.
 
-Tasks are the stop-gated route checkpoints. Each task may also carry
-`metadata.internalSteps`, which are normalized from model-supplied strings or
-objects into durable `{ id, title, status }` records. These records preserve the
-AI's exact internal progress location through `current.json`, compaction, and
-handoff. Internal-step statuses are intentionally separate from the task status:
-checking off a substep does not complete the route gate. A task cannot move to
-`done` until every internal step is terminal (`done` or `skipped`) and the
-completion call includes concrete evidence. This keeps compaction-resume detail
-and stop-gated route completion aligned without letting either replace the
-other.
+`src/core/source-context.mjs` normalizes those input surfaces into bounded,
+redacted entries with source kind, structural path, optional source reference,
+revision, byte count, and a deterministic accumulated digest. The complete
+record is stored in run metadata and canonical session snapshots. It survives
+JSON/SQLite persistence, restart, hierarchy-aware summaries, history, and
+export/import. The workspace `current.json` index intentionally retains only
+lightweight route pointers and never copies the source contract.
+
+The model supplies three structural tiers:
+
+1. A task is one stop-gated route segment for a major outcome, such as Phase 3.
+   It carries a model-interpreted `workType`. Recommended labels are
+   `planning`, `review`, `research`, `documentation`, `implementation`,
+   `validation`, `release`, `deployment`, `operations`, and `mixed`; bounded
+   custom labels remain valid when the model records a clearer domain intent.
+2. Its `internalSteps` are substantive explicit children such as Phase
+   3.1/3.2, or the minimum outcome-specific subtasks inferred by the model when
+   no children are stated.
+3. Each non-atomic internal subtask owns concrete `miniSteps`. A genuinely
+   atomic subtask must include an explicit rationale.
+
+Explicit identifiers, wording, and order remain authoritative. Provenance marks
+inferred structure without pretending it came from the user. OTM validates
+structure, dependencies, evidence, and state transitions but does not generate
+canned domain work. Reconciliation matches outlines, stable IDs, and titles to
+preserve valid evidence and timestamps; new required descendants reopen a
+previously completed parent. A task cannot move to `done` while contract review
+is pending, a fallback scaffold remains, a required dependency/mini-step/
+internal subtask is non-terminal, required descendant evidence is absent, or
+gate evidence is missing.
+
+`routeIntent` is derived from the active gates and persisted in run metadata,
+snapshots, and summaries. It is `mixed` whenever gate labels differ or a gate
+is intrinsically mixed. This aggregation is descriptive rather than coercive:
+planning/review/documentation gates keep outcome-appropriate evidence contracts
+and do not imply unrequested code changes, while implementation gates retain
+implementation, integration, validation, and affected-documentation evidence.
+
+The OTM route is deliberately separate from a host-native Codex goal: MCP
+servers and hooks cannot invoke Codex's private goal-control API. They inject
+guidance for the agent to create one native goal when available, keep it active
+through every OTM gate, and terminally update it only after the stop audit. A
+pause leaves the canonical hierarchy durable; session/continuation hooks reload
+its exact descendant checkpoint.
 
 The core owns explicit transition matrices rather than trusting a requested
 status. Task edges are `pending -> active|dropped|superseded`, `active ->
@@ -138,7 +182,10 @@ Project memory is not a full RAG index. It is a lightweight, project-specific ca
 Finalization writes turn-summary memory with a stable identifier derived from the
 durable run and summary IDs. Retrying the same operation updates that one
 memory record; separate runs with identical human-readable goals retain their
-own summary memory.
+own summary memory. Summary JSON preserves the bounded source contract,
+contract-review state, and complete gate/subtask/mini-step hierarchy; searchable
+summary Markdown/cache records expose a concise source digest and revision count
+instead of duplicating the full contract into many cache entries.
 
 ## Hooks
 

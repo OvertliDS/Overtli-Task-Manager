@@ -6,6 +6,8 @@ import {
   workspaceStateDir,
 } from "../core/fs-utils.mjs";
 import {
+  describeBetterSqlite3Failure,
+  inspectBetterSqlite3Runtime,
   loadBetterSqlite3,
   SQLITE_SCHEMA_VERSION,
 } from "../storage/sqlite-store.mjs";
@@ -28,6 +30,7 @@ export function inspectDoctor({
   packageRoot,
   sessionId,
   env = process.env,
+  sqliteRuntime = null,
 }) {
   const checks = [];
   const add = (name, status, detail, data = undefined) =>
@@ -38,10 +41,19 @@ export function inspectDoctor({
       ...(data === undefined ? {} : { data }),
     });
   const stateDir = env.OTM_STATE_DIR || getHomeDir(env);
-  const requested = String(env.OTM_STORAGE || "auto").toLowerCase();
+  const configured = String(env.OTM_STORAGE || "auto").toLowerCase();
+  const requested = ["auto", "sqlite", "json"].includes(configured)
+    ? configured
+    : "auto";
   const sqlitePath = path.join(stateDir, "state.sqlite");
   const jsonPath = path.join(stateDir, "json", "state.json");
-  const sqliteAvailable = Boolean(loadBetterSqlite3());
+  const resolvedSqliteRuntime =
+    requested === "json"
+      ? null
+      : sqliteRuntime ||
+        inspectBetterSqlite3Runtime({ autoRepair: false, env });
+  const sqliteAvailable = Boolean(resolvedSqliteRuntime?.available);
+  const sqliteStateExists = fs.existsSync(sqlitePath);
   const useSqlite =
     requested === "sqlite" || (requested === "auto" && sqliteAvailable);
 
@@ -52,7 +64,31 @@ export function inspectDoctor({
     { node: process.versions.node },
   );
   add("package", "ok", `Package root: ${packageRoot}`);
-  if (useSqlite) inspectSqlite({ sqlitePath, requested, add });
+  if (configured !== requested)
+    add(
+      "storage-config",
+      "error",
+      `Invalid OTM_STORAGE value "${configured}". Expected auto, sqlite, or json.`,
+    );
+  if (requested !== "json" && !sqliteAvailable)
+    add(
+      "sqlite-runtime",
+      requested === "sqlite" ? "error" : "warning",
+      describeBetterSqlite3Failure(resolvedSqliteRuntime),
+      {
+        causeCode: resolvedSqliteRuntime?.error?.code || null,
+        nodeVersion: process.versions.node,
+        moduleAbi: process.versions.modules,
+      },
+    );
+  if (requested === "auto" && !sqliteAvailable && sqliteStateExists)
+    add(
+      "sqlite-fallback",
+      "warning",
+      `SQLite state remains at ${sqlitePath}; OTM is using JSON fallback until the native runtime is repaired.`,
+    );
+  if (useSqlite && sqliteAvailable)
+    inspectSqlite({ sqlitePath, requested, add });
   else inspectJson({ jsonPath, stateDir, add });
   inspectWorkspaceFiles({ workspaceRoot, sessionId, add });
   inspectHooks({ workspaceRoot, add });
@@ -66,7 +102,12 @@ export function inspectDoctor({
     warnings,
     workspaceRoot,
     sessionId: sessionId || null,
-    storage: useSqlite ? "sqlite" : "json",
+    storage:
+      useSqlite && sqliteAvailable
+        ? "sqlite"
+        : requested === "sqlite"
+          ? "sqlite-unavailable"
+          : "json",
     statePath: useSqlite ? sqlitePath : jsonPath,
     checks,
   };

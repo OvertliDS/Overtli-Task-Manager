@@ -119,6 +119,14 @@ test("a substantive new prompt creates one durable route and directs Codex to co
     first.result.hookSpecificOutput.additionalContext,
     /immediately continue work on the returned active next segment/i,
   );
+  assert.match(
+    first.result.hookSpecificOutput.additionalContext,
+    /Tag every Tier 1 gate with its actual model-interpreted workType/,
+  );
+  assert.match(
+    first.result.hookSpecificOutput.additionalContext,
+    /overall route report mixed rather than forcing one lossy label/,
+  );
 
   const duplicate = await capture(() =>
     runHookScript("user-prompt-submit", {

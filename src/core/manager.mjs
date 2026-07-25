@@ -24,7 +24,15 @@ import {
   writeCurrentFiles,
   writeWorkspaceCurrentIndex,
 } from "./renderer.mjs";
-import { combinePromptContext, planFallbackRoute } from "./planner.mjs";
+import { planFallbackRoute } from "./planner.mjs";
+import {
+  hasSourceContextInput,
+  mergeSourceContexts,
+  normalizeSourceContext,
+  normalizePersistedSourceContext,
+  sourceContextSummary,
+  sourceContextText,
+} from "./source-context.mjs";
 import {
   CURRENT_SCHEMA_VERSION,
   MANAGER_NAME,
@@ -219,13 +227,14 @@ export function createTaskManager(options = {}) {
       100_000,
       "task sortOrder",
     );
+    const descriptionValue = input.description ?? input.outcome;
     const description =
-      input.description === undefined ||
-      input.description === null ||
-      String(input.description).trim() === ""
+      descriptionValue === undefined ||
+      descriptionValue === null ||
+      String(descriptionValue).trim() === ""
         ? null
         : assertNonEmptyString(
-            String(input.description),
+            String(descriptionValue),
             "task description",
             LIMITS.text,
           );
@@ -404,19 +413,25 @@ export function createTaskManager(options = {}) {
       context: args.context,
       promptContext: args.promptContext,
       attachments: args.attachments,
-      screenshots: args.screenshots || args.images,
+      screenshots: args.screenshots,
+      images: args.images,
     });
-    const plannerPrompt =
-      combinePromptContext(prompt, {
+    const createdAt = nowIso();
+    const sourceContext = normalizeSourceContext(
+      {
+        prompt,
         context: args.context,
         promptContext: args.promptContext,
         attachments: args.attachments,
-        screenshots: args.screenshots || args.images,
-      }).trim() || prompt;
+        screenshots: args.screenshots,
+        images: args.images,
+      },
+      { at: createdAt, revision: 1 },
+    );
+    const plannerPrompt = sourceContextText(sourceContext).trim() || prompt;
     const goal = String(
       args.goal || prompt || "Complete the requested Codex task",
     ).trim();
-    const createdAt = nowIso();
     const run = {
       id: args.runId || newId("run"),
       workspaceRoot,
@@ -434,6 +449,7 @@ export function createTaskManager(options = {}) {
         gitBranch: args.gitBranch || null,
         source: args.source || "mcp",
         promptPreview: plannerPrompt.slice(0, 500),
+        sourceContext,
       },
     };
     let fallbackPlan = null;
@@ -445,9 +461,26 @@ export function createTaskManager(options = {}) {
             context: args.context,
             promptContext: args.promptContext,
             attachments: args.attachments,
-            screenshots: args.screenshots || args.images,
+            screenshots: args.screenshots,
+            images: args.images,
           })).tasks;
     if (fallbackPlan) run.metadata.planner = fallbackPlan.metadata;
+    run.metadata.contractReview = {
+      status:
+        fallbackPlan?.metadata?.decomposition?.needsModelReview === true
+          ? "needs_model_review"
+          : "reviewed",
+      sourceContextDigest: sourceContext.digest,
+      routeRevision: 1,
+      reviewedAt:
+        fallbackPlan?.metadata?.decomposition?.needsModelReview === true
+          ? null
+          : createdAt,
+      reason:
+        fallbackPlan?.metadata?.decomposition?.needsModelReview === true
+          ? "Deterministic fallback decomposition requires model reconciliation."
+          : "Model-supplied route structure reviewed the accumulated source context.",
+    };
     assertCondition(
       taskInputs.length <= 256,
       "Too many route tasks.",
@@ -460,6 +493,9 @@ export function createTaskManager(options = {}) {
     const tasks = taskInputs.map((task, index) =>
       normalizeTask(task, run.id, index + 1, task.createdBy || "prompt"),
     );
+    run.metadata.routeIntent =
+      fallbackPlan?.metadata?.routeIntent ||
+      deriveRouteIntent(tasks, "model_tasks");
     assertValidDependencies(tasks);
     normalizeActiveTasks(tasks);
     run.currentTaskId =
@@ -530,6 +566,50 @@ export function createTaskManager(options = {}) {
     assertExpectedRevision(run, args);
     const mode = args.mode || "append";
     const now = nowIso();
+    assertAcyclicContext({
+      context: args.context,
+      promptContext: args.promptContext,
+      attachments: args.attachments,
+      screenshots: args.screenshots,
+      images: args.images,
+    });
+    const hasIncomingSource = hasSourceContextInput({
+      prompt: args.prompt,
+      context: args.context,
+      promptContext: args.promptContext,
+      attachments: args.attachments,
+      screenshots: args.screenshots,
+      images: args.images,
+    });
+    const previousSourceContext =
+      run.metadata?.sourceContext || normalizeSourceContext({});
+    const incomingSourceContext = hasIncomingSource
+      ? normalizeSourceContext(
+          {
+            prompt: args.prompt,
+            context: args.context,
+            promptContext: args.promptContext,
+            attachments: args.attachments,
+            screenshots: args.screenshots,
+            images: args.images,
+          },
+          {
+            at: now,
+            revision: Number(run.routeRevision || 1) + 1,
+          },
+        )
+      : normalizeSourceContext({});
+    const sourceContext = hasIncomingSource
+      ? mergeSourceContexts(previousSourceContext, incomingSourceContext, {
+          at: now,
+          revision: Number(run.routeRevision || 1) + 1,
+        })
+      : previousSourceContext;
+    const sourceContextChanged =
+      sourceContext.digest !== previousSourceContext.digest;
+    const includesModelReview =
+      (Array.isArray(args.tasks) && args.tasks.length > 0) ||
+      (Array.isArray(args.changes) && args.changes.length > 0);
     const tasks = store.getTasks(run.id);
     const originalById = new Map(tasks.map((task) => [task.id, task]));
     let workingTasks = tasks.map((task) => ({
@@ -686,14 +766,39 @@ export function createTaskManager(options = {}) {
     run = commitRunMutation(
       {
         ...run,
+        promptHash: sourceContext.digest,
         routeRevision: (run.routeRevision || 1) + 1,
         currentTaskId: current?.id || null,
         status: nextRunStatus,
         updatedAt: now,
+        metadata: {
+          ...(run.metadata || {}),
+          sourceContext,
+          promptPreview: sourceContextText(sourceContext).slice(0, 500),
+          contractReview: buildContractReview({
+            prior: run.metadata?.contractReview,
+            sourceContext,
+            sourceContextChanged,
+            includesModelReview,
+            routeRevision: Number(run.routeRevision || 1) + 1,
+            at: now,
+          }),
+          routeIntent: deriveRouteIntent(
+            workingTasks,
+            includesModelReview ? "model_reconciliation" : "route_state",
+          ),
+        },
       },
       taskUpdates,
       "run_reconciled",
-      { mode, changed, prompt: args.prompt || null },
+      {
+        mode,
+        changed,
+        prompt: args.prompt ? redactSensitiveText(String(args.prompt)) : null,
+        sourceContextChanged,
+        sourceContextDigest: sourceContext.digest,
+        modelReviewedContext: includesModelReview,
+      },
       args,
       [],
       newTasks,
@@ -821,18 +926,17 @@ export function createTaskManager(options = {}) {
       );
       assertTaskTransition(task.status, "active", { taskId: task.id });
       assertCanSwitchTask(store.getTasks(run.id), task, args);
-      const evidence = [
-        ...(task.evidence || []),
-        evidenceFromArgs(
-          args.evidence || {
-            kind: "manual_note",
-            summary: args.message || "Progress recorded",
-          },
-        ),
-      ];
+      const progressEvidence = evidenceFromArgs(
+        args.evidence || {
+          kind: "manual_note",
+          summary: args.message || "Progress recorded",
+        },
+      );
+      const evidence = [...(task.evidence || []), progressEvidence];
       const status = task.status === "pending" ? "active" : task.status;
       const metadata = updateInternalStepProgress(task.metadata, args, {
         taskStatus: status,
+        evidence: progressEvidence,
       });
       assertRunTransition(run.status, "active", { runId: run.id });
       run = commitRunMutation(
@@ -881,6 +985,7 @@ export function createTaskManager(options = {}) {
       "Forced completion is not available through the normal lifecycle API.",
       "PRIVILEGED_OPERATION_REQUIRED",
     );
+    assertContractReviewed(run);
     assertCondition(
       task.status === "active",
       `Cannot complete a task in status ${task.status}. Activate it through route reconciliation first.`,
@@ -1102,14 +1207,18 @@ export function createTaskManager(options = {}) {
         task.required &&
         !["done", "dropped", "superseded"].includes(task.status),
     );
-    const stopAllowed = remainingRequired.length === 0;
+    const contractNeedsReview =
+      run.metadata?.contractReview?.status === "needs_model_review";
+    const stopAllowed = remainingRequired.length === 0 && !contractNeedsReview;
     const snapshot = snapshotForRun(
       run,
       {
         kind: "stop_audit",
         message: stopAllowed
           ? "Audit passed. All required route segments are complete."
-          : `Audit blocked. ${remainingRequired.length} required route segment${remainingRequired.length === 1 ? "" : "s"} remain.`,
+          : contractNeedsReview && remainingRequired.length === 0
+            ? "Audit blocked. The accumulated source context requires model reconciliation."
+            : `Audit blocked. ${remainingRequired.length} required route segment${remainingRequired.length === 1 ? "" : "s"} remain.`,
         at: nowIso(),
       },
       { write: args.write !== false },
@@ -1117,12 +1226,25 @@ export function createTaskManager(options = {}) {
     return {
       stopAllowed,
       run,
-      remainingRequired: remainingRequired.map((task) => ({
-        id: task.id,
-        title: task.title,
-        status: task.status,
-        required: task.required,
-      })),
+      remainingRequired: remainingRequired
+        .map((task) => ({
+          id: task.id,
+          title: task.title,
+          status: task.status,
+          required: task.required,
+        }))
+        .concat(
+          contractNeedsReview
+            ? [
+                {
+                  id: "contract_review",
+                  title: "Reconcile the accumulated source context",
+                  status: "needs_model_review",
+                  required: true,
+                },
+              ]
+            : [],
+        ),
       snapshot,
       markdown: renderSnapshotMarkdown(snapshot),
     };
@@ -2034,8 +2156,70 @@ function buildSummaryJson({ run, tasks, outcome, nextSteps }) {
     evidence,
     nextSteps,
     routeRevision: run.routeRevision || 1,
+    routeIntent: run.metadata?.routeIntent || undefined,
+    sourceContext: run.metadata?.sourceContext || undefined,
+    sourceContextSummary: run.metadata?.sourceContext
+      ? sourceContextSummary(run.metadata.sourceContext)
+      : undefined,
+    contractReview: run.metadata?.contractReview || undefined,
+    hierarchy: tasks.map((task) => ({
+      taskId: task.id,
+      title: task.title,
+      workType: task.metadata?.workType,
+      workTypeSource: task.metadata?.workTypeSource,
+      status: task.status,
+      internalSteps: normalizeInternalStepList(
+        task.metadata?.internalSteps || [],
+      ),
+    })),
     createdAt: nowIso(),
   });
+}
+
+function buildContractReview({
+  prior,
+  sourceContext,
+  sourceContextChanged,
+  includesModelReview,
+  routeRevision,
+  at,
+}) {
+  if (includesModelReview)
+    return {
+      status: "reviewed",
+      sourceContextDigest: sourceContext.digest,
+      routeRevision,
+      reviewedAt: at,
+      reason:
+        "Model reconciliation reviewed the complete accumulated source context.",
+    };
+  if (sourceContextChanged)
+    return {
+      status: "needs_model_review",
+      sourceContextDigest: sourceContext.digest,
+      routeRevision,
+      reviewedAt: null,
+      reason:
+        "New source context was preserved and must be interpreted before route gates can close.",
+    };
+  return (
+    prior || {
+      status: "reviewed",
+      sourceContextDigest: sourceContext.digest,
+      routeRevision,
+      reviewedAt: at,
+      reason: "No unreconciled source-context revision is pending.",
+    }
+  );
+}
+
+function assertContractReviewed(run) {
+  assertCondition(
+    run.metadata?.contractReview?.status !== "needs_model_review",
+    "Reconcile the complete accumulated source context before completing route gates.",
+    "CONTRACT_REVIEW_REQUIRED",
+    { contractReview: run.metadata?.contractReview },
+  );
 }
 
 function normalizeRetentionDays(value) {
@@ -2201,7 +2385,43 @@ function assertInitialTaskStatus(status) {
 }
 
 function normalizeTaskMetadata(input, acceptanceCriteria) {
-  const metadata = { ...(input.metadata || {}) };
+  const suppliedWorkType = input.workType ?? input.metadata?.workType;
+  const workType = normalizeWorkType(
+    suppliedWorkType ?? inferTaskWorkType(input, String(input.title || "")),
+  );
+  const workTypeSource = assertNonEmptyString(
+    String(
+      input.workTypeSource ??
+        input.metadata?.workTypeSource ??
+        (suppliedWorkType === undefined ? "manager_inferred" : "model"),
+    ),
+    "task workTypeSource",
+    80,
+  );
+  const metadata = {
+    ...(input.metadata || {}),
+    workType,
+    workTypeSource,
+    ...(input.sourceRefs
+      ? {
+          sourceRefs: normalizeBoundedStrings(
+            input.sourceRefs,
+            "task source references",
+            LIMITS.internalSteps,
+            LIMITS.text,
+          ),
+        }
+      : {}),
+    ...(input.evidencePolicy
+      ? {
+          evidencePolicy: assertNonEmptyString(
+            String(input.evidencePolicy),
+            "task evidence policy",
+            LIMITS.text,
+          ),
+        }
+      : {}),
+  };
   const internalSteps = normalizeInternalSteps(input, acceptanceCriteria);
   if (internalSteps.length) metadata.internalSteps = internalSteps;
   return metadata;
@@ -2219,76 +2439,60 @@ function normalizeActiveTasks(tasks) {
   }
 }
 
-function normalizeInternalSteps(input, acceptanceCriteria = []) {
+function normalizeInternalSteps(input, _acceptanceCriteria = []) {
   const supplied = Array.isArray(input.internalSteps)
     ? input.internalSteps
     : input.metadata?.internalSteps;
-  if (Array.isArray(supplied))
+  if (Array.isArray(supplied)) {
     assertUniqueIds(
       supplied.filter((step) => step && typeof step === "object" && step.id),
       "internal step",
     );
+    for (const step of supplied) {
+      const miniSteps =
+        step && typeof step === "object" && Array.isArray(step.miniSteps)
+          ? step.miniSteps
+          : [];
+      assertUniqueIds(
+        miniSteps.filter(
+          (miniStep) => miniStep && typeof miniStep === "object" && miniStep.id,
+        ),
+        "mini step",
+      );
+    }
+  }
   const explicit = Array.isArray(supplied)
     ? normalizeInternalStepList(supplied)
     : [];
   if (explicit.length) return explicit;
-
-  const criteriaSteps = unionStrings(acceptanceCriteria).filter(
-    (item) => item !== "Complete this route segment with concrete evidence.",
-  );
-  if (criteriaSteps.length) return normalizeInternalStepList(criteriaSteps);
 
   const title = String(input.title || "route segment").trim();
   return normalizeInternalStepList(defaultInternalStepsForTask(input, title));
 }
 
 function defaultInternalStepsForTask(input, title) {
-  const category = inferTaskCategory(input, title);
-  if (category === "summary") {
-    return [
-      `Reconcile route evidence for ${title}`,
-      `Write or present the final summary for ${title}`,
-      `Verify stop-audit readiness for ${title}`,
-      `Record finalization evidence for ${title}`,
-    ];
-  }
-  if (category === "validation") {
-    return [
-      `Identify the relevant checks for ${title}`,
-      `Run targeted checks for ${title}`,
-      `Inspect failures or regressions for ${title}`,
-      `Record validation evidence for ${title}`,
-    ];
-  }
-  if (category === "install") {
-    return [
-      `Inspect target install state for ${title}`,
-      `Run the install or configuration command for ${title}`,
-      `Verify install or doctor output for ${title}`,
-      `Record install evidence for ${title}`,
-    ];
-  }
-  if (category === "docs") {
-    return [
-      `Inspect source-of-truth material for ${title}`,
-      `Draft or update documentation for ${title}`,
-      `Verify commands, paths, and status claims for ${title}`,
-      `Record documentation evidence for ${title}`,
-    ];
-  }
+  if (input.metadata?.decomposition?.atomic === true) return [];
+  const category = inferTaskWorkType(input, title);
   return [
-    `Inspect affected code and existing patterns for ${title}`,
-    `Implement the complete requested change for ${title}`,
-    `Update related tests, docs, or configuration for ${title}`,
-    `Run relevant checks and record evidence for ${title}`,
+    {
+      title: `Review the accumulated contract and define outcome-specific ${category} subtasks for ${title}`,
+      source: "fallback_scaffold",
+      kind: "decomposition_review",
+      required: true,
+      atomic: false,
+      needsModelReview: true,
+      miniSteps: [],
+    },
   ];
 }
 
-function inferTaskCategory(input, title) {
+function inferTaskWorkType(input, title) {
   const text = [
+    input.workType,
     input.category,
     input.kind,
     input.type,
+    input.metadata?.workType,
     input.metadata?.category,
     input.description,
     title,
@@ -2296,34 +2500,166 @@ function inferTaskCategory(input, title) {
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
-  if (
-    /\b(finali[sz]e|final summary|summari[sz]e|summary|clear active|checkpoint|closeout)\b/.test(
-      text,
-    )
-  )
-    return "summary";
-  if (
-    /\b(validate|validation|test|tests|check|checks|lint|typecheck|build|smoke|regression)\b/.test(
-      text,
-    )
-  )
-    return "validation";
-  if (
-    /\b(install|reinstall|setup|configure|configuration|doctor|hook|mcp config)\b/.test(
-      text,
-    )
-  )
-    return "install";
-  if (
-    /\b(doc|docs|documentation|readme|review|audit|plan|planning|roadmap|spec|gdd)\b/.test(
-      text,
-    )
-  )
-    return "docs";
-  return "implementation";
+  const candidates = [];
+  const add = (workType, pattern) => {
+    if (pattern.test(text) && !candidates.includes(workType))
+      candidates.push(workType);
+  };
+  add(
+    "planning",
+    /\b(plan|planning|roadmap|proposal|strategy|outline|design doc|specification|gdd)\b/,
+  );
+  add("review", /\b(review|audit|assess|evaluate|critique|inspect)\b/);
+  add("research", /\b(research|investigate|compare|analy[sz]e)\b/);
+  add(
+    "documentation",
+    /\b(document|documentation|docs?|readme|guide|manual|release notes?)\b/,
+  );
+  add(
+    "implementation",
+    /\b(implement|fix|repair|build|refactor|change|add|remove|debug|wire|code)\b/,
+  );
+  add(
+    "validation",
+    /\b(validate|validation|verify|test|tests|check|checks|lint|typecheck|smoke|regression)\b/,
+  );
+  add(
+    "release",
+    /\b(finali[sz]e|final summary|summari[sz]e|summary|clear active|checkpoint|closeout|commit|push|package|publish|release|ship)\b/,
+  );
+  add(
+    "operations",
+    /\b(install|reinstall|setup|configure|configuration|doctor|hook|mcp config|migrate|migration|operate|operations)\b/,
+  );
+  add("deployment", /\b(deploy|deployment|rollout)\b/);
+  if (candidates.length > 1) return "mixed";
+  return candidates[0] || "implementation";
 }
 
-function normalizeInternalStepList(steps = []) {
+function normalizeWorkType(value) {
+  const normalized = assertNonEmptyString(String(value), "task workType", 80)
+    .trim()
+    .toLowerCase()
+    .replace(/[\s/]+/g, "_");
+  assertCondition(
+    /^[a-z0-9][a-z0-9_.-]{0,79}$/.test(normalized),
+    "task workType must be a bounded machine-readable label.",
+    "INVALID_INPUT",
+  );
+  return normalized;
+}
+
+function deriveRouteIntent(tasks, source) {
+  const relevant = tasks.filter(
+    (task) => !["dropped", "superseded"].includes(task.status),
+  );
+  const workTypes = [
+    ...new Set(
+      relevant
+        .map((task) => task.metadata?.workType)
+        .filter(Boolean)
+        .map(String),
+    ),
+  ];
+  return {
+    mode:
+      workTypes.length > 1 || workTypes.includes("mixed") ? "mixed" : "single",
+    workTypes,
+    source,
+  };
+}
+
+function normalizeInternalStepList(steps = [], options = {}) {
+  assertCondition(
+    Array.isArray(steps) && steps.length <= LIMITS.internalSteps,
+    `Internal steps must be an array with at most ${LIMITS.internalSteps} values.`,
+    Array.isArray(steps) ? "INPUT_TOO_LARGE" : "INVALID_INPUT",
+  );
+  const seen = new Set();
+  const normalized = [];
+  for (const [index, item] of steps.entries()) {
+    const legacyAtomic =
+      typeof item !== "object" ||
+      item === null ||
+      (!Object.prototype.hasOwnProperty.call(item, "miniSteps") &&
+        !Object.prototype.hasOwnProperty.call(item, "atomic") &&
+        !Object.prototype.hasOwnProperty.call(item, "needsModelReview"));
+    const raw =
+      typeof item === "object" && item !== null ? item : { title: item };
+    const title = String(
+      raw.title || raw.text || raw.summary || raw.name || "",
+    ).trim();
+    if (!title) continue;
+    const outline = raw.outline ? String(raw.outline).trim() : undefined;
+    const key = outline
+      ? `outline:${outline.toLowerCase()}`
+      : `title:${title.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const status = normalizeInternalStepStatus(raw.status);
+    const miniSteps = normalizeMiniStepList(raw.miniSteps || [], {
+      parentSeed: raw.id || outline || title,
+      allowExternalDependencies: options.allowExternalDependencies,
+    });
+    assertCondition(
+      raw.atomic !== true ||
+        Boolean(String(raw.atomicRationale || "").trim()) ||
+        legacyAtomic,
+      `Atomic internal subtasks require a rationale: ${title}`,
+      "ATOMIC_RATIONALE_REQUIRED",
+    );
+    assertCondition(
+      !(raw.atomic === true && miniSteps.length > 0),
+      `An internal subtask cannot be atomic and contain mini steps: ${title}`,
+      "INVALID_DECOMPOSITION",
+    );
+    normalized.push(
+      omitEmpty({
+        id: raw.id ? String(raw.id) : `step_${shortHash(`${title}:${index}`)}`,
+        title,
+        outcome: raw.outcome ? String(raw.outcome).trim() : undefined,
+        status,
+        required: raw.required !== false,
+        kind: raw.kind ? String(raw.kind) : undefined,
+        source: raw.source ? String(raw.source) : undefined,
+        outline,
+        parentOutline: raw.parentOutline
+          ? String(raw.parentOutline).trim()
+          : undefined,
+        outlinePath: normalizeOutlinePath(raw.outlinePath),
+        atomic: raw.atomic === true || legacyAtomic,
+        atomicRationale: raw.atomicRationale
+          ? String(raw.atomicRationale).trim()
+          : legacyAtomic
+            ? "Legacy flat internal-step input is treated as an atomic subtask."
+            : undefined,
+        needsModelReview: raw.needsModelReview === true,
+        dependsOn: normalizeOptionalStringList(raw.dependsOn),
+        sourceRefs: normalizeOptionalStringList(raw.sourceRefs),
+        evidenceRequired:
+          raw.evidenceRequired === undefined
+            ? !legacyAtomic
+            : raw.evidenceRequired !== false,
+        acceptanceCriteria: normalizeOptionalStringList(raw.acceptanceCriteria),
+        evidence: Array.isArray(raw.evidence)
+          ? normalizeStepEvidence(raw.evidence)
+          : undefined,
+        miniSteps,
+        updatedAt: raw.updatedAt ? String(raw.updatedAt) : undefined,
+        completedAt: raw.completedAt ? String(raw.completedAt) : undefined,
+      }),
+    );
+  }
+  assertStepDependencyGraph(normalized, "internal subtask", options);
+  return normalized;
+}
+
+function normalizeMiniStepList(steps = [], options = {}) {
+  assertCondition(
+    Array.isArray(steps) && steps.length <= LIMITS.internalSteps,
+    `Mini steps must be an array with at most ${LIMITS.internalSteps} values.`,
+    Array.isArray(steps) ? "INPUT_TOO_LARGE" : "INVALID_INPUT",
+  );
   const seen = new Set();
   const normalized = [];
   for (const [index, item] of steps.entries()) {
@@ -2333,23 +2669,69 @@ function normalizeInternalStepList(steps = []) {
       raw.title || raw.text || raw.summary || raw.name || "",
     ).trim();
     if (!title) continue;
-    const key = title.toLowerCase();
+    const outline = raw.outline ? String(raw.outline).trim() : undefined;
+    const key = outline
+      ? `outline:${outline.toLowerCase()}`
+      : `title:${title.toLowerCase()}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const status = normalizeInternalStepStatus(raw.status);
     normalized.push(
       omitEmpty({
-        id: raw.id ? String(raw.id) : `step_${shortHash(`${title}:${index}`)}`,
+        id: raw.id
+          ? String(raw.id)
+          : `mini_${shortHash(`${options.parentSeed || "subtask"}:${title}:${index}`)}`,
         title,
-        status,
-        kind: raw.kind ? String(raw.kind) : undefined,
+        outcome: raw.outcome ? String(raw.outcome).trim() : undefined,
+        status: normalizeInternalStepStatus(raw.status),
+        required: raw.required !== false,
+        kind: raw.kind ? String(raw.kind) : "mini_step",
         source: raw.source ? String(raw.source) : undefined,
+        outline,
+        parentOutline: raw.parentOutline
+          ? String(raw.parentOutline).trim()
+          : undefined,
+        outlinePath: normalizeOutlinePath(raw.outlinePath),
+        dependsOn: normalizeOptionalStringList(raw.dependsOn),
+        sourceRefs: normalizeOptionalStringList(raw.sourceRefs),
+        evidenceRequired: raw.evidenceRequired !== false,
+        acceptanceCriteria: normalizeOptionalStringList(raw.acceptanceCriteria),
+        evidence: Array.isArray(raw.evidence)
+          ? normalizeStepEvidence(raw.evidence)
+          : undefined,
         updatedAt: raw.updatedAt ? String(raw.updatedAt) : undefined,
         completedAt: raw.completedAt ? String(raw.completedAt) : undefined,
       }),
     );
   }
+  assertStepDependencyGraph(normalized, "mini step", options);
   return normalized;
+}
+
+function normalizeOutlinePath(value) {
+  if (!Array.isArray(value)) return undefined;
+  return normalizeBoundedStrings(
+    value,
+    "outline path",
+    LIMITS.internalSteps,
+    LIMITS.title,
+  );
+}
+
+function normalizeOptionalStringList(value) {
+  if (!Array.isArray(value)) return undefined;
+  return normalizeBoundedStrings(
+    value,
+    "acceptance criteria",
+    LIMITS.internalSteps,
+    LIMITS.text,
+  );
+}
+
+function normalizeStepEvidence(value) {
+  return normalizeTaskEvidence(value).map((item, index) => ({
+    ...item,
+    ...(value[index]?.at ? { at: String(value[index].at) } : {}),
+  }));
 }
 
 function normalizeInternalStepStatus(status) {
@@ -2361,25 +2743,156 @@ function normalizeInternalStepStatus(status) {
 }
 
 function mergeInternalSteps(existing = [], incoming = []) {
-  const merged = normalizeInternalStepList(existing);
-  const byTitle = new Map(
-    merged.map((step, index) => [step.title.toLowerCase(), index]),
+  const normalizedExisting = normalizeInternalStepList(existing);
+  const normalizedIncoming = normalizeInternalStepList(incoming, {
+    allowExternalDependencies: true,
+  });
+  const incomingHasModelStructure = normalizedIncoming.some(
+    (step) => step.source !== "fallback_scaffold",
   );
-  for (const step of normalizeInternalStepList(incoming)) {
-    const key = step.title.toLowerCase();
-    const existingIndex = byTitle.get(key);
-    if (existingIndex === undefined) {
-      byTitle.set(key, merged.length);
+  const existingIsOnlyFallback =
+    normalizedExisting.length > 0 &&
+    normalizedExisting.every((step) => step.source === "fallback_scaffold");
+  const available =
+    incomingHasModelStructure && existingIsOnlyFallback
+      ? []
+      : [...normalizedExisting];
+  const merged = [];
+  for (const step of normalizedIncoming) {
+    const existingIndex = findMatchingStepIndex(available, step);
+    if (existingIndex < 0) {
       merged.push(step);
     } else {
-      merged[existingIndex] = {
-        ...step,
-        ...merged[existingIndex],
-        status: merged[existingIndex].status || step.status || "pending",
-      };
+      merged.push(mergeInternalStep(available[existingIndex], step));
+      available.splice(existingIndex, 1);
     }
   }
-  return merged;
+  return normalizeInternalStepList([...merged, ...available]);
+}
+
+function mergeInternalStep(existing, incoming) {
+  const miniSteps = mergeMiniSteps(
+    existing.miniSteps || [],
+    incoming.miniSteps || [],
+  );
+  const requiredMiniIncomplete = miniSteps.some(
+    (step) =>
+      step.required !== false && !["done", "skipped"].includes(step.status),
+  );
+  return omitEmpty({
+    ...existing,
+    ...incoming,
+    id: existing.id || incoming.id,
+    status:
+      existing.status === "done" && requiredMiniIncomplete
+        ? "pending"
+        : existing.status || incoming.status || "pending",
+    evidence: mergeEvidence(existing.evidence, incoming.evidence),
+    miniSteps,
+    needsModelReview:
+      incoming.needsModelReview === true ||
+      (incoming.needsModelReview !== false &&
+        existing.needsModelReview === true),
+  });
+}
+
+function mergeMiniSteps(existing = [], incoming = []) {
+  const available = normalizeMiniStepList(existing);
+  const merged = [];
+  for (const step of normalizeMiniStepList(incoming, {
+    allowExternalDependencies: true,
+  })) {
+    const existingIndex = findMatchingStepIndex(available, step);
+    if (existingIndex < 0) {
+      merged.push(step);
+      continue;
+    }
+    const prior = available[existingIndex];
+    merged.push(
+      omitEmpty({
+        ...prior,
+        ...step,
+        id: prior.id || step.id,
+        status: prior.status || step.status || "pending",
+        evidence: mergeEvidence(prior.evidence, step.evidence),
+      }),
+    );
+    available.splice(existingIndex, 1);
+  }
+  return normalizeMiniStepList([...merged, ...available]);
+}
+
+function assertStepDependencyGraph(steps, kind, options = {}) {
+  const byId = new Map(steps.map((step) => [step.id, step]));
+  for (const step of steps) {
+    const dependencies = step.dependsOn || [];
+    const missing = dependencies.filter((id) => !byId.has(id));
+    if (!options.allowExternalDependencies)
+      assertCondition(
+        missing.length === 0,
+        `${kind} references missing dependencies: ${missing.join(", ")}`,
+        "INVALID_DEPENDENCIES",
+        { step, missing },
+      );
+    assertCondition(
+      !dependencies.includes(step.id),
+      `${kind} cannot depend on itself: ${step.title}`,
+      "INVALID_DEPENDENCIES",
+      { step },
+    );
+  }
+
+  const visiting = new Set();
+  const visited = new Set();
+  const visit = (id, path = []) => {
+    if (visited.has(id)) return;
+    assertCondition(
+      !visiting.has(id),
+      `${kind} dependencies contain a cycle: ${[...path, id].join(" -> ")}`,
+      "INVALID_DEPENDENCIES",
+      { cycle: [...path, id] },
+    );
+    visiting.add(id);
+    for (const dependencyId of byId.get(id)?.dependsOn || []) {
+      if (byId.has(dependencyId)) visit(dependencyId, [...path, id]);
+    }
+    visiting.delete(id);
+    visited.add(id);
+  };
+  for (const id of byId.keys()) visit(id);
+}
+
+function findMatchingStepIndex(steps, incoming) {
+  if (incoming.outline) {
+    const outline = incoming.outline.toLowerCase();
+    const index = steps.findIndex(
+      (step) => step.outline?.toLowerCase() === outline,
+    );
+    if (index >= 0) return index;
+  }
+  if (incoming.id) {
+    const index = steps.findIndex((step) => step.id === incoming.id);
+    if (index >= 0) return index;
+  }
+  const title = incoming.title.toLowerCase();
+  return steps.findIndex((step) => step.title.toLowerCase() === title);
+}
+
+function mergeEvidence(existing = [], incoming = []) {
+  const values = [...(existing || []), ...(incoming || [])];
+  const seen = new Set();
+  return values.filter((item) => {
+    const key = JSON.stringify([
+      item.kind,
+      item.summary,
+      item.command,
+      item.exitCode,
+      item.files,
+    ]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 /** @param {Record<string, any>} existing @param {Record<string, any>} incoming */
@@ -2420,29 +2933,58 @@ function resetInternalStepsForReopen(steps = []) {
     omitEmpty({
       ...step,
       status: index === 0 ? "active" : "pending",
+      miniSteps: resetMiniStepsForReopen(step.miniSteps || [], index === 0),
       reopenedAt: nowIso(),
       completedAt: undefined,
     }),
   );
 }
 
+function resetMiniStepsForReopen(steps = [], activateFirst = false) {
+  let activated = false;
+  return normalizeMiniStepList(steps).map((step) => {
+    const active =
+      activateFirst &&
+      !activated &&
+      step.required !== false &&
+      step.status !== "skipped";
+    if (active) activated = true;
+    return omitEmpty({
+      ...step,
+      status: active ? "active" : "pending",
+      reopenedAt: nowIso(),
+      completedAt: undefined,
+    });
+  });
+}
+
 function suspendInternalStepProgress(metadata = {}) {
   const internalSteps = normalizeInternalStepList(
     metadata.internalSteps || [],
-  ).map((step) =>
-    step.status === "active" ? markInternalStep(step, "pending") : step,
-  );
+  ).map((step) => ({
+    ...(step.status === "active" ? markInternalStep(step, "pending") : step),
+    miniSteps: normalizeMiniStepList(step.miniSteps || []).map((miniStep) =>
+      miniStep.status === "active"
+        ? markMiniStep(miniStep, "pending")
+        : miniStep,
+    ),
+  }));
   return internalSteps.length ? { ...metadata, internalSteps } : metadata || {};
 }
 
 function terminalizeInternalSteps(metadata = {}) {
   const internalSteps = normalizeInternalStepList(
     metadata.internalSteps || [],
-  ).map((step) =>
-    ["done", "skipped"].includes(step.status)
+  ).map((step) => ({
+    ...(["done", "skipped"].includes(step.status)
       ? step
-      : markInternalStep(step, "skipped"),
-  );
+      : markInternalStep(step, "skipped")),
+    miniSteps: normalizeMiniStepList(step.miniSteps || []).map((miniStep) =>
+      ["done", "skipped"].includes(miniStep.status)
+        ? miniStep
+        : markMiniStep(miniStep, "skipped"),
+    ),
+  }));
   return internalSteps.length ? { ...metadata, internalSteps } : metadata || {};
 }
 
@@ -2452,18 +2994,29 @@ function ensureInternalStepProgress(metadata = {}, taskStatus = "pending") {
   if (taskStatus === "done")
     return {
       ...metadata,
-      internalSteps: internalSteps.map((step) =>
-        markInternalStep(step, "done"),
-      ),
+      internalSteps: internalSteps.map((step) => ({
+        ...markInternalStep(step, "done"),
+        miniSteps: normalizeMiniStepList(step.miniSteps || []).map((miniStep) =>
+          markMiniStep(miniStep, "done"),
+        ),
+      })),
     };
   if (
     taskStatus === "active" &&
     !internalSteps.some((step) => step.status === "active")
   ) {
     const index = internalSteps.findIndex((step) => step.status === "pending");
-    if (index >= 0)
-      internalSteps[index] = markInternalStep(internalSteps[index], "active");
+    if (index >= 0) {
+      internalSteps[index] = activateInternalStep(internalSteps[index]);
+    }
   }
+  const activeIndex = internalSteps.findIndex(
+    (step) => step.status === "active",
+  );
+  if (activeIndex >= 0)
+    internalSteps[activeIndex] = activateFirstPendingMiniStep(
+      internalSteps[activeIndex],
+    );
   return { ...metadata, internalSteps };
 }
 
@@ -2473,7 +3026,8 @@ function hasInternalStepUpdate(args = {}) {
     args.internalStepId !== undefined ||
     args.internalStepTitle !== undefined ||
     args.internalStepIndex !== undefined ||
-    args.internalStepStatus !== undefined
+    args.internalStepStatus !== undefined ||
+    hasMiniStepUpdate(args)
   );
 }
 
@@ -2486,13 +3040,24 @@ function updateInternalStepProgress(metadata = {}, args = {}, options = {}) {
       options.taskStatus || "active",
     );
 
-  const request = normalizeInternalStepRequest(args);
+  const miniStepUpdate = hasMiniStepUpdate(args);
+  const request = normalizeInternalStepRequest(args, {
+    defaultStatus: miniStepUpdate ? undefined : "done",
+  });
   let index = findInternalStepIndex(internalSteps, request);
-  if (index < 0 && request.title) {
+  if (index < 0 && miniStepUpdate)
+    index = internalSteps.findIndex((step) => step.status === "active");
+  if (index < 0 && miniStepUpdate)
+    index = internalSteps.findIndex((step) => step.status === "pending");
+  if (index < 0 && request.title && !miniStepUpdate) {
     internalSteps.push({
       id: `step_${shortHash(`${request.title}:${internalSteps.length}`)}`,
       title: request.title,
       status: "pending",
+      required: true,
+      source: "model_discovered",
+      needsModelReview: true,
+      miniSteps: [],
     });
     index = internalSteps.length - 1;
   }
@@ -2502,28 +3067,51 @@ function updateInternalStepProgress(metadata = {}, args = {}, options = {}) {
       options.taskStatus || "active",
     );
 
+  if (miniStepUpdate) {
+    assertCondition(
+      index >= 0,
+      "Select an internal subtask before updating a mini step.",
+      "INTERNAL_STEP_REQUIRED",
+    );
+    internalSteps = internalSteps.map((step, stepIndex) =>
+      stepIndex === index
+        ? updateMiniStepProgress(step, args, options.evidence)
+        : step,
+    );
+    return ensureInternalStepProgress(
+      { ...metadata, internalSteps },
+      options.taskStatus || "active",
+    );
+  }
+
   const nextStatus = request.status || "done";
+  if (nextStatus === "done")
+    assertInternalSubtaskCompletable(
+      internalSteps[index],
+      internalSteps,
+      options.evidence,
+    );
   if (nextStatus === "active")
     internalSteps = internalSteps.map((step, stepIndex) =>
       step.status === "active" && stepIndex !== index
         ? markInternalStep(step, "pending")
         : step,
     );
-  internalSteps[index] = markInternalStep(internalSteps[index], nextStatus);
+  internalSteps[index] = appendStepEvidence(
+    markInternalStep(internalSteps[index], nextStatus),
+    options.evidence,
+  );
   if (nextStatus === "done" && request.advance !== false) {
     const nextIndex = internalSteps.findIndex(
       (step, stepIndex) => stepIndex > index && step.status === "pending",
     );
     if (nextIndex >= 0)
-      internalSteps[nextIndex] = markInternalStep(
-        internalSteps[nextIndex],
-        "active",
-      );
+      internalSteps[nextIndex] = activateInternalStep(internalSteps[nextIndex]);
   }
   return { ...metadata, internalSteps };
 }
 
-function normalizeInternalStepRequest(args = {}) {
+function normalizeInternalStepRequest(args = {}, options = {}) {
   const raw =
     typeof args.internalStep === "object" && args.internalStep !== null
       ? args.internalStep
@@ -2540,11 +3128,103 @@ function normalizeInternalStepRequest(args = {}) {
       : Number.isInteger(args.internalStepIndex)
         ? args.internalStepIndex
         : undefined,
-    status: normalizeInternalStepStatus(
-      raw.status || args.internalStepStatus || "done",
-    ),
+    status:
+      raw.status !== undefined ||
+      args.internalStepStatus !== undefined ||
+      options.defaultStatus !== undefined
+        ? normalizeInternalStepStatus(
+            raw.status || args.internalStepStatus || options.defaultStatus,
+          )
+        : undefined,
     advance: raw.advance ?? args.advanceInternalStep,
   });
+}
+
+function hasMiniStepUpdate(args = {}) {
+  return (
+    args.miniStep !== undefined ||
+    args.miniStepId !== undefined ||
+    args.miniStepTitle !== undefined ||
+    args.miniStepIndex !== undefined ||
+    args.miniStepStatus !== undefined
+  );
+}
+
+function normalizeMiniStepRequest(args = {}) {
+  const raw =
+    typeof args.miniStep === "object" && args.miniStep !== null
+      ? args.miniStep
+      : {};
+  const title =
+    typeof args.miniStep === "string"
+      ? args.miniStep
+      : raw.title || raw.text || raw.summary || args.miniStepTitle || null;
+  return omitEmpty({
+    id: raw.id || args.miniStepId,
+    title: title ? String(title).trim() : undefined,
+    index: Number.isInteger(raw.index)
+      ? raw.index
+      : Number.isInteger(args.miniStepIndex)
+        ? args.miniStepIndex
+        : undefined,
+    status: normalizeInternalStepStatus(
+      raw.status || args.miniStepStatus || "done",
+    ),
+    advance: raw.advance ?? args.advanceMiniStep,
+    kind: raw.kind ? String(raw.kind) : undefined,
+    source: raw.source ? String(raw.source) : undefined,
+  });
+}
+
+function updateMiniStepProgress(step, args, evidence) {
+  let miniSteps = normalizeMiniStepList(step.miniSteps || [], {
+    parentSeed: step.id,
+  });
+  const request = normalizeMiniStepRequest(args);
+  let index = findInternalStepIndex(miniSteps, request);
+  if (index < 0 && request.title) {
+    miniSteps.push({
+      id: `mini_${shortHash(`${step.id}:${request.title}:${miniSteps.length}`)}`,
+      title: request.title,
+      status: "pending",
+      required: true,
+      kind: request.kind || "mini_step",
+      source: request.source || "model_discovered",
+    });
+    index = miniSteps.length - 1;
+  }
+  assertCondition(
+    index >= 0,
+    "Mini step not found in the selected internal subtask.",
+    "MINI_STEP_NOT_FOUND",
+  );
+  const nextStatus = request.status || "done";
+  if (nextStatus === "done")
+    assertMiniStepCompletable(miniSteps[index], miniSteps, evidence);
+  if (nextStatus === "active")
+    miniSteps = miniSteps.map((miniStep, miniIndex) =>
+      miniStep.status === "active" && miniIndex !== index
+        ? markMiniStep(miniStep, "pending")
+        : miniStep,
+    );
+  miniSteps[index] = appendStepEvidence(
+    markMiniStep(miniSteps[index], nextStatus),
+    evidence,
+  );
+  if (nextStatus === "done" && request.advance !== false) {
+    const nextIndex = miniSteps.findIndex(
+      (miniStep, miniIndex) =>
+        miniIndex > index && miniStep.status === "pending",
+    );
+    if (nextIndex >= 0)
+      miniSteps[nextIndex] = markMiniStep(miniSteps[nextIndex], "active");
+  }
+  return {
+    ...step,
+    status: step.status === "pending" ? "active" : step.status,
+    miniSteps,
+    updatedAt: nowIso(),
+  };
 }
 
 function findInternalStepIndex(steps, request) {
@@ -2577,6 +3257,136 @@ function markInternalStep(step, status) {
   });
 }
 
+function markMiniStep(step, status) {
+  const normalizedStatus = normalizeInternalStepStatus(status);
+  return omitEmpty({
+    ...step,
+    status: normalizedStatus,
+    updatedAt: nowIso(),
+    completedAt: ["done", "skipped"].includes(normalizedStatus)
+      ? step.completedAt || nowIso()
+      : undefined,
+  });
+}
+
+function activateInternalStep(step) {
+  return activateFirstPendingMiniStep(markInternalStep(step, "active"));
+}
+
+function activateFirstPendingMiniStep(step) {
+  const miniSteps = normalizeMiniStepList(step.miniSteps || [], {
+    parentSeed: step.id,
+  });
+  if (
+    miniSteps.length &&
+    !miniSteps.some((miniStep) => miniStep.status === "active")
+  ) {
+    const index = miniSteps.findIndex(
+      (miniStep) =>
+        miniStep.required !== false && miniStep.status === "pending",
+    );
+    if (index >= 0) miniSteps[index] = markMiniStep(miniSteps[index], "active");
+  }
+  return { ...step, miniSteps };
+}
+
+function appendStepEvidence(step, evidence) {
+  if (!evidence) return step;
+  return {
+    ...step,
+    evidence: mergeEvidence(step.evidence || [], [evidence]),
+  };
+}
+
+function assertInternalSubtaskCompletable(
+  step,
+  siblingSteps = [],
+  completionEvidence = null,
+) {
+  assertCondition(
+    step.needsModelReview !== true && step.source !== "fallback_scaffold",
+    `Reconcile the model-derived structure before completing this internal subtask: ${step.title}`,
+    "DECOMPOSITION_REVIEW_REQUIRED",
+    { internalStep: step },
+  );
+  const miniSteps = normalizeMiniStepList(step.miniSteps || [], {
+    parentSeed: step.id,
+  });
+  assertDependenciesTerminalForStep(step, siblingSteps, "internal subtask");
+  assertCondition(
+    step.atomic === true || miniSteps.length > 0,
+    `Define outcome-specific mini steps or explicitly mark this internal subtask atomic before completion: ${step.title}`,
+    "MINI_STEPS_REQUIRED",
+    { internalStep: step },
+  );
+  const incomplete = miniSteps.filter(
+    (miniStep) =>
+      miniStep.required !== false &&
+      !["done", "skipped"].includes(miniStep.status),
+  );
+  assertCondition(
+    incomplete.length === 0,
+    `Complete all required mini steps before completing this internal subtask: ${incomplete.map((miniStep) => miniStep.title).join("; ")}`,
+    "MINI_STEPS_INCOMPLETE",
+    { internalStep: step, incompleteMiniSteps: incomplete },
+  );
+  for (const miniStep of miniSteps.filter(
+    (candidate) => candidate.required !== false,
+  ))
+    assertMiniStepCompletable(miniStep, miniSteps);
+  assertCondition(
+    step.evidenceRequired === false ||
+      (step.evidence || []).length > 0 ||
+      Boolean(completionEvidence),
+    `Attach evidence before completing this internal subtask: ${step.title}`,
+    "INTERNAL_STEP_EVIDENCE_REQUIRED",
+    { internalStep: step },
+  );
+}
+
+function assertMiniStepCompletable(
+  miniStep,
+  siblingSteps = [],
+  completionEvidence = null,
+) {
+  assertDependenciesTerminalForStep(miniStep, siblingSteps, "mini step");
+  assertCondition(
+    miniStep.evidenceRequired === false ||
+      (miniStep.evidence || []).length > 0 ||
+      Boolean(completionEvidence),
+    `Attach evidence before completing this mini step: ${miniStep.title}`,
+    "MINI_STEP_EVIDENCE_REQUIRED",
+    { miniStep },
+  );
+}
+
+function assertDependenciesTerminalForStep(step, siblings, kind) {
+  const dependencies = Array.isArray(step.dependsOn) ? step.dependsOn : [];
+  if (!dependencies.length) return;
+  const byId = new Map(siblings.map((candidate) => [candidate.id, candidate]));
+  const missing = dependencies.filter((id) => !byId.has(id));
+  assertCondition(
+    missing.length === 0,
+    `${kind} references missing dependencies: ${missing.join(", ")}`,
+    "INVALID_DEPENDENCIES",
+    { step, missing },
+  );
+  const incomplete = dependencies
+    .map((id) => byId.get(id))
+    .filter(
+      (dependency) =>
+        dependency && !["done", "skipped"].includes(dependency.status),
+    );
+  assertCondition(
+    incomplete.length === 0,
+    `Complete dependent ${kind} work first: ${incomplete
+      .map((dependency) => dependency.title)
+      .join("; ")}`,
+    "DEPENDENCIES_INCOMPLETE",
+    { step, incomplete },
+  );
+}
+
 function normalizeCompletedInternalSteps(metadata = {}) {
   const internalSteps = normalizeInternalStepList(metadata.internalSteps || []);
   if (!internalSteps.length) return metadata || {};
@@ -2586,8 +3396,19 @@ function normalizeCompletedInternalSteps(metadata = {}) {
 function assertInternalStepsComplete(metadata = {}) {
   const internalSteps = normalizeInternalStepList(metadata.internalSteps || []);
   if (!internalSteps.length) return;
+  assertCondition(
+    metadata.decomposition?.needsModelReview !== true,
+    "Reconcile the model-derived route structure before completing this route segment.",
+    "DECOMPOSITION_REVIEW_REQUIRED",
+    { decomposition: metadata.decomposition },
+  );
+  for (const step of internalSteps.filter(
+    (candidate) => candidate.required !== false,
+  ))
+    assertInternalSubtaskCompletable(step, internalSteps);
   const incomplete = internalSteps.filter(
-    (step) => !["done", "skipped"].includes(step.status),
+    (step) =>
+      step.required !== false && !["done", "skipped"].includes(step.status),
   );
   assertCondition(
     incomplete.length === 0,
@@ -2800,7 +3621,18 @@ function validateHistoricalImport(document, workspaceRoot) {
     );
     assertUniqueIds(document[collection], collection.slice(0, -1));
   }
-  const runs = document.runs.map((run) => ({ ...run, workspaceRoot }));
+  const runs = document.runs.map((run) => ({
+    ...run,
+    workspaceRoot,
+    metadata: run.metadata?.sourceContext
+      ? {
+          ...(run.metadata || {}),
+          sourceContext: normalizePersistedSourceContext(
+            run.metadata.sourceContext,
+          ),
+        }
+      : run.metadata,
+  }));
   const runIds = new Set(runs.map((run) => run.id));
   for (const run of runs) {
     assertKnownEnum(run.status, RUN_STATUSES, "run status");

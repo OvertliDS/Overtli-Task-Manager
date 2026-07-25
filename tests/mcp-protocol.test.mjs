@@ -107,6 +107,31 @@ test("MCP schemas close input/output objects and reject nested unsafe arguments"
       }),
     { code: "MCP_UNKNOWN_ARGUMENT" },
   );
+  assert.doesNotThrow(() =>
+    validateMcpArgs("otm_start", {
+      goal: "valid mixed route",
+      tasks: [
+        {
+          title: "Review behavior",
+          workType: "review",
+          workTypeSource: "model",
+        },
+        {
+          title: "Implement repair",
+          workType: "implementation",
+          workTypeSource: "model",
+        },
+      ],
+    }),
+  );
+  assert.throws(
+    () =>
+      validateMcpArgs("otm_start", {
+        goal: "invalid work type",
+        tasks: [{ title: "task", workType: "x".repeat(81) }],
+      }),
+    { code: "INPUT_TOO_LARGE" },
+  );
   assert.throws(
     () =>
       validateMcpArgs("otm_complete_task", {

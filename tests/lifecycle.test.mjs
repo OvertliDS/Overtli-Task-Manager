@@ -45,6 +45,28 @@ function completeAllStepsAndTask(manager, workspaceRoot, taskId, scope = {}) {
   });
 }
 
+function modelReviewedAtomicTask(title) {
+  return {
+    title,
+    internalSteps: [
+      {
+        title: `Verify ${title}`,
+        source: "test_fixture",
+        atomic: true,
+        atomicRationale:
+          "This fixture isolates lifecycle behavior rather than decomposition.",
+      },
+    ],
+    metadata: {
+      decomposition: {
+        version: 2,
+        source: "test_fixture",
+        needsModelReview: false,
+      },
+    },
+  };
+}
+
 test("terminal task transitions terminalize internal steps and reject stale progress", () => {
   const workspaceRoot = workspace();
   const manager = createTaskManager({
@@ -277,7 +299,7 @@ test("different finalized runs with the same goal retain independent turn-summar
     workspaceRoot,
     sessionId: "first",
     goal: "Shared goal",
-    tasks: [{ title: "First task" }],
+    tasks: [modelReviewedAtomicTask("First task")],
   });
   completeAllStepsAndTask(manager, workspaceRoot, first.snapshot.tasks[0].id, {
     sessionId: "first",
@@ -292,7 +314,7 @@ test("different finalized runs with the same goal retain independent turn-summar
     workspaceRoot,
     sessionId: "second",
     goal: "Shared goal",
-    tasks: [{ title: "Second task" }],
+    tasks: [modelReviewedAtomicTask("Second task")],
   });
   completeAllStepsAndTask(manager, workspaceRoot, second.snapshot.tasks[0].id, {
     sessionId: "second",
@@ -323,7 +345,7 @@ test("clear reports a redacted history-maintenance failure instead of silently d
   const started = manager.start({
     workspaceRoot,
     goal: "Clear with visible maintenance diagnostic",
-    tasks: [{ title: "Complete work" }],
+    tasks: [modelReviewedAtomicTask("Complete work")],
   });
   completeAllStepsAndTask(manager, workspaceRoot, started.snapshot.tasks[0].id);
   manager.finalizeTurn({ workspaceRoot });

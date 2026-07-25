@@ -1,15 +1,40 @@
 import path from "node:path";
 import fs from "node:fs";
 import { getHomeDir, ensureDir } from "../core/fs-utils.mjs";
+import { OtmError } from "../core/errors.mjs";
 import { JsonStore } from "./json-store.mjs";
-import { SqliteStore, loadBetterSqlite3 } from "./sqlite-store.mjs";
+import {
+  SqliteStore,
+  createBetterSqlite3UnavailableError,
+  inspectBetterSqlite3Runtime,
+} from "./sqlite-store.mjs";
 
-export function createStore({ env = process.env, readOnly = false } = {}) {
+const STORAGE_BACKENDS = new Set(["auto", "sqlite", "json"]);
+
+export function createStore({
+  env = process.env,
+  readOnly = false,
+  sqliteRuntime = null,
+} = {}) {
   const stateDir = env.OTM_STATE_DIR || getHomeDir(env);
   const requested = (env.OTM_STORAGE || "auto").toLowerCase();
+  if (!STORAGE_BACKENDS.has(requested))
+    throw new OtmError(
+      `Invalid OTM_STORAGE value "${requested}". Expected auto, sqlite, or json.`,
+      {
+        code: "INVALID_STORAGE_BACKEND",
+        details: { requested },
+      },
+    );
   const sqlitePath = path.join(stateDir, "state.sqlite");
   const jsonStateDir = path.join(stateDir, "json");
-  const sqliteAvailable = requested !== "json" && Boolean(loadBetterSqlite3());
+  const runtime =
+    requested === "json"
+      ? null
+      : sqliteRuntime || inspectBetterSqlite3Runtime({ env });
+  const sqliteAvailable = Boolean(runtime?.available);
+  if (!sqliteAvailable && requested === "sqlite")
+    throw createBetterSqlite3UnavailableError(runtime);
 
   if (readOnly) {
     if (sqliteAvailable && fsExists(sqlitePath)) {
@@ -33,9 +58,7 @@ export function createStore({ env = process.env, readOnly = false } = {}) {
   }
 
   if (requested === "sqlite") {
-    throw new Error(
-      "OTM_STORAGE=sqlite was requested, but required dependency better-sqlite3 is not installed. Run npm install or explicitly set OTM_STORAGE=json.",
-    );
+    throw createBetterSqlite3UnavailableError(runtime);
   }
 
   const store = new JsonStore({ stateDir: path.join(stateDir, "json") });

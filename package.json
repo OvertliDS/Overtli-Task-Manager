@@ -24,6 +24,9 @@
   "engines": {
     "node": ">=20.10"
   },
+  "overrides": {
+    "@hono/node-server": "^2.0.5"
+  },
   "bin": {
     "otm": "./bin/otm.mjs",
     "otm-mcp": "./bin/otm-mcp.mjs",
@@ -71,9 +74,9 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.5",
+    "@eslint/js": "^10.0.1",
     "@types/node": "^24.13.3",
-    "eslint": "^9.39.5",
+    "eslint": "^10.8.0",
     "globals": "^15.15.0",
     "prettier": "^3.9.5",
     "typescript": "^5.9.3"

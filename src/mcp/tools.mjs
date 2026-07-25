@@ -2,6 +2,7 @@ import {
   boundedContextSchema,
   evidenceSchema,
   internalStepInputSchema,
+  miniStepInputSchema,
   reconciliationChangeSchema,
   taskListSchema,
 } from "./schemas.mjs";
@@ -10,7 +11,7 @@ export const tools = [
   {
     name: "otm_start",
     description:
-      "Start a new session-scoped Overtli Task Manager route for a non-trivial Codex task. Routes are isolated by workspace plus CODEX_THREAD_ID unless sessionId is explicit. Returns chat Markdown and writes canonical session current files plus the workspace session index.",
+      "Start a session-scoped route after the model reviews the complete accumulated request. Supply major outcomes as route gates, tag every gate with its actual workType (planning, review, research, documentation, implementation, validation, release, deployment, operations, mixed, or a justified custom label), add substantive explicit or model-inferred internalSteps, and add concrete miniSteps under each non-atomic subtask. A mixed prompt remains mixed at route level; do not convert planning/review/documentation gates into implementation. OTM guides structure and recursive gates; the model owns domain content. Routes are isolated by workspace plus CODEX_THREAD_ID unless sessionId is explicit.",
     inputSchema: {
       type: "object",
       properties: {
@@ -53,7 +54,7 @@ export const tools = [
   {
     name: "otm_reconcile",
     description:
-      "Update an active route after user steering, continuation, appended tasks, dropped tasks, or route replacement. Use immediately when the user changes direction.",
+      "Re-review the accumulated contract and update an active route after steering, new prompt/attachment/OCR/visual context, continuation, discoveries, or replacement. Preserve explicit identifiers, per-gate workType intent, valid evidence, and supersession history while replacing fallback scaffolds with model-authored three-tier structure. Recompute a mixed route from its gates instead of applying one lossy route-wide label.",
     inputSchema: {
       type: "object",
       properties: {
@@ -65,6 +66,30 @@ export const tools = [
         },
         runId: { type: "string" },
         prompt: { type: "string" },
+        context: {
+          description: "Supplemental context added during reconciliation.",
+          ...boundedContextSchema,
+        },
+        promptContext: {
+          description:
+            "Pasted plan text or other prompt context added during reconciliation.",
+          ...boundedContextSchema,
+        },
+        attachments: {
+          description:
+            "Attachment metadata or extracted text/OCR/description content added during reconciliation.",
+          ...boundedContextSchema,
+        },
+        screenshots: {
+          description:
+            "Screenshot OCR, captions, or model-visible descriptions added during reconciliation.",
+          ...boundedContextSchema,
+        },
+        images: {
+          description:
+            "Image OCR, captions, or model-visible descriptions added during reconciliation.",
+          ...boundedContextSchema,
+        },
         mode: {
           type: "string",
           enum: ["append", "steer", "continue", "replace"],
@@ -110,7 +135,7 @@ export const tools = [
   {
     name: "otm_progress",
     description:
-      "Record a progress checkpoint and return a Markdown status update. Use exact task ids from the latest snapshot/current.json when taskId is supplied. Use this to mark one internal step done/active as work happens; route gates still require otm_complete_task evidence after internal steps are terminal.",
+      "Record evidence-backed progress for a route gate, one internal subtask, or one nested mini-step. Use exact ids from the latest canonical snapshot. A non-atomic internal subtask cannot complete until required mini-steps are terminal; the route gate still requires every required descendant plus segment evidence.",
     inputSchema: {
       type: "object",
       properties: {
@@ -141,6 +166,27 @@ export const tools = [
           ],
         },
         advanceInternalStep: { type: "boolean" },
+        miniStep: {
+          description:
+            "Nested mini-step title or object under the selected/current internal subtask.",
+          ...miniStepInputSchema,
+        },
+        miniStepId: { type: "string" },
+        miniStepTitle: { type: "string" },
+        miniStepIndex: { type: "integer", minimum: 0, maximum: 127 },
+        miniStepStatus: {
+          type: "string",
+          enum: [
+            "pending",
+            "active",
+            "done",
+            "blocked",
+            "skipped",
+            "complete",
+            "completed",
+          ],
+        },
+        advanceMiniStep: { type: "boolean" },
       },
       required: ["message"],
     },
@@ -148,7 +194,7 @@ export const tools = [
   {
     name: "otm_complete_task",
     description:
-      "Mark a route segment complete using an exact taskId from the latest snapshot/current.json. Requires concrete completion evidence and terminal internal steps.",
+      "Close a route gate using an exact taskId from the latest canonical snapshot. Requires concrete segment evidence, model-reviewed decomposition, and every required internal subtask and nested mini-step terminal.",
     inputSchema: {
       type: "object",
       properties: {
@@ -485,7 +531,7 @@ function applySchemaBounds(schema, fieldName = "") {
     applySchemaBounds(candidate, fieldName);
   if (schema.type === "string" && schema.maxLength === undefined) {
     schema.maxLength =
-      /(?:^|_)(?:id|runId|taskId|sessionId|turnId|parentId|internalStepId)$/i.test(
+      /(?:^|_)(?:id|runId|taskId|sessionId|turnId|parentId|internalStepId|miniStepId)$/i.test(
         fieldName,
       )
         ? 128

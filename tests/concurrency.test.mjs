@@ -102,6 +102,28 @@ function terminalizeInternalSteps(manager, workspaceRoot, taskId) {
   }
 }
 
+function modelReviewedAtomicTask(title) {
+  return {
+    title,
+    internalSteps: [
+      {
+        title: `Verify ${title}`,
+        source: "test_fixture",
+        atomic: true,
+        atomicRationale:
+          "This fixture isolates concurrency transitions rather than decomposition.",
+      },
+    ],
+    metadata: {
+      decomposition: {
+        version: 2,
+        source: "test_fixture",
+        needsModelReview: false,
+      },
+    },
+  };
+}
+
 test("separate processes serialize progression, reconciliation, completion, and clearing with revision safety", async () => {
   const packageRoot = fileURLToPath(new URL("..", import.meta.url));
   for (const operation of ["progress", "reconcile", "complete", "clear"]) {
@@ -111,7 +133,7 @@ test("separate processes serialize progression, reconciliation, completion, and 
     const started = manager.start({
       workspaceRoot,
       goal: `${operation} race`,
-      tasks: [{ title: "Race task" }],
+      tasks: [modelReviewedAtomicTask("Race task")],
     });
     const taskId = started.snapshot.tasks[0].id;
     let input;

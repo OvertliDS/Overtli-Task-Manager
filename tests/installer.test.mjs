@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { installWorkspace } from "../src/install/install-workspace.mjs";
+import { managedAgentsBlock } from "../src/install/agent-block.mjs";
 
 function tempWorkspace(prefix = "otm-installer-test-") {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -29,6 +30,32 @@ test("workspace installation dry-run creates no state directories or managed fil
   assert.deepEqual(fs.readdirSync(workspaceRoot).sort(), before);
   assert.equal(fs.existsSync(path.join(workspaceRoot, ".codex")), false);
   assert.equal(fs.existsSync(path.join(workspaceRoot, ".agents")), false);
+});
+
+test("workspace installation ignores its transaction backups and runtime state", () => {
+  const workspaceRoot = tempWorkspace("otm-install-ignore-state-");
+  const result = installWorkspace({ workspaceRoot, packageRoot });
+  assert.equal(result.ok, true);
+  const gitignore = fs.readFileSync(
+    path.join(workspaceRoot, ".gitignore"),
+    "utf8",
+  );
+  assert.match(gitignore, /\.codex\/overtli-task-manager\/install-backups\//);
+  assert.ok(fs.existsSync(result.backupPath));
+  const agents = fs.readFileSync(path.join(workspaceRoot, "AGENTS.md"), "utf8");
+  assert.match(agents, /Tag every gate by its actual work type/);
+  assert.match(
+    agents,
+    /Prefer thorough completion over shallow progress\. Do not introduce placeholder logic, intentionally incomplete code, or unverified assumptions unless the user explicitly requests a scaffold\./,
+  );
+});
+
+test("documented AGENTS example exactly matches the generated managed block", () => {
+  const example = fs
+    .readFileSync(path.join(packageRoot, "examples", "AGENTS-block.md"), "utf8")
+    .replace(/\r\n/g, "\n")
+    .trim();
+  assert.equal(example, managedAgentsBlock().replace(/\r\n/g, "\n").trim());
 });
 
 test("a late workspace installation failure rolls back every earlier managed file", () => {

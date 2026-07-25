@@ -1,11 +1,22 @@
 import path from "node:path";
 import fs from "node:fs";
+import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { ensureDir } from "../core/fs-utils.mjs";
 import { nowIso } from "../core/ids.mjs";
 import { OtmError } from "../core/errors.mjs";
 
 const require = createRequire(import.meta.url);
+const PACKAGE_ROOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+);
+const REBUILD_TIMEOUT_MS = 120_000;
+const REBUILD_LOCK_STALE_MS = REBUILD_TIMEOUT_MS * 2;
+const REBUILD_WAIT_BUFFER = new Int32Array(new SharedArrayBuffer(4));
+let cachedBetterSqlite3Runtime;
 /**
  * Schema versions are deliberately independent of the package version.  Do
  * not fold a migration into CREATE TABLE: existing installations must take an
@@ -14,17 +25,305 @@ const require = createRequire(import.meta.url);
 export const SQLITE_SCHEMA_VERSION = 4;
 
 export function loadBetterSqlite3() {
+  return inspectBetterSqlite3Runtime().Database;
+}
+
+export function inspectBetterSqlite3Runtime({
+  refresh = false,
+  autoRepair = true,
+  env = process.env,
+} = {}) {
+  if (
+    !refresh &&
+    cachedBetterSqlite3Runtime &&
+    !(
+      autoRepair &&
+      !cachedBetterSqlite3Runtime.available &&
+      !cachedBetterSqlite3Runtime.repair
+    )
+  )
+    return cachedBetterSqlite3Runtime;
+  let runtime =
+    !refresh && cachedBetterSqlite3Runtime
+      ? cachedBetterSqlite3Runtime
+      : probeBetterSqlite3Runtime();
+  if (autoRepair)
+    runtime = repairBetterSqlite3Runtime({
+      runtime,
+      env,
+      packageRoot: PACKAGE_ROOT,
+    });
+  cachedBetterSqlite3Runtime = runtime;
+  return cachedBetterSqlite3Runtime;
+}
+
+export function probeBetterSqlite3Runtime(
+  load = () => require("better-sqlite3"),
+) {
+  let db;
   try {
-    return require("better-sqlite3");
-  } catch {
-    return null;
+    const Database = load();
+    // better-sqlite3 loads its ABI-specific .node binding lazily on the first
+    // Database construction. Requiring the JavaScript wrapper alone therefore
+    // cannot prove that the installed binary matches the active Node runtime.
+    db = new Database(":memory:");
+    db.prepare("SELECT 1 AS ok").get();
+    return { available: true, Database, error: null };
+  } catch (error) {
+    return {
+      available: false,
+      Database: null,
+      error:
+        error instanceof Error
+          ? error
+          : new Error(String(error || "Unknown SQLite runtime failure")),
+    };
+  } finally {
+    try {
+      db?.close();
+    } catch {}
   }
+}
+
+export function repairBetterSqlite3Runtime({
+  runtime = null,
+  env = process.env,
+  packageRoot = PACKAGE_ROOT,
+  rebuild = runBetterSqlite3Rebuild,
+  probe = probeBetterSqlite3Runtime,
+  timeoutMs = REBUILD_TIMEOUT_MS,
+} = {}) {
+  if (runtime?.available || !isNodeAbiMismatch(runtime?.error)) return runtime;
+  if (env.OTM_AUTO_REBUILD_SQLITE === "0")
+    return withRepair(runtime, {
+      attempted: false,
+      succeeded: false,
+      reason: "disabled",
+    });
+  if (env.CI && env.OTM_AUTO_REBUILD_SQLITE !== "1")
+    return withRepair(runtime, {
+      attempted: false,
+      succeeded: false,
+      reason: "ci-suppressed",
+    });
+
+  const lockPath = path.join(
+    packageRoot,
+    "node_modules",
+    ".otm-better-sqlite3-rebuild.lock",
+  );
+  let lock;
+  try {
+    lock = acquireRebuildLock({
+      lockPath,
+      timeoutMs,
+      probe,
+    });
+    if (lock.peerRuntime)
+      return withRepair(lock.peerRuntime, {
+        attempted: false,
+        succeeded: true,
+        reason: "repaired-by-peer",
+      });
+    if (!lock.fd)
+      return withRepair(runtime, {
+        attempted: false,
+        succeeded: false,
+        reason: "lock-timeout",
+      });
+
+    const result = rebuild({ packageRoot, env, timeoutMs });
+    const repaired = probe();
+    const rebuildErrorCode =
+      result?.error &&
+      typeof result.error === "object" &&
+      "code" in result.error
+        ? String(result.error.code)
+        : null;
+    return withRepair(repaired, {
+      attempted: true,
+      succeeded: repaired.available,
+      reason: repaired.available ? "rebuilt" : "rebuild-failed",
+      exitCode: Number.isInteger(result?.status) ? result.status : null,
+      signal: result?.signal || null,
+      errorCode: rebuildErrorCode,
+    });
+  } catch (error) {
+    const errorCode =
+      error && typeof error === "object" && "code" in error
+        ? String(error.code)
+        : null;
+    return withRepair(runtime, {
+      attempted: false,
+      succeeded: false,
+      reason: "rebuild-error",
+      errorCode,
+    });
+  } finally {
+    releaseRebuildLock(lock);
+  }
+}
+
+export function describeBetterSqlite3Failure(
+  runtime = inspectBetterSqlite3Runtime(),
+) {
+  const error = runtime?.error;
+  const rebuild =
+    "Run `npm rebuild better-sqlite3 --foreground-scripts` with the same Node executable that launches OTM, then restart the MCP server.";
+  if (error?.code === "ERR_DLOPEN_FAILED") {
+    const repair = runtime?.repair;
+    const automatic =
+      repair?.attempted && !repair.succeeded
+        ? ` Automatic rebuild failed${repair.exitCode === null ? "" : ` with exit code ${repair.exitCode}`}.`
+        : repair?.reason === "disabled"
+          ? " Automatic rebuild is disabled by OTM_AUTO_REBUILD_SQLITE=0."
+          : repair?.reason === "ci-suppressed"
+            ? " Automatic rebuild is suppressed in CI."
+            : "";
+    return `better-sqlite3's native binary cannot load under Node ${process.versions.node} (module ABI ${process.versions.modules}).${automatic} ${rebuild}`;
+  }
+  if (error?.code === "MODULE_NOT_FOUND") {
+    return `better-sqlite3 is not installed. Run \`npm install --foreground-scripts\`, verify the native load, then restart the MCP server.`;
+  }
+  return `better-sqlite3 is installed but its native runtime could not be initialized. ${rebuild}`;
+}
+
+export function createBetterSqlite3UnavailableError(
+  runtime = inspectBetterSqlite3Runtime(),
+) {
+  return new OtmError(describeBetterSqlite3Failure(runtime), {
+    code: "SQLITE_RUNTIME_UNAVAILABLE",
+    details: {
+      causeCode: runtime?.error?.code || null,
+      nodeVersion: process.versions.node,
+      moduleAbi: process.versions.modules,
+    },
+  });
+}
+
+function isNodeAbiMismatch(error) {
+  return (
+    error?.code === "ERR_DLOPEN_FAILED" &&
+    /NODE_MODULE_VERSION|different Node\.js version|module ABI/i.test(
+      String(error?.message || ""),
+    )
+  );
+}
+
+function withRepair(runtime, repair) {
+  return { ...runtime, repair };
+}
+
+function acquireRebuildLock({ lockPath, timeoutMs, probe }) {
+  ensureDir(path.dirname(lockPath));
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const fd = fs.openSync(lockPath, "wx");
+      fs.writeFileSync(
+        fd,
+        JSON.stringify({
+          pid: process.pid,
+          nodeVersion: process.versions.node,
+          moduleAbi: process.versions.modules,
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      return { fd, lockPath, peerRuntime: null };
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      const peerRuntime = probe();
+      if (peerRuntime.available) return { fd: null, lockPath, peerRuntime };
+      reclaimStaleRebuildLock(lockPath);
+      Atomics.wait(REBUILD_WAIT_BUFFER, 0, 0, 200);
+    }
+  }
+  return { fd: null, lockPath, peerRuntime: null };
+}
+
+function reclaimStaleRebuildLock(lockPath) {
+  try {
+    const stat = fs.statSync(lockPath);
+    if (Date.now() - stat.mtimeMs < REBUILD_LOCK_STALE_MS) return;
+    let ownerAlive = false;
+    try {
+      const payload = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+      if (Number.isInteger(payload?.pid) && payload.pid > 0) {
+        try {
+          process.kill(payload.pid, 0);
+          ownerAlive = true;
+        } catch (error) {
+          ownerAlive = error?.code === "EPERM";
+        }
+      }
+    } catch {}
+    if (!ownerAlive) fs.rmSync(lockPath, { force: true });
+  } catch {}
+}
+
+function releaseRebuildLock(lock) {
+  if (!lock?.fd) return;
+  try {
+    fs.closeSync(lock.fd);
+  } finally {
+    try {
+      fs.rmSync(lock.lockPath, { force: true });
+    } catch {}
+  }
+}
+
+function runBetterSqlite3Rebuild({ packageRoot, env, timeoutMs }) {
+  const npm = resolveNpmInvocation(env);
+  return spawnSync(
+    npm.command,
+    [...npm.prefixArgs, "rebuild", "better-sqlite3", "--foreground-scripts"],
+    {
+      cwd: packageRoot,
+      env: { ...env, OTM_AUTO_INSTALL_GLOBAL: "0" },
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: timeoutMs,
+    },
+  );
+}
+
+export function resolveNpmInvocation(env) {
+  if (env.npm_execpath && fs.existsSync(env.npm_execpath))
+    return { command: process.execPath, prefixArgs: [env.npm_execpath] };
+  const npmCli = path.join(
+    path.dirname(process.execPath),
+    "node_modules",
+    "npm",
+    "bin",
+    "npm-cli.js",
+  );
+  if (fs.existsSync(npmCli))
+    return { command: process.execPath, prefixArgs: [npmCli] };
+  const sibling = path.join(
+    path.dirname(process.execPath),
+    process.platform === "win32" ? "npm.cmd" : "npm",
+  );
+  if (process.platform === "win32")
+    return {
+      command: env.ComSpec || process.env.ComSpec || "cmd.exe",
+      prefixArgs: [
+        "/d",
+        "/s",
+        "/c",
+        fs.existsSync(sibling) ? sibling : "npm.cmd",
+      ],
+    };
+  return {
+    command: fs.existsSync(sibling) ? sibling : "npm",
+    prefixArgs: [],
+  };
 }
 
 export class SqliteStore {
   constructor({ stateDir, readOnly = false }) {
-    const BetterSqlite3 = loadBetterSqlite3();
-    if (!BetterSqlite3) throw new Error("better-sqlite3 is not installed");
+    const runtime = inspectBetterSqlite3Runtime();
+    if (!runtime.available) throw createBetterSqlite3UnavailableError(runtime);
+    const BetterSqlite3 = runtime.Database;
     this.kind = "sqlite";
     this.stateDir = stateDir;
     this.readOnly = readOnly;

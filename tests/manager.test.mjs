@@ -100,8 +100,45 @@ function finishInternalSteps(
   taskId,
   statusByTitle = {},
 ) {
-  const snapshot = manager.snapshot({ workspaceRoot, write: false }).snapshot;
-  const task = snapshot.tasks.find((item) => item.id === taskId);
+  let persistedTask = manager.store.getTask(taskId);
+  const requiresFixtureDecomposition = (
+    persistedTask?.metadata?.internalSteps || []
+  ).some(
+    (step) =>
+      step?.source === "fallback_scaffold" || step?.needsModelReview === true,
+  );
+  if (requiresFixtureDecomposition) {
+    manager.reconcile({
+      workspaceRoot,
+      prompt:
+        "Test fixture review: treat this isolated lifecycle action as atomic.",
+      tasks: [
+        {
+          stableKey: persistedTask.stableKey,
+          title: persistedTask.title,
+          acceptanceCriteria: persistedTask.acceptanceCriteria,
+          internalSteps: [
+            {
+              title: `Verify ${persistedTask.title}`,
+              source: "test_fixture",
+              atomic: true,
+              atomicRationale:
+                "This test isolates the surrounding route lifecycle rather than decomposition behavior.",
+            },
+          ],
+          metadata: {
+            decomposition: {
+              version: 2,
+              source: "test_fixture",
+              needsModelReview: false,
+            },
+          },
+        },
+      ],
+    });
+    persistedTask = manager.store.getTask(taskId);
+  }
+  const task = persistedTask;
   for (const step of task?.internalSteps ||
     task?.metadata?.internalSteps ||
     []) {
@@ -1356,7 +1393,7 @@ test("model-supplied route segments from rich prompt context preserve internal s
   assert.match(started.snapshot.tasks[0].description || "", /^$/);
 });
 
-test("model-supplied route segments without internal steps get category-aware defaults", () => {
+test("model-supplied route segments without internal steps get a visible review scaffold", () => {
   const workspaceRoot = tempWorkspace("otm-category-steps-");
   const manager = createTaskManager({
     cwd: workspaceRoot,
@@ -1375,45 +1412,87 @@ test("model-supplied route segments without internal steps get category-aware de
     ],
   });
 
-  const byTitle = new Map(
-    started.snapshot.tasks.map((task) => [
-      task.title,
-      internalStepTitles(task),
-    ]),
+  for (const task of started.snapshot.tasks) {
+    assert.equal(task.internalSteps.length, 1);
+    assert.equal(task.internalSteps[0].source, "fallback_scaffold");
+    assert.equal(task.internalSteps[0].kind, "decomposition_review");
+    assert.equal(task.internalSteps[0].needsModelReview, true);
+    assert.equal(task.internalSteps[0].atomic, false);
+    assert.deepEqual(task.internalSteps[0].miniSteps, []);
+    assert.match(
+      task.internalSteps[0].title,
+      /Review the accumulated contract and define outcome-specific/,
+    );
+  }
+  assert.equal(
+    new Set(started.snapshot.tasks.map((task) => task.internalSteps[0].title))
+      .size,
+    started.snapshot.tasks.length,
   );
+});
+
+test("gate work types and mixed route intent persist across restart and reconciliation", () => {
+  const workspaceRoot = tempWorkspace("otm-work-types-");
+  const env = testEnv("otm-work-types");
+  const manager = createTaskManager({ cwd: workspaceRoot, env });
+  const started = manager.start({
+    workspaceRoot,
+    replaceExisting: true,
+    goal: "Preserve mixed route intent",
+    tasks: [
+      {
+        title: "Review the authentication contract",
+        workType: "review",
+        workTypeSource: "model",
+      },
+      {
+        title: "Implement token recovery",
+        workType: "implementation",
+        workTypeSource: "model",
+      },
+    ],
+  });
+
+  assert.deepEqual(started.snapshot.routeIntent, {
+    mode: "mixed",
+    workTypes: ["review", "implementation"],
+    source: "model_tasks",
+  });
   assert.deepEqual(
-    byTitle.get("Summarize outcome and clear active checklist"),
+    started.snapshot.tasks.map((task) => [task.workType, task.workTypeSource]),
     [
-      "Reconcile route evidence for Summarize outcome and clear active checklist",
-      "Write or present the final summary for Summarize outcome and clear active checklist",
-      "Verify stop-audit readiness for Summarize outcome and clear active checklist",
-      "Record finalization evidence for Summarize outcome and clear active checklist",
+      ["review", "model"],
+      ["implementation", "model"],
     ],
   );
-  assert.deepEqual(byTitle.get("Validate behavior and check for regressions"), [
-    "Identify the relevant checks for Validate behavior and check for regressions",
-    "Run targeted checks for Validate behavior and check for regressions",
-    "Inspect failures or regressions for Validate behavior and check for regressions",
-    "Record validation evidence for Validate behavior and check for regressions",
-  ]);
-  assert.deepEqual(byTitle.get("Reinstall the latest version globally"), [
-    "Inspect target install state for Reinstall the latest version globally",
-    "Run the install or configuration command for Reinstall the latest version globally",
-    "Verify install or doctor output for Reinstall the latest version globally",
-    "Record install evidence for Reinstall the latest version globally",
-  ]);
-  assert.deepEqual(byTitle.get("Update README documentation"), [
-    "Inspect source-of-truth material for Update README documentation",
-    "Draft or update documentation for Update README documentation",
-    "Verify commands, paths, and status claims for Update README documentation",
-    "Record documentation evidence for Update README documentation",
-  ]);
-  assert.deepEqual(byTitle.get("Implement prompt route segmentation fix"), [
-    "Inspect affected code and existing patterns for Implement prompt route segmentation fix",
-    "Implement the complete requested change for Implement prompt route segmentation fix",
-    "Update related tests, docs, or configuration for Implement prompt route segmentation fix",
-    "Run relevant checks and record evidence for Implement prompt route segmentation fix",
-  ]);
+  assert.match(started.markdown, /\| review \|/);
+  assert.match(started.markdown, /\| implementation \|/);
+
+  const reloaded = createTaskManager({ cwd: workspaceRoot, env });
+  const resumed = reloaded.snapshot({ workspaceRoot, write: false }).snapshot;
+  assert.deepEqual(resumed.routeIntent, started.snapshot.routeIntent);
+  assert.deepEqual(
+    resumed.tasks.map((task) => task.workType),
+    ["review", "implementation"],
+  );
+
+  const reconciled = reloaded.reconcile({
+    workspaceRoot,
+    prompt: "Also document the verified behavior.",
+    changes: [
+      {
+        action: "add",
+        title: "Document verified authentication behavior",
+        workType: "documentation",
+        workTypeSource: "model",
+      },
+    ],
+  });
+  assert.deepEqual(reconciled.snapshot.routeIntent, {
+    mode: "mixed",
+    workTypes: ["review", "implementation", "documentation"],
+    source: "model_reconciliation",
+  });
 });
 
 test("internal step progress persists without completing the route gate", () => {
@@ -1502,6 +1581,495 @@ test("internal step progress persists without completing the route gate", () => 
   assert.deepEqual(
     completedTask.internalSteps.map((step) => step.status),
     ["done", "done", "done"],
+  );
+});
+
+test("three-tier gates require every mini-step before an internal subtask and route can close", () => {
+  const workspaceRoot = tempWorkspace("otm-three-tier-");
+  const manager = createTaskManager({
+    cwd: workspaceRoot,
+    env: testEnv("otm-three-tier"),
+  });
+  const started = manager.start({
+    workspaceRoot,
+    replaceExisting: true,
+    goal: "Validate recursive hierarchy gates",
+    prompt: "Phase 3 fixes TTS. Phase 3.1 repairs model installation.",
+    tasks: [
+      {
+        stableKey: "phase-3",
+        title: "Phase 3 — Fix TTS",
+        internalSteps: [
+          {
+            id: "step_3_1",
+            title: "3.1 — Repair model installation",
+            outline: "3.1",
+            source: "explicit_prompt",
+            atomic: false,
+            miniSteps: [
+              {
+                id: "mini_download",
+                title: "Download and install the selected model",
+                outline: "3.1.1",
+              },
+              {
+                id: "mini_directory",
+                title: "Create and verify the model directory",
+                outline: "3.1.2",
+              },
+            ],
+          },
+        ],
+        metadata: {
+          decomposition: {
+            version: 2,
+            source: "model",
+            needsModelReview: false,
+          },
+        },
+      },
+    ],
+  });
+  const taskId = started.snapshot.tasks[0].id;
+
+  assert.throws(
+    () =>
+      manager.progress({
+        workspaceRoot,
+        taskId,
+        message: "Attempt parent completion too early.",
+        internalStepId: "step_3_1",
+        internalStepStatus: "done",
+      }),
+    (error) => error.code === "MINI_STEPS_INCOMPLETE",
+  );
+
+  for (const miniStepId of ["mini_download", "mini_directory"]) {
+    manager.progress({
+      workspaceRoot,
+      taskId,
+      message: `Completed ${miniStepId}.`,
+      internalStepId: "step_3_1",
+      miniStepId,
+      miniStepStatus: "done",
+      evidence: {
+        kind: "test_result",
+        summary: `${miniStepId} verified.`,
+      },
+    });
+  }
+  const parentDone = manager.progress({
+    workspaceRoot,
+    taskId,
+    message: "Model installation subtask complete.",
+    internalStepId: "step_3_1",
+    internalStepStatus: "done",
+    evidence: {
+      kind: "test_result",
+      summary: "All installation mini-steps verified.",
+    },
+  });
+  const hierarchy = parentDone.snapshot.tasks[0].internalSteps[0];
+  assert.equal(hierarchy.status, "done");
+  assert.deepEqual(
+    hierarchy.miniSteps.map((step) => step.status),
+    ["done", "done"],
+  );
+  assert.ok(hierarchy.evidence.length > 0);
+  assert.ok(hierarchy.miniSteps.every((step) => step.evidence.length > 0));
+
+  const completed = manager.completeTask({
+    workspaceRoot,
+    taskId,
+    evidence: {
+      kind: "test_result",
+      summary: "Phase 3 recursive gate passed.",
+    },
+  });
+  assert.equal(completed.snapshot.stopAllowed, true);
+});
+
+test("three-tier inputs require atomic rationale and valid descendant dependency graphs", () => {
+  const workspaceRoot = tempWorkspace("otm-three-tier-validation-");
+  const manager = createTaskManager({
+    cwd: workspaceRoot,
+    env: testEnv("otm-three-tier-validation"),
+  });
+  assert.throws(
+    () =>
+      manager.start({
+        workspaceRoot,
+        replaceExisting: true,
+        goal: "Reject unexplained atomic work",
+        tasks: [
+          {
+            title: "Release gate",
+            internalSteps: [
+              { title: "Unexplained atomic subtask", atomic: true },
+            ],
+          },
+        ],
+      }),
+    (error) => error.code === "ATOMIC_RATIONALE_REQUIRED",
+  );
+  assert.throws(
+    () =>
+      manager.start({
+        workspaceRoot,
+        replaceExisting: true,
+        goal: "Reject cyclic descendant work",
+        tasks: [
+          {
+            title: "Release gate",
+            internalSteps: [
+              {
+                id: "subtask_a",
+                title: "Subtask A",
+                dependsOn: ["subtask_b"],
+                miniSteps: [{ title: "Do A" }],
+              },
+              {
+                id: "subtask_b",
+                title: "Subtask B",
+                dependsOn: ["subtask_a"],
+                miniSteps: [{ title: "Do B" }],
+              },
+            ],
+          },
+        ],
+      }),
+    (error) => error.code === "INVALID_DEPENDENCIES",
+  );
+});
+
+test("mini-step dependencies and evidence propagation gate completion", () => {
+  const workspaceRoot = tempWorkspace("otm-mini-dependencies-");
+  const manager = createTaskManager({
+    cwd: workspaceRoot,
+    env: testEnv("otm-mini-dependencies"),
+  });
+  const started = manager.start({
+    workspaceRoot,
+    replaceExisting: true,
+    goal: "Respect mini-step prerequisites",
+    tasks: [
+      {
+        title: "Model installation gate",
+        internalSteps: [
+          {
+            id: "install_model",
+            title: "Install the model",
+            miniSteps: [
+              { id: "download", title: "Download the model" },
+              {
+                id: "configure",
+                title: "Configure its directory",
+                dependsOn: ["download"],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  const taskId = started.snapshot.tasks[0].id;
+  assert.throws(
+    () =>
+      manager.progress({
+        workspaceRoot,
+        taskId,
+        message: "Configure too early.",
+        internalStepId: "install_model",
+        miniStepId: "configure",
+        miniStepStatus: "done",
+        evidence: { kind: "test_result", summary: "Attempted configuration." },
+      }),
+    (error) => error.code === "DEPENDENCIES_INCOMPLETE",
+  );
+  for (const miniStepId of ["download", "configure"]) {
+    manager.progress({
+      workspaceRoot,
+      taskId,
+      message: `${miniStepId} complete.`,
+      internalStepId: "install_model",
+      miniStepId,
+      miniStepStatus: "done",
+      evidence: {
+        kind: "test_result",
+        summary: `${miniStepId} verified.`,
+      },
+    });
+  }
+  const persisted = manager.store.getTask(taskId);
+  assert.ok(
+    persisted.metadata.internalSteps[0].miniSteps.every(
+      (miniStep) => miniStep.evidence.length > 0,
+    ),
+  );
+});
+
+test("reconciliation adopts authoritative descendant order while preserving stable IDs and evidence", () => {
+  const workspaceRoot = tempWorkspace("otm-hierarchy-reorder-");
+  const manager = createTaskManager({
+    cwd: workspaceRoot,
+    env: testEnv("otm-hierarchy-reorder"),
+  });
+  const started = manager.start({
+    workspaceRoot,
+    replaceExisting: true,
+    goal: "Preserve evidence during hierarchy review",
+    tasks: [
+      {
+        stableKey: "phase-3",
+        title: "Phase 3",
+        internalSteps: [
+          {
+            id: "stable_3_1",
+            title: "Old wording 3.1",
+            outline: "3.1",
+            miniSteps: [
+              { id: "stable_3_1_1", title: "Old mini", outline: "3.1.1" },
+            ],
+          },
+          {
+            id: "stable_3_2",
+            title: "Old wording 3.2",
+            outline: "3.2",
+            miniSteps: [
+              { id: "stable_3_2_1", title: "Second mini", outline: "3.2.1" },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  const taskId = started.snapshot.tasks[0].id;
+  manager.progress({
+    workspaceRoot,
+    taskId,
+    message: "Verified the first mini-step.",
+    internalStepId: "stable_3_1",
+    miniStepId: "stable_3_1_1",
+    miniStepStatus: "done",
+    evidence: { kind: "test_result", summary: "First mini-step verified." },
+  });
+  const reconciled = manager.reconcile({
+    workspaceRoot,
+    tasks: [
+      {
+        stableKey: "phase-3",
+        title: "Phase 3",
+        internalSteps: [
+          {
+            id: "incoming_3_2",
+            title: "Reviewed wording 3.2",
+            outline: "3.2",
+            miniSteps: [
+              {
+                id: "incoming_3_2_1",
+                title: "Reviewed second mini",
+                outline: "3.2.1",
+              },
+            ],
+          },
+          {
+            id: "incoming_3_1",
+            title: "Reviewed wording 3.1",
+            outline: "3.1",
+            miniSteps: [
+              {
+                id: "incoming_3_1_1",
+                title: "Reviewed first mini",
+                outline: "3.1.1",
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  const internal = reconciled.snapshot.tasks[0].internalSteps;
+  assert.deepEqual(
+    internal.map((step) => step.outline),
+    ["3.2", "3.1"],
+  );
+  assert.deepEqual(
+    internal.map((step) => step.id),
+    ["stable_3_2", "stable_3_1"],
+  );
+  assert.equal(internal[1].title, "Reviewed wording 3.1");
+  assert.equal(internal[1].miniSteps[0].id, "stable_3_1_1");
+  assert.equal(internal[1].miniSteps[0].status, "done");
+  assert.match(internal[1].miniSteps[0].evidence[0].summary, /verified/);
+});
+
+test("steering preserves accumulated prompt sources and requires whole-contract review", () => {
+  const workspaceRoot = tempWorkspace("otm-source-contract-");
+  const env = testEnv("otm-source-contract");
+  env.CODEX_THREAD_ID = "source-contract-session";
+  const manager = createTaskManager({ cwd: workspaceRoot, env });
+  const started = manager.start({
+    workspaceRoot,
+    replaceExisting: true,
+    goal: "Preserve the complete route contract",
+    prompt: "Phase 1 establishes the route.",
+    attachments: [
+      {
+        filename: "plan.txt",
+        content: "Phase 1.1 captures attachment requirements.",
+      },
+    ],
+    screenshots: [
+      {
+        caption: "The visible route shows Phase 1.2 as pending.",
+      },
+    ],
+    tasks: [
+      {
+        stableKey: "phase-1",
+        title: "Phase 1 — Establish route",
+        internalSteps: [
+          {
+            title: "Review the preserved sources",
+            atomic: true,
+            atomicRationale: "This verification is a single bounded assertion.",
+            source: "model",
+          },
+        ],
+        metadata: {
+          decomposition: {
+            version: 2,
+            source: "model",
+            needsModelReview: false,
+          },
+        },
+      },
+    ],
+  });
+  assert.deepEqual(
+    new Set(started.snapshot.sourceContext.entries.map((entry) => entry.kind)),
+    new Set(["inline_prompt", "attachment", "visual_context"]),
+  );
+  assert.equal(started.snapshot.sourceContextSummary.revisionCount, 1);
+  const workspaceIndex = JSON.parse(
+    fs.readFileSync(currentJsonPath(workspaceRoot), "utf8"),
+  );
+  assert.equal(workspaceIndex.status, "active");
+  assert.equal(workspaceIndex.sessions[0].runId, started.run.id);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(
+      workspaceIndex.sessions[0],
+      "sourceContext",
+    ),
+    false,
+  );
+
+  const steered = manager.reconcile({
+    workspaceRoot,
+    prompt: "Also preserve Phase 1.3 as a new acceptance constraint.",
+    attachments: [
+      {
+        filename: "follow-up.txt",
+        text: "Do not discard the original Phase 1.1 requirement.",
+      },
+    ],
+  });
+  assert.equal(steered.snapshot.contractReview.status, "needs_model_review");
+  assert.equal(steered.snapshot.sourceContextSummary.revisionCount, 2);
+  assert.match(
+    JSON.stringify(steered.snapshot.sourceContext),
+    /Phase 1\.1 captures attachment requirements/,
+  );
+  assert.match(
+    JSON.stringify(steered.snapshot.sourceContext),
+    /Phase 1\.3 as a new acceptance constraint/,
+  );
+
+  const restarted = createTaskManager({ cwd: workspaceRoot, env });
+  const afterRestart = restarted.snapshot({
+    workspaceRoot,
+    write: false,
+  }).snapshot;
+  assert.equal(
+    afterRestart.sourceContext.digest,
+    steered.snapshot.sourceContext.digest,
+  );
+  const task = restarted.store.getTask(started.snapshot.tasks[0].id);
+  assert.throws(
+    () =>
+      restarted.completeTask({
+        workspaceRoot,
+        taskId: task.id,
+        evidence: {
+          kind: "test_result",
+          summary: "Must not bypass pending whole-contract review.",
+        },
+      }),
+    (error) => error.code === "CONTRACT_REVIEW_REQUIRED",
+  );
+
+  restarted.reconcile({
+    workspaceRoot,
+    tasks: [
+      {
+        stableKey: task.stableKey,
+        title: task.title,
+        acceptanceCriteria: task.acceptanceCriteria,
+        internalSteps: [
+          {
+            title: "Review the preserved sources",
+            atomic: true,
+            atomicRationale: "This verification is a single bounded assertion.",
+            source: "model",
+          },
+        ],
+        metadata: {
+          decomposition: {
+            version: 2,
+            source: "model",
+            needsModelReview: false,
+          },
+        },
+      },
+    ],
+  });
+  finishInternalSteps(restarted, workspaceRoot, task.id);
+  restarted.completeTask({
+    workspaceRoot,
+    taskId: task.id,
+    evidence: {
+      kind: "test_result",
+      summary: "Accumulated contract and hierarchy verified.",
+    },
+  });
+  const finalized = restarted.finalizeTurn({
+    workspaceRoot,
+    outcome: "completed",
+  });
+  assert.equal(
+    finalized.summaryJson.sourceContext.digest,
+    steered.snapshot.sourceContext.digest,
+  );
+  assert.equal(finalized.summaryJson.sourceContextSummary.revisionCount, 2);
+  assert.equal(finalized.summaryJson.hierarchy[0].internalSteps.length, 1);
+  const exported = restarted.exportWorkspace({ workspaceRoot });
+  assert.equal(
+    exported.runs[0].metadata.sourceContext.digest,
+    steered.snapshot.sourceContext.digest,
+  );
+  assert.match(
+    restarted.listMemory({ workspaceRoot }).entries[0].body,
+    /Source contract:/,
+  );
+  const importedManager = createTaskManager({
+    cwd: workspaceRoot,
+    env: testEnv("otm-source-contract-import"),
+  });
+  importedManager.importHistorical({ workspaceRoot, document: exported });
+  assert.equal(
+    importedManager.listRuns({ workspaceRoot }).runs[0].metadata.sourceContext
+      .digest,
+    steered.snapshot.sourceContext.digest,
   );
 });
 
@@ -2626,14 +3194,7 @@ test("blocked routes resume through an explicit transition and finalized routes 
     JSON.stringify(manager.store.getTask(taskId).evidence),
     /Waiting for a dependency/,
   );
-  for (const step of manager.store.getTask(taskId).metadata.internalSteps) {
-    manager.progress({
-      workspaceRoot,
-      taskId,
-      internalStepId: step.id,
-      evidence: { kind: "manual_note", summary: step.title },
-    });
-  }
+  finishInternalSteps(manager, workspaceRoot, taskId);
   manager.completeTask({
     workspaceRoot,
     taskId,
@@ -3204,13 +3765,7 @@ test("historical export and import preserve terminal workspace records but rejec
     tasks: [{ title: "Finish exportable work" }],
   });
   const task = started.snapshot.tasks[0];
-  for (const step of task.internalSteps)
-    source.progress({
-      workspaceRoot,
-      taskId: task.id,
-      internalStepId: step.id,
-      evidence: { kind: "manual_note", summary: `Completed ${step.title}` },
-    });
+  finishInternalSteps(source, workspaceRoot, task.id);
   source.completeTask({
     workspaceRoot,
     taskId: task.id,

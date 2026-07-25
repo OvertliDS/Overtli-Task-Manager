@@ -2,40 +2,103 @@
 
 ## Current objective
 
-Full production-hardening remediation against baseline `24e2ab5d0ce7c8481bdccf011a20e7d1dbbd7678` on branch `codex/full-production-hardening`.
+Production-harden Overtli Task Manager for Node-native storage recovery and
+model-guided route interpretation, complete all validation, push the scoped
+branch, and reinstall/verify the global MCP, hooks, skills, and native runtime.
 
-## Preserved constraints
+## Preserved user contract
 
-- Node.js 20.10+, Windows/macOS/Linux behavior, and both JSON and SQLite stores remain supported.
-- Route scope is canonical workspace identity plus session ID.
-- No remote push is authorized.
-- Existing worktree changes predated this remediation session; preserve and validate them rather than reverting them.
+- `OTM_STORAGE=auto` must attempt one bounded concurrency-safe repair only for a
+  genuine `better-sqlite3` Node ABI mismatch, then continue through JSON without
+  deleting or overwriting the SQLite database. Explicit `sqlite` remains
+  fail-closed and actionable.
+- The model, not OTM, owns domain interpretation. OTM provides a structural
+  template and lifecycle gates; it must not generate identical canned steps.
+- Three tiers are required:
+  1. route segment/completion gate for a major outcome (for example Phase 3);
+  2. explicit or model-inferred substantive internal subtasks (for example
+     Phase 3.1/3.2);
+  3. concrete mini-steps required to finish each non-atomic internal subtask.
+- Explicit identifiers, wording, order, constraints, and acceptance conditions
+  remain authoritative. A genuinely atomic internal subtask needs a rationale.
+- Prompts without phase labels still receive model-authored bounded outcome
+  gates/subtasks/mini-steps. Deterministic fallback is only a visible
+  `needsModelReview` scaffold.
+- Inline/pasted text, structured prompt context, attachment/OCR text,
+  screenshot/image descriptions, and later steering form one accumulated
+  bounded source contract. Reconciliation re-reviews the whole contract without
+  losing valid IDs, evidence, order, or supersession history.
+- Canonical session snapshots, JSON/SQLite, restart, summaries, history,
+  checkpoint memory, cache/scratch references, and export/import preserve the
+  hierarchy/context. Top-level `current.json` stays a lightweight session index.
+- Managed AGENTS content, MCP schemas/descriptions, hooks, four skills, examples,
+  documentation, installer output, package contents, and the global copy must
+  agree.
+- The supplied Avatar Studio attachment is a hierarchy fixture only. No Avatar
+  Studio files, runtime, Git state, or documentation may be modified.
+- Preserve the pre-existing user deletion of `.codex-plugin/plugin.json`; do
+  not restore, stage, commit, or push it.
 
-## Requirement checklist
+## Evidence-backed status
 
-- [-] Phase 0: Baseline recorded. `npm install`, `npm test`, `npm run syntax:check`, `npm pack --dry-run`, and `git diff --check` have run. The checkout was already on the requested branch and baseline commit with an in-progress dirty worktree.
-- [-] Phases 1-2: Existing changes add canonical workspace/path validation, initial-state restrictions, dependency validation, scoped reconcile guards, revision checking, and internal-step timestamp clearing. An explicit shared task/run transition matrix now rejects undocumented edges with safe structured details and is invoked by public task operations, finalization/clear/abandon, resume, and archive; reconciliation now validates its entire task-list delta before committing. Direct route-task/reconciliation inputs apply bounded IDs, text, criteria, priorities, ordering, dependencies, and evidence normalization rather than relying only on MCP schemas. This still needs broader adversarial transition coverage and final audit of all lifecycle helper paths.
-- [-] Phases 3-6: SQLite now has `user_version` migration v1->v3, pre-migration backup, foreign keys, a unique active-scope index, strict JSON-column parsing, and migration regressions. JSON corrupt state is quarantined instead of reset and lock stealing checks owner liveness. JSON store open is validation-only for an existing state document. Atomic create-route and run-mutation commits now cover run/tasks/events for activation, progress, reconciliation (including new task insertion), block, complete, drop, and supersede paths. A real two-process JSON suite races progress, reconciliation, completion, and clearing using revision guards; only one mutation commits and competing writers fail with typed results. Workspace current-index locking treats Windows `EPERM` as contention and only reclaims stale locks from a dead owner. Cache upserts now preserve `createdAt` on both backends through explicit conflict handling. A dedicated shared JSON/SQLite conformance suite covers event order/idempotency, tag/expiry deletion, revision conflicts, active replacement/order, summary clearing, history pruning, and terminal export/import; it still needs the full requested contract and more migration fixtures.
-- [-] Phases 7-13: Safe generated summary names, expiry-filtered memory search, selector-required memory deletion preview, memory list/inspect/expired purge, bounded project review inputs, side-effect-free install dry-run, credential redaction, configurable command capture (`redacted`/`none`/`validation-only`), changed-file hook evidence, injected hook environment use, and finalized-only current clearing are implemented. `AGENTS.md` synchronization is non-destructive and now runs by default from installed SessionStart and UserPromptSubmit hooks; `OTM_AUTO_SYNC_AGENTS=0` is the explicit opt-out. The hooks/MCP cannot call the private Codex goal API directly, so their managed instructions and prompt context hand off native-goal creation and terminal updates to the Codex agent. Existing OTM snapshots are parsed fail-closed before serving or replacing them, preserving malformed state for doctor/repair. Final summary metadata is committed before files are published; retries keyed by summary/operation/turn reuse one summary and memory record; incomplete checkpoints require a reason and remain blocked. Project review now has versioned deterministic source precedence, realpath containment, binary/size screening before `maxFiles`, configured byte-cap enforcement before reads, and candidate/read/skip/truncation diagnostics; hook review failures are visible as redacted diagnostics. Hook deduplication preserves separate same-turn tool events when host tool IDs are unavailable. Planner documentation edits stay implementation work, route lists are not silently capped at 12, planner metadata is retained, and final route work no longer clears state. Renderer Markdown now escapes all untrusted inline surfaces, preserves planned order, reports the actual lifecycle completion delta, omits duplicate internal-step metadata, and suppresses unchanged current-file writes; cleanup and broader planner reporting remain incomplete.
-- [-] Superseding the former trusted-only instruction-sync contract: installed SessionStart and UserPromptSubmit hooks now create or refresh only OTM's marker-delimited root `AGENTS.md` block by default. `OTM_AUTO_SYNC_AGENTS=0` is the explicit opt-out. Hooks/MCP cannot call Codex's private goal API directly, so the managed block and prompt context instruct the Codex agent to create one native goal when available, keep it active across all OTM segments, and terminally update it only after the stop audit.
-- [-] Phases 14-16: Workspace and global installation now complete all read-only preflight checks before changing a managed file; malformed hook JSON or duplicate managed markers blocks all writes. Workspace installation writes per-file backup manifests and rolls back all prior managed files when a later live step fails; global installation likewise rolls back hooks if later skill installation fails. Generic npm installation does not mutate global Codex state without explicit opt-in. Workspace `otm uninstall` is now dry-run-safe even through the CLI, confirmation-gated, transactionally backed up, structurally removes only OTM hook commands/managed blocks, preserves modified skill trees, blocks active-state deletion, and retains recovery data outside explicitly deleted state. Packaged skill installation records every file in each skill directory. CLI help/version/MCP config avoid store creation, migration dry run is read-only, JSON/SQLite backup and confirmation-gated restore exist, and `otm export` / `otm import` now use backend-neutral workspace documents with atomic imports, strict ID/reference/timestamp validation, conflict detection, canonical workspace matching, and prohibition of imported active routes. Resume/archive/explicit-abandon commands are revisioned and scoped; CLI abandon requires `--confirm` and MCP abandon requires a recorded reason. Status/list/history JSON commands exist, hook stdin is conditional, and command flags are strict. CLI and MCP doctor now inspect raw storage read-only, report corruption/orphans/duplicate scopes/index and hook issues, and avoid state creation; `doctor --repair` permits only a separate explicit summary repair once integrity checks pass. MCP tool schemas close top-level input, declare structured output, validate malformed arguments, and expose explicit workspace/session resource templates. Richer schemas/annotations and broader protocol coverage remain incomplete.
-- [-] Phases 17-18: Version is 0.2.0; CI matrix covers Windows/Linux and Node 20.10/24 with required SQLite verification; `better-sqlite3` is a required package dependency and CI uses ordinary `npm ci`, so SQLite cannot silently disappear. Lint/format/type syntax gates and recovery/security docs are present. `npm run coverage` now enforces >=85% overall and >=90% manager/JSON/SQLite/validation line coverage. Planner, MCP protocol, migration, security/path, CLI, package-smoke, store conformance, installer, renderer, project-review, hook-capture, and core lifecycle transition suites have been extracted from the old monolith; broader hook/lifecycle extraction, phase audit, and commit reconciliation remain outstanding.
+### Verified
 
-## Files changed or under review
+- Root cause: source and installed `better-sqlite3` binaries targeted a
+  different Node module ABI than active Node 22.23.1 (ABI 127).
+- Native probing, ABI-only bounded repair, rebuild locking/npm resolution,
+  `auto` JSON fallback, explicit-SQLite failure, read-only doctor reporting,
+  and targeted runtime tests are implemented.
+- Explicit Phase -> subphase -> mini-step parsing, contextual numbered children,
+  visible synthesized ancestors, provenance, fallback replacement, recursive
+  progress/gates, atomic rationale, descendant evidence, summary rendering, and
+  nested MCP schemas are implemented.
+- Bounded redacted source-context entries and revision digests survive steering,
+  JSON restart, canonical snapshots, hierarchy-aware summaries, checkpoint
+  memory, export/import, and lightweight workspace indexing.
+- The 1,868-line Avatar Studio prompt was reviewed only as a fixture: its 35
+  Phase 0-34 headings are gate candidates; global constraints/Definition of
+  Done/stop/report clauses remain cross-cutting context; representative phase
+  bodies map to internal subtasks and concrete mini-steps by semantic role.
+- Targeted planner, source-context, manager, hook, and syntax suites pass after
+  the hierarchy/context work.
+- Full source validation passes: 173 tests with zero failures/skips, 93.73%
+  overall coverage, 91.54% SQLite-store line coverage, lint, format, type,
+  syntax (66 modules), CI, whitespace, and MCP Streamable HTTP compatibility.
+- `npm audit` reports zero vulnerabilities after the ESLint 10 toolchain
+  upgrade, patched transitive packages, and a compatible
+  `@hono/node-server` 2.0.5+ override.
+- Package dry-run contains 85 expected files, including source-context and
+  SQLite runtime modules/tests, hooks, and four skills; the user-deleted plugin
+  manifest remains excluded.
 
-This follow-up additionally changes `src/install/agent-block.mjs`, `src/hooks/runner.mjs`, `tests/manager.test.mjs`, `README.md`, and `docs/ARCHITECTURE.md`.
+### In progress
 
-`src/core/validation.mjs`, `src/core/manager.mjs`, `src/core/renderer.mjs`, `src/storage/json-store.mjs`, `src/storage/sqlite-store.mjs`, `src/context/project-review.mjs`, `src/install/install-workspace.mjs`, `src/install/uninstall-workspace.mjs`, `src/install/skill-install.mjs`, `src/install/hook-config.mjs`, `src/cli/commands.mjs`, `src/mcp/result.mjs`, `src/mcp/tools.mjs`, `tests/manager.test.mjs`.
+- Review and stage only task-owned source, tests, package metadata,
+  documentation, skills, and installer changes.
 
-## Latest verification
+### Pending
 
-- `npm test`: 141 pass, 0 fail, 0 skipped (SQLite required), including root-`AGENTS.md` creation/refresh/opt-out and native-goal handoff regressions in addition to automatic route-start/continuation, JSON/SQLite conformance, migration, process-race, MCP, installer, security/path, hook, project-review, planner, and renderer suites.
-- Source lint, type check, syntax check (63 modules), Markdown format check, `npm pack --dry-run` (82 files), and both source/global `git diff --check` passes completed. The installed global plugin was smoke-tested in disposable Git workspaces: SessionStart created the root `AGENTS.md`, and UserPromptSubmit independently created it and emitted the all-phases native-goal handoff.
-- `npm run coverage`: passed at 91.85% overall; manager 94.14%, JSON 96.16%, SQLite 95.39%, and validation 98.33%, exceeding critical-module line gates of >=90% and the overall >=85% gate.
-- `npm run lint`, `npm run format:check`, `npm run type:check`, and `npm run syntax:check` passed (61 modules).
-- `npm pack --dry-run`: completed successfully for `@overtli/task-manager@0.2.0` (81 packaged files).
-- `git diff --check`: completed; only Git line-ending warnings were emitted.
+- Stage only task-owned files, excluding `.codex-plugin/plugin.json`; commit and
+  push `codex/full-production-hardening`; verify upstream parity.
+- Fast-forward `C:\Users\antju\.codex\plugins\overtli-task-manager`, install
+  active-ABI dependencies, run `install-global`, and verify configured MCP,
+  seven hook events, four skills, managed AGENTS behavior, native SQLite/JSON
+  fallback, and an installed disposable lifecycle.
+
+## Important files
+
+- `src/storage/sqlite-store.mjs`, `src/storage/store.mjs`,
+  `src/cli/doctor.mjs`: native runtime probe/repair/fallback/diagnostics.
+- `src/core/planner.mjs`, `src/core/source-context.mjs`,
+  `src/core/manager.mjs`, `src/core/renderer.mjs`: interpretation, accumulated
+  context, recursive lifecycle, persistence projections, and summaries.
+- `src/mcp/schemas.mjs`, `src/mcp/tools.mjs`, `src/hooks/runner.mjs`,
+  `src/install/agent-block.mjs`: model-facing and installed contract.
+- `tests/sqlite-runtime.test.mjs`, `tests/planner.test.mjs`,
+  `tests/source-context.test.mjs`, `tests/manager.test.mjs`: primary new
+  regressions.
 
 ## Exact next action
 
-No required implementation work remains. Commit `d399d9a20f4d11d62516fc7d23bcf31e857d6f07` (`fix(hooks): sync root agents and native goals`) is pushed to `origin/codex/full-production-hardening`; the installed global plugin was fast-forwarded to the same commit and `install-global` completed. The source worktree retains only the pre-existing unstaged deletion of `.codex-plugin/plugin.json`; do not restore, stage, discard, commit, or push that file without explicit user direction.
+Run the final staged-diff/package audit while explicitly excluding the
+user-owned plugin-manifest deletion, then commit and push the verified branch.

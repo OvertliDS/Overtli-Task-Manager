@@ -182,7 +182,8 @@ function handleUserPromptSubmit(manager, input, workspaceRoot, env) {
       context: input.context,
       promptContext: input.prompt_context || input.promptContext,
       attachments: input.attachments,
-      screenshots: input.screenshots || input.images,
+      screenshots: input.screenshots,
+      images: input.images,
       source: "hook-auto-start",
       hookEventName:
         input.hook_event_name || input.hookEventName || "UserPromptSubmit",
@@ -200,14 +201,36 @@ function handleUserPromptSubmit(manager, input, workspaceRoot, env) {
         null,
     });
   }
-  const action =
-    active && ["continue", "steer"].includes(classification)
-      ? "otm_reconcile"
-      : "otm_start";
-  const effectiveRun = autoRoute?.run || active;
+  let contextRoute = null;
+  if (active) {
+    contextRoute = manager.reconcile({
+      workspaceRoot,
+      sessionId,
+      runId: active.id,
+      mode: classification === "continue" ? "continue" : "steer",
+      prompt: String(input.prompt || "").trim(),
+      context: input.context,
+      promptContext: input.prompt_context || input.promptContext,
+      attachments: input.attachments,
+      screenshots: input.screenshots,
+      images: input.images,
+      hookEventName:
+        input.hook_event_name || input.hookEventName || "UserPromptSubmit",
+      invocationId:
+        input.invocation_id ||
+        input.invocationId ||
+        input.hook_id ||
+        input.hookId ||
+        null,
+    });
+  }
+  const action = active ? "otm_reconcile" : "otm_start";
+  const effectiveRun = contextRoute?.run || autoRoute?.run || active;
   const activeTask =
-    autoRoute?.snapshot?.tasks?.find(
-      (task) => task.id === autoRoute.snapshot.currentTaskId,
+    (contextRoute?.snapshot || autoRoute?.snapshot)?.tasks?.find(
+      (task) =>
+        task.id ===
+        (contextRoute?.snapshot || autoRoute?.snapshot).currentTaskId,
     ) || null;
   const additionalContext = [
     "Overtli Task Manager protocol is active for this turn.",
@@ -216,20 +239,27 @@ function handleUserPromptSubmit(manager, input, workspaceRoot, env) {
       ? `Root AGENTS.md managed instructions: ${agentsSync.action}.`
       : `Root AGENTS.md managed instructions were not synchronized: ${agentsSync.reason}`,
     autoRoute
-      ? `A durable OTM route was ${autoRoute.reused ? "reused" : "created"} automatically for this substantive request. Begin the active segment now${activeTask ? `: ${activeTask.title}` : ""}.`
-      : `Before editing files or running implementation commands, call ${action} with workspaceRoot set to ${workspaceRoot}.`,
+      ? `A conservative durable OTM bootstrap route was ${autoRoute.reused ? "reused" : "created"} automatically for this substantive request${activeTask ? `: ${activeTask.title}` : ""}. Before implementation, call otm_reconcile with the model-authored three-tier route; the fallback scaffold is intentionally not completable.`
+      : contextRoute
+        ? "The new prompt and structured/attachment/visual context were appended to the canonical session contract. Re-review the entire accumulated contract and call otm_reconcile with the updated model-authored hierarchy before completing more route gates."
+        : `Before editing files or running implementation commands, call ${action} with workspaceRoot set to ${workspaceRoot}.`,
     `This Codex chat is isolated as session ${sessionId || "(unscoped legacy client)"}; OTM tools resolve CODEX_THREAD_ID automatically, so do not reuse route ids from another chat or workspace.`,
     "Before that call, thoroughly analyze the full user request and all context available to you, including inline chat text, attached files, screenshots/images you can inspect, OCR/descriptions, IDE context, and prior steering in this turn.",
-    'Create route segments from the main current-scope phases, steps, issues, problems, and deliverables the model identifies; do not collapse distinct requested work into a vague segment like "fix all issues".',
-    "Pass those model-derived route segments in the tasks array, with concise titles plus metadata.internalSteps or internalSteps for explicit, inferred, researched, and discovered subwork.",
-    "If the user is only asking for a phase plan, roadmap, review, or documentation rather than implementation now, make the route reflect that planning/documentation task instead of converting it into implementation work.",
+    "Map the full request before implementation, then keep reconciling it as evidence or steering arrives. Explicit identifiers, wording, order, constraints, and acceptance conditions remain authoritative.",
+    'Tier 1 is a bounded route segment/completion gate for a major outcome (for example Phase 3), with a concise outcome/gist, dependencies, provenance/source references, acceptance conditions, and gate evidence policy. Do not collapse distinct requested work into a vague gate such as "fix all issues".',
+    "Tag every Tier 1 gate with its actual model-interpreted workType. Prompts may mix planning, review, research, documentation, implementation, validation, release, deployment, operations, or justified custom work: preserve each gate's intent and let the overall route report mixed rather than forcing one lossy label.",
+    "Tier 2 is the gate's ordered internalSteps: preserve explicit children such as Phase 3.1/3.2; when absent, infer only the smallest complete outcome-specific subtasks from the full accumulated contract. Mark inferred content as model-derived rather than user-authored.",
+    "Tier 3 is miniSteps under each non-atomic internal subtask: concrete, verifiable actions needed to finish that specific subtask. A genuinely atomic subtask must set atomic=true with a rationale. OTM provides structure and lifecycle gates; the model owns all domain content.",
+    "Never populate every gate/subtask with the same canned checklist. A deterministic fallback remains needsModelReview and must be replaced through reconciliation before implementation.",
+    "Treat inline chat, pasted text, prompt context, attachment/OCR text, and screenshot/image descriptions as one accumulated bounded source contract with provenance. On steering, re-review all preserved sources and retain valid IDs, evidence, ordering, and supersession history.",
+    "Use evidence and completion criteria appropriate to each gate's workType. Planning/review/research/documentation gates must not imply unrequested code changes; implementation gates still require implementation, integration, validation, and synchronized documentation evidence.",
     "Show the returned Markdown checklist snapshot in chat.",
     "Use Codex native goal control now when it is available: create one goal if this chat has none, with an objective that requires completion of every requested phase and task. Keep that goal active while OTM tracks detailed route progress; only mark it complete after the OTM stop audit passes, or blocked after a genuine unresolved blocker.",
     "Keep exactly one active route segment when possible; mark completion only with concrete evidence. After a valid otm_complete_task call, immediately continue work on the returned active next segment instead of stopping or sending a final answer.",
     "Before task-scoped OTM calls, use exact task ids from the latest OTM snapshot/current.json; never guess ids from titles, memory, or prior route state.",
-    "Mark internal steps complete with otm_progress as the work happens; complete the parent task only after all required internal steps are terminal and segment-level evidence exists.",
+    "Mark mini-steps and internal subtasks complete with otm_progress as evidence arrives; complete the parent gate only after all required descendants are terminal and segment-level evidence exists.",
     "If the user steers, reconcile before continuing. A pause preserves this route by workspace/session; on a later continue/resume prompt, load the active snapshot and proceed from its current task. Before final response, call otm_audit_stop. If required tasks remain, continue working.",
-    "When the audit passes, call otm_finalize_turn, show the returned Markdown summary to the user, then call otm_clear_current.",
+    "When the audit passes, allow the Stop hook to finalize, save the summary, and clear automatically. Only call otm_finalize_turn and otm_clear_current manually when OTM_STOP_AUTO_FINALIZE=0.",
   ].join("\n");
   return {
     continue: true,

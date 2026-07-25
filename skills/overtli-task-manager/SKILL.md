@@ -9,21 +9,23 @@ Use this skill when the user asks Codex to build, fix, refactor, research, revie
 
 ## Route protocol
 
-1. Before implementation work, thoroughly analyze the full user request and all context available to the model: inline chat text, attached files, screenshots/images you can inspect, OCR/descriptions, IDE context, and prior steering in the turn.
-2. Call `otm_start` for a new task or `otm_reconcile` for steering/continuation. Pass the current repository root as `workspaceRoot` whenever it is known.
-3. Build route segments from the main current-scope phases, steps, issues, problems, and deliverables you identify. Do not collapse distinct requested work into a vague task like `fix all issues`.
-4. Pass model-derived route segments in the `tasks` array whenever possible, with concise titles plus `internalSteps` or `metadata.internalSteps` for explicit, inferred, researched, and discovered subwork.
-5. If the user is asking for a phase plan, roadmap, review, or documentation rather than implementation now, make the route reflect that planning/documentation task instead of converting it into implementation work.
-6. Show the returned Markdown snapshot in chat.
-7. Keep one active route segment whenever possible by calling `otm_start_task` before focused work.
-8. OTM automatically scopes routes by the current workspace and `CODEX_THREAD_ID` (or explicit `sessionId`). Before task-scoped calls, use exact task ids from the latest OTM snapshot or the session-scoped `current.json` path it returns. The top-level `current.json` is a workspace session index; never copy ids from another chat, the index, memory, or prior route state.
-9. Use `otm_progress` for meaningful checkpoints: route created, task started, each internal step completed, steering change, blocker, validation start, validation result, and finalization.
-10. Mark internal steps complete as soon as their evidence exists. Do not finish the project and then backfill the internal checklist.
-11. Complete tasks with `otm_complete_task` only when evidence is concrete and every required internal step is terminal (`done` or intentionally `skipped`): files changed, commands run, tests passed, docs reviewed, or user-confirmed decision.
-12. If the user changes direction, immediately call `otm_reconcile`; drop or supersede stale segments instead of leaving contradictory work open.
-13. Before final response, call `otm_audit_stop`.
-14. If the audit says stop is blocked, keep working on the listed required segments.
-15. When the audit passes, send the final response. By default the Stop hook automatically finalizes the route, saves the summary and checkpoint memory, clears active state, and returns the saved summary for the final user-facing reply. If `OTM_STOP_AUTO_FINALIZE=0`, call `otm_finalize_turn`, show its Markdown summary, then call `otm_clear_current`.
+1. Before implementation, review the complete accumulated contract: inline/pasted chat, structured context, attached/OCR text, screenshot/image descriptions, explicit identifiers and ordering, constraints, acceptance conditions, and later steering.
+2. Call `otm_start` for a new task or `otm_reconcile` for steering/continuation. Pass the current repository root as `workspaceRoot`.
+3. Supply a model-authored three-tier route:
+   - Tier 1 `tasks`: bounded completion gates for major outcomes, such as Phase 3. Set each gate's model-interpreted `workType`; a prompt may mix planning, review, research, documentation, implementation, validation, release, deployment, operations, or justified custom work.
+   - Tier 2 `internalSteps`: substantive explicit children such as Phase 3.1/3.2, or the smallest complete outcome-specific subtasks inferred when none are stated.
+   - Tier 3 `miniSteps`: concrete verifiable actions needed to complete each non-atomic internal subtask.
+4. Preserve explicit wording, identifiers, and order. Mark inferred structure as model-derived. Set `atomic=true` only for a genuinely atomic subtask and include `atomicRationale`.
+5. OTM supplies the structural and lifecycle contract; the model owns all domain content. Never give every segment the same canned checklist. A deterministic `needsModelReview` scaffold must be replaced through reconciliation before implementation.
+6. Attach concise outcomes/gists, dependencies, source references/provenance, acceptance conditions, and evidence expectations where useful. Do not collapse distinct work into a vague gate such as `fix all issues`.
+7. Interpret intent per gate, not once for the whole prompt. Preserve a mixed route when the request combines planning/review/documentation and implementation. Planning, review, research, and documentation gates use evidence appropriate to those outcomes without implying unrequested code changes; implementation gates still require implementation, integration, validation, and synchronized affected documentation.
+8. Show the returned Markdown snapshot in chat and keep one active route gate whenever possible.
+9. OTM scopes routes by workspace and `CODEX_THREAD_ID` (or explicit `sessionId`). Use exact task, internal-step, and mini-step ids from the latest snapshot or session-scoped `current.json`. The top-level `current.json` is only a workspace session index.
+10. Use `otm_progress` as evidence arrives. Mark mini-steps and their parent internal subtasks terminal promptly; do not backfill them at the end.
+11. Complete a gate with `otm_complete_task` only after the accumulated contract is reviewed, all required descendants are terminal with required evidence, and concrete gate evidence exists.
+12. When steering arrives, append the new typed/attached/visual context, re-review the whole accumulated contract, and call `otm_reconcile`. Preserve valid IDs, evidence, order, constraints, and supersession history; reopen only invalidated work.
+13. Before final response, call `otm_audit_stop`. If it is blocked, continue the listed work.
+14. When the audit passes, send the final response. By default the Stop hook finalizes, saves the hierarchy-aware summary/checkpoint memory, and clears active state. If `OTM_STOP_AUTO_FINALIZE=0`, call `otm_finalize_turn`, show its Markdown summary, then call `otm_clear_current`.
 
 OTM hooks enforce only a resolved Codex session. Never substitute the
 workspace index or a legacy unscoped route when a hook lacks session identity.
@@ -37,14 +39,14 @@ manually repeating stale hook feedback.
 - Do not introduce intentionally incomplete logic, placeholder behavior, or hand-wavy validation unless the user explicitly requests a scaffold.
 - Check for errors and regressions related to each completed segment.
 - Prefer concise modern Markdown status updates over noisy logs.
-- Use project memory only for concise continuation context, decisions, checkpoints, and project awareness. Do not turn it into a full source-code index.
+- Use Overtli Task Manager project memory only for concise continuation context, decisions, checkpoints, and project awareness. Do not turn it into a full source-code index.
 
 ## Continuations
 
 When the user says continue, resume, checkpoint, or adds to the same workstream:
 
 1. Search memory with `otm_memory_search` for the new prompt and the active route goal.
-2. Call `otm_reconcile` with mode `continue` or `append`.
-3. Keep prior completed evidence intact.
-4. Add new required segments when the user expands scope.
-5. Supersede stale segments when the user redirects scope.
+2. Read the canonical session snapshot, including its accumulated source-context digest and hierarchy.
+3. Call `otm_reconcile` with mode `continue` or `append` and a complete reviewed three-tier route.
+4. Keep prior completed evidence and still-valid descendant state intact.
+5. Add new required gates/subtasks/mini-steps when scope expands; supersede stale structure when scope redirects.

@@ -108,7 +108,27 @@ test("summary and turn identifiers remain metadata and cannot escape the summari
   const started = manager.start({
     workspaceRoot,
     goal: "Publish safely",
-    tasks: [{ title: "Complete route" }],
+    tasks: [
+      {
+        title: "Complete route",
+        internalSteps: [
+          {
+            title: "Verify safe summary publication",
+            source: "test_fixture",
+            atomic: true,
+            atomicRationale:
+              "This fixture isolates path safety rather than decomposition.",
+          },
+        ],
+        metadata: {
+          decomposition: {
+            version: 2,
+            source: "test_fixture",
+            needsModelReview: false,
+          },
+        },
+      },
+    ],
   });
   const taskId = started.snapshot.tasks[0].id;
   for (const step of manager.store.getTask(taskId).metadata.internalSteps) {

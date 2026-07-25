@@ -106,6 +106,12 @@ export function buildSnapshot({
     sessionId: run.sessionId || undefined,
     turnId: run.turnId || undefined,
     gitBranch: run.metadata?.gitBranch || undefined,
+    routeIntent: run.metadata?.routeIntent || undefined,
+    sourceContext: run.metadata?.sourceContext || undefined,
+    sourceContextSummary: run.metadata?.sourceContext
+      ? summarizeSourceContext(run.metadata.sourceContext)
+      : undefined,
+    contractReview: run.metadata?.contractReview || undefined,
     currentTaskId: currentTask?.id || undefined,
     currentTaskTitle: currentTask?.title || undefined,
     currentInternalStep: currentInternal?.current
@@ -115,6 +121,7 @@ export function buildSnapshot({
           status: currentInternal.current.status,
           done: currentInternal.done,
           total: currentInternal.total,
+          mini: currentInternal.current.mini,
         })
       : undefined,
     checklist: displayTasks.map((task) =>
@@ -125,6 +132,7 @@ export function buildSnapshot({
         checked: task.status === "done",
         active: task.id === currentTask?.id,
         required: Boolean(task.required),
+        workType: task.metadata?.workType,
         internal: summarizeInternalSteps(task.metadata?.internalSteps || []),
         evidence: renderEvidenceBrief(task.evidence || []),
       }),
@@ -133,14 +141,20 @@ export function buildSnapshot({
       const internalSteps = normalizeInternalStepList(
         task.metadata?.internalSteps || [],
       );
-      const { internalSteps: _internalSteps, ...snapshotMetadata } =
-        task.metadata || {};
+      const {
+        internalSteps: _internalSteps,
+        workType,
+        workTypeSource,
+        ...snapshotMetadata
+      } = task.metadata || {};
       return {
         id: task.id,
         title: task.title,
         ...(task.description ? { description: task.description } : {}),
         status: task.status,
         required: Boolean(task.required),
+        workType,
+        workTypeSource,
         priority: task.priority,
         sortOrder: task.sortOrder,
         acceptanceCriteria: task.acceptanceCriteria || [],
@@ -193,10 +207,21 @@ export function renderSnapshotMarkdown(snapshot, options = {}) {
     `**Progress:** ${snapshot.progress.requiredDone}/${snapshot.progress.requiredTotal} required complete (${snapshot.progress.percentRequired}%)`,
   );
   lines.push(`${current}`);
+  const currentTask = snapshot.tasks.find(
+    (task) => task.id === snapshot.currentTaskId,
+  );
+  if (currentTask?.workType)
+    lines.push(
+      `**Work type:** \`${markdownEscapeText(currentTask.workType)}\``,
+    );
   if (snapshot.currentInternalStep) {
     lines.push(
       `**Internal:** ${snapshot.currentInternalStep.done}/${snapshot.currentInternalStep.total} done; ${taskIcon(snapshot.currentInternalStep.status)} ${markdownEscapeText(snapshot.currentInternalStep.title)}`,
     );
+    if (snapshot.currentInternalStep.mini?.current)
+      lines.push(
+        `**Mini-step:** ${snapshot.currentInternalStep.mini.done}/${snapshot.currentInternalStep.mini.total} done; ${taskIcon(snapshot.currentInternalStep.mini.current.status)} ${markdownEscapeText(snapshot.currentInternalStep.mini.current.title)}`,
+      );
   }
   lines.push(`**Gate:** ${stop}`);
   lines.push("");
@@ -204,15 +229,15 @@ export function renderSnapshotMarkdown(snapshot, options = {}) {
     lines.push(`> ${markdownEscapeText(snapshot.lastUpdate.message)}`);
     lines.push("");
   }
-  lines.push("| State | Task | Evidence |");
-  lines.push("|---|---|---|");
+  lines.push("| State | Type | Task | Evidence |");
+  lines.push("|---|---|---|---|");
   for (const task of snapshot.tasks) {
     lines.push(
-      `| ${taskIcon(task.status)} | ${markdownEscapeCell(task.title)}${task.required ? "" : " _(optional)_"} | ${markdownEscapeCell(renderTaskBrief(task))} |`,
+      `| ${taskIcon(task.status)} | ${markdownEscapeCell(task.workType || "custom")} | ${markdownEscapeCell(task.title)}${task.required ? "" : " _(optional)_"} | ${markdownEscapeCell(renderTaskBrief(task))} |`,
     );
   }
   if (!snapshot.tasks.length) {
-    lines.push("| — | No tasks are active. | — |");
+    lines.push("| — | — | No tasks are active. | — |");
   }
   lines.push("");
   if (active)
@@ -467,6 +492,14 @@ export function renderSummaryMarkdown(summary) {
   lines.push("");
   lines.push(`**Goal:** ${markdownEscapeText(summary.goal)}`);
   lines.push(`**Outcome:** ${markdownEscapeText(summary.outcome)}`);
+  if (summary.routeIntent?.workTypes?.length)
+    lines.push(
+      `**Route intent:** ${markdownEscapeText(summary.routeIntent.mode)} — ${summary.routeIntent.workTypes.map((workType) => `\`${markdownEscapeText(workType)}\``).join(", ")}`,
+    );
+  if (summary.sourceContextSummary)
+    lines.push(
+      `**Source contract:** ${summary.sourceContextSummary.entryCount} preserved source entr${summary.sourceContextSummary.entryCount === 1 ? "y" : "ies"} across ${summary.sourceContextSummary.revisionCount} revision${summary.sourceContextSummary.revisionCount === 1 ? "" : "s"} (\`${summary.sourceContextSummary.digest.slice(0, 12)}\`).`,
+    );
   lines.push("");
   lines.push("### Completed");
   for (const item of summary.completed)
@@ -502,6 +535,24 @@ export function renderSummaryMarkdown(summary) {
   return `${lines.join("\n")}\n`;
 }
 
+function summarizeSourceContext(sourceContext = {}) {
+  const entries = Array.isArray(sourceContext.entries)
+    ? sourceContext.entries
+    : [];
+  const revisions = Array.isArray(sourceContext.revisions)
+    ? sourceContext.revisions
+    : [];
+  return {
+    digest: String(sourceContext.digest || ""),
+    entryCount: entries.length,
+    totalBytes: entries.reduce(
+      (sum, entry) => sum + Number(entry.bytes || 0),
+      0,
+    ),
+    revisionCount: revisions.length,
+  };
+}
+
 function renderEvidenceBrief(evidence = []) {
   if (!evidence.length) return "—";
   return compactOneLine(
@@ -522,6 +573,14 @@ function renderTaskBrief(task = {}) {
       ? `; ${taskIcon(internal.current.status)} ${internal.current.title}`
       : "";
     parts.push(`Internal ${internal.done}/${internal.total}${current}`);
+    if (internal.current?.mini?.total) {
+      const miniCurrent = internal.current.mini.current
+        ? `; ${taskIcon(internal.current.mini.current.status)} ${internal.current.mini.current.title}`
+        : "";
+      parts.push(
+        `Mini ${internal.current.mini.done}/${internal.current.mini.total}${miniCurrent}`,
+      );
+    }
   }
   const evidence = renderEvidenceBrief(task.evidence || []);
   if (evidence !== "—") parts.push(evidence);
@@ -592,9 +651,82 @@ function normalizeInternalStepList(steps = []) {
       return omitEmpty({
         id: raw.id ? String(raw.id) : undefined,
         title,
+        outcome: raw.outcome ? String(raw.outcome) : undefined,
         status,
+        required: raw.required !== false,
         kind: raw.kind ? String(raw.kind) : undefined,
         source: raw.source ? String(raw.source) : undefined,
+        outline: raw.outline ? String(raw.outline) : undefined,
+        parentOutline: raw.parentOutline
+          ? String(raw.parentOutline)
+          : undefined,
+        outlinePath: Array.isArray(raw.outlinePath)
+          ? raw.outlinePath.map(String)
+          : undefined,
+        atomic: raw.atomic === true,
+        atomicRationale: raw.atomicRationale
+          ? String(raw.atomicRationale)
+          : undefined,
+        needsModelReview: raw.needsModelReview === true,
+        dependsOn: Array.isArray(raw.dependsOn)
+          ? raw.dependsOn.map(String)
+          : undefined,
+        sourceRefs: Array.isArray(raw.sourceRefs)
+          ? raw.sourceRefs.map(String)
+          : undefined,
+        evidenceRequired: raw.evidenceRequired !== false,
+        acceptanceCriteria: Array.isArray(raw.acceptanceCriteria)
+          ? raw.acceptanceCriteria.map(String)
+          : undefined,
+        evidence: Array.isArray(raw.evidence)
+          ? raw.evidence.map(sanitizeEvidence)
+          : undefined,
+        miniSteps: normalizeMiniStepList(raw.miniSteps || []),
+        updatedAt: raw.updatedAt ? String(raw.updatedAt) : undefined,
+        completedAt: raw.completedAt ? String(raw.completedAt) : undefined,
+      });
+    })
+    .filter(Boolean);
+}
+
+function normalizeMiniStepList(steps = []) {
+  if (!Array.isArray(steps)) return [];
+  return steps
+    .map((item) => {
+      const raw =
+        typeof item === "object" && item !== null ? item : { title: item };
+      const title = String(
+        raw.title || raw.text || raw.summary || raw.name || "",
+      ).trim();
+      if (!title) return null;
+      return omitEmpty({
+        id: raw.id ? String(raw.id) : undefined,
+        title,
+        outcome: raw.outcome ? String(raw.outcome) : undefined,
+        status: normalizeInternalStepStatus(raw.status),
+        required: raw.required !== false,
+        kind: raw.kind ? String(raw.kind) : "mini_step",
+        source: raw.source ? String(raw.source) : undefined,
+        outline: raw.outline ? String(raw.outline) : undefined,
+        parentOutline: raw.parentOutline
+          ? String(raw.parentOutline)
+          : undefined,
+        outlinePath: Array.isArray(raw.outlinePath)
+          ? raw.outlinePath.map(String)
+          : undefined,
+        dependsOn: Array.isArray(raw.dependsOn)
+          ? raw.dependsOn.map(String)
+          : undefined,
+        sourceRefs: Array.isArray(raw.sourceRefs)
+          ? raw.sourceRefs.map(String)
+          : undefined,
+        evidenceRequired: raw.evidenceRequired !== false,
+        acceptanceCriteria: Array.isArray(raw.acceptanceCriteria)
+          ? raw.acceptanceCriteria.map(String)
+          : undefined,
+        evidence: Array.isArray(raw.evidence)
+          ? raw.evidence.map(sanitizeEvidence)
+          : undefined,
         updatedAt: raw.updatedAt ? String(raw.updatedAt) : undefined,
         completedAt: raw.completedAt ? String(raw.completedAt) : undefined,
       });
@@ -616,11 +748,32 @@ function summarizeInternalSteps(steps = []) {
   const done = normalized.filter(
     (step) => step.status === "done" || step.status === "skipped",
   ).length;
-  const current =
+  const current = /** @type {any} */ (
     normalized.find((step) => step.status === "active") ||
-    normalized.find((step) => step.status === "blocked") ||
-    normalized.find((step) => step.status === "pending") ||
-    normalized.at(-1);
+      normalized.find((step) => step.status === "blocked") ||
+      normalized.find((step) => step.status === "pending") ||
+      normalized.at(-1)
+  );
+  const mini = summarizeMiniSteps(current?.miniSteps || []);
+  return {
+    done,
+    total: normalized.length,
+    current: current ? { ...current, mini } : undefined,
+  };
+}
+
+function summarizeMiniSteps(steps = []) {
+  const normalized = normalizeMiniStepList(steps);
+  if (!normalized.length) return undefined;
+  const done = normalized.filter(
+    (step) => step.status === "done" || step.status === "skipped",
+  ).length;
+  const current = /** @type {any} */ (
+    normalized.find((step) => step.status === "active") ||
+      normalized.find((step) => step.status === "blocked") ||
+      normalized.find((step) => step.status === "pending") ||
+      normalized.at(-1)
+  );
   return { done, total: normalized.length, current };
 }
 

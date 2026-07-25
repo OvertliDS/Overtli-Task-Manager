@@ -4,6 +4,22 @@
   "status": "active",
   "runId": "run_example",
   "goal": "Ship a Codex-first task manager",
+  "routeIntent": {
+    "mode": "mixed",
+    "workTypes": ["planning", "implementation", "validation"],
+    "source": "model_tasks"
+  },
+  "sourceContextSummary": {
+    "digest": "example-source-contract-digest",
+    "entryCount": 2,
+    "totalBytes": 164,
+    "revisionCount": 1
+  },
+  "contractReview": {
+    "status": "reviewed",
+    "sourceContextDigest": "example-source-contract-digest",
+    "routeRevision": 2
+  },
   "routeRevision": 2,
   "renderRevision": 2,
   "renderPolicy": {
@@ -21,6 +37,22 @@
   "lastRenderedHash": "example-render-hash",
   "currentTaskId": "task_003",
   "currentTaskTitle": "Validate install flow",
+  "currentInternalStep": {
+    "id": "step_install",
+    "title": "Validate the installed runtime",
+    "status": "active",
+    "done": 1,
+    "total": 2,
+    "mini": {
+      "done": 1,
+      "total": 2,
+      "current": {
+        "id": "mini_hook_smoke",
+        "title": "Smoke all managed hook events",
+        "status": "active"
+      }
+    }
+  },
   "stopAllowed": false,
   "stopReason": "1 required route segment remains open.",
   "progress": {
@@ -38,6 +70,7 @@
       "checked": true,
       "active": false,
       "required": true,
+      "workType": "planning",
       "evidence": "Route created"
     },
     {
@@ -47,6 +80,7 @@
       "checked": true,
       "active": false,
       "required": true,
+      "workType": "implementation",
       "evidence": "MCP tools implemented"
     },
     {
@@ -56,6 +90,7 @@
       "checked": false,
       "active": true,
       "required": true,
+      "workType": "validation",
       "evidence": "—"
     }
   ],
@@ -65,6 +100,8 @@
       "title": "Create route",
       "status": "done",
       "required": true,
+      "workType": "planning",
+      "workTypeSource": "model",
       "evidence": [
         {
           "kind": "manual_note",
@@ -77,6 +114,8 @@
       "title": "Implement tools",
       "status": "done",
       "required": true,
+      "workType": "implementation",
+      "workTypeSource": "model",
       "evidence": [
         {
           "kind": "file_change",
@@ -89,13 +128,65 @@
       "title": "Validate install flow",
       "status": "active",
       "required": true,
+      "workType": "validation",
+      "workTypeSource": "model",
       "evidence": [],
+      "internalSteps": [
+        {
+          "id": "step_agents",
+          "title": "Verify generated AGENTS.md block",
+          "status": "done",
+          "required": true,
+          "atomic": true,
+          "atomicRationale": "The managed-block comparison is one bounded assertion.",
+          "evidenceRequired": true,
+          "evidence": [
+            {
+              "kind": "test_result",
+              "summary": "Managed block matched the generator."
+            }
+          ],
+          "miniSteps": []
+        },
+        {
+          "id": "step_install",
+          "title": "Validate the installed runtime",
+          "outcome": "The installed MCP, hooks, skills, and native storage path operate together.",
+          "status": "active",
+          "required": true,
+          "atomic": false,
+          "evidenceRequired": true,
+          "miniSteps": [
+            {
+              "id": "mini_mcp_smoke",
+              "title": "Start and inspect a disposable installed MCP route",
+              "status": "done",
+              "required": true,
+              "evidenceRequired": true,
+              "evidence": [
+                {
+                  "kind": "test_result",
+                  "summary": "Installed MCP route started successfully."
+                }
+              ]
+            },
+            {
+              "id": "mini_hook_smoke",
+              "title": "Smoke all managed hook events",
+              "status": "active",
+              "required": true,
+              "evidenceRequired": true
+            }
+          ]
+        }
+      ],
       "metadata": {
-        "internalSteps": [
-          "Run installer smoke test",
-          "Verify generated AGENTS.md block",
-          "Confirm current task status matches rendered table"
-        ]
+        "decomposition": {
+          "version": 2,
+          "source": "model",
+          "hierarchy": ["route_segment_gate", "internal_subtask", "mini_step"],
+          "needsModelReview": false
+        }
       }
     }
   ]

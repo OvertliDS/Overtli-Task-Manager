@@ -26,6 +26,7 @@ export function patchGitignore(options = {}) {
 .codex/overtli-task-manager/sessions/
 .codex/overtli-task-manager/summaries/
 .codex/overtli-task-manager/cache/
+.codex/overtli-task-manager/install-backups/
 .codex/overtli-task-manager/*.tmp
 .codex/overtli-task-manager/install.json
 .codex/overtli-task-manager/*.sqlite*

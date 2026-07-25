@@ -1,5 +1,63 @@
 # Progress
 
+## 2026-07-25 - Full source validation and dependency audit remediation
+
+- [x] Verified: the complete source suite passes 173 tests with zero failures
+      or skips; coverage passes at 93.73% overall and 91.54% for
+      `sqlite-store.mjs`.
+- [x] Verified: lint, Prettier, TypeScript checking, syntax checking across 66
+      modules, CI tests, whitespace checks, MCP stdio protocol, and the MCP
+      Streamable HTTP constructor all pass.
+- [x] Verified: SQLite recovery regressions cover successful repair, failed and
+      thrown rebuilds, active-lock timeout, stale-lock reclamation, JSON
+      fallback, explicit failure, and read-only doctor diagnostics.
+- [x] Verified: `npm audit` reports zero vulnerabilities after upgrading the
+      ESLint toolchain, locking patched transitive dependencies, and overriding
+      the MCP SDK's compatible `@hono/node-server` request-listener dependency
+      to 2.0.5+.
+- [x] Verified: package dry-run contains 85 expected files and excludes the
+      intentionally deleted `.codex-plugin/plugin.json`; generated/source
+      AGENTS guidance and all four installed workspace skills are synchronized.
+- Documentation correction: migration guidance now reflects current schema v4
+  cascading-foreign-key rebuilds instead of stopping at schema v3.
+
+## 2026-07-25 - SQLite ABI startup recovery and fallback hardening
+
+- [x] Verified: SQLite availability now constructs and queries
+      an in-memory database, catching ABI failures that occur after the JavaScript
+      wrapper loads.
+- [x] Verified: Node ABI mismatches receive one package-local,
+      concurrency-guarded automatic rebuild attempt with CI suppression and
+      `OTM_AUTO_REBUILD_SQLITE=0` opt-out.
+- [x] Verified: `OTM_STORAGE=auto` falls back to JSON after an
+      unsuccessful repair without deleting existing SQLite state; doctor reports
+      the inactive SQLite path. Explicit SQLite and invalid backend names fail with
+      typed actionable errors.
+- Verification so far: focused SQLite-runtime, migration, and CLI tests pass;
+  lint, syntax, and diff checks pass. Full test, coverage, package, installed
+  MCP, hook, and release checks remain pending.
+
+## 2026-07-25 - Three-tier route and accumulated-context hardening
+
+- [x] Verified: explicit Phase -> subphase -> mini-step hierarchies normalize to
+      route gates, internal subtasks, and concrete leaves with provenance. Missing
+      ancestors remain visible/model-reviewable instead of silently invented.
+- [x] Verified: non-atomic subtasks require mini-steps; atomic subtasks require a
+      rationale; dependency/evidence checks and recursive descendant state prevent
+      premature gate completion. Legacy flat steps remain compatible as documented
+      atomic inputs.
+- [x] Verified: canned category defaults were removed. Deterministic fallback
+      retains one non-completable `needsModelReview` scaffold, while model guidance
+      owns semantic decomposition for unstructured requests.
+- [x] Verified: bounded redacted inline/pasted, structured, attachment/OCR, and
+      visual inputs form an accumulated source contract with provenance, revisions,
+      and digest. Steering requires whole-contract review and preserves prior
+      evidence/state through restart, summary/checkpoint memory, export/import, and
+      canonical snapshots; workspace indexing stays lightweight.
+- Verification so far: targeted planner, source-context, manager, hook, and
+  syntax checks pass. Full release, coverage, package, and global-install
+  verification remains pending.
+
 ## 2026-07-11 - Focused test-suite extraction and destructive store conformance
 
 - [x] Verified: planner, MCP protocol, SQLite migrations, and security/path/corruption cases now run from dedicated focused test modules rather than duplicate copies in the broad manager integration file.
