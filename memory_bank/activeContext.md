@@ -2,9 +2,9 @@
 
 ## Current objective
 
-Production-harden Overtli Task Manager for Node-native storage recovery and
-model-guided route interpretation, complete all validation, push the scoped
-branch, and reinstall/verify the global MCP, hooks, skills, and native runtime.
+Overtli Task Manager's Node-native storage recovery, model-guided three-tier
+route interpretation, mixed-intent gates, accumulated source contract, and
+installed lifecycle are production-hardened, released, and globally deployed.
 
 ## Preserved user contract
 
@@ -70,20 +70,17 @@ branch, and reinstall/verify the global MCP, hooks, skills, and native runtime.
 - Package dry-run contains 85 expected files, including source-context and
   SQLite runtime modules/tests, hooks, and four skills; the user-deleted plugin
   manifest remains excluded.
-
-### In progress
-
-- Review and stage only task-owned source, tests, package metadata,
-  documentation, skills, and installer changes.
-
-### Pending
-
-- Stage only task-owned files, excluding `.codex-plugin/plugin.json`; commit and
-  push `codex/full-production-hardening`; verify upstream parity.
-- Fast-forward `C:\Users\antju\.codex\plugins\overtli-task-manager`, install
-  active-ABI dependencies, run `install-global`, and verify configured MCP,
-  seven hook events, four skills, managed AGENTS behavior, native SQLite/JSON
-  fallback, and an installed disposable lifecycle.
+- The scoped release is pushed on `codex/full-production-hardening`. The global
+  plugin clone is fast-forwarded to the release, and its dependency tree loads
+  `better-sqlite3@11.10.0` with SQLite 3.49.2 under Node 22.23.1 ABI 127.
+- Two consecutive global installs produced no second-run changes across the 10
+  tracked managed files. Global MCP configuration, all seven hook events, all
+  four skills, and global/workspace managed AGENTS blocks match the release.
+- A disposable installed-copy smoke exercised MCP stdio with SQLite, mixed
+  review/documentation gates, two internal subtasks, two nested mini-steps,
+  accumulated source context, recursive evidence gates, audit, summary,
+  finalization, and clearing. Installed prompt and Stop hooks also auto-started
+  and stop-gated an isolated route as designed.
 
 ## Important files
 
@@ -100,5 +97,6 @@ branch, and reinstall/verify the global MCP, hooks, skills, and native runtime.
 
 ## Exact next action
 
-Run the final staged-diff/package audit while explicitly excluding the
-user-owned plugin-manifest deletion, then commit and push the verified branch.
+No implementation action remains. Restart or reload long-running Codex
+workspaces so their already-running MCP process releases the retired native
+module mapping and reconnects to the verified installed release.

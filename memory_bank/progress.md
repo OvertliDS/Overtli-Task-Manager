@@ -1,5 +1,29 @@
 # Progress
 
+## 2026-07-25 - Released and globally deployed production hardening
+
+- [x] Verified: `codex/full-production-hardening` was pushed and the global
+      plugin checkout was fast-forwarded without overwriting local work.
+- [x] Verified: the installed dependency tree loads
+      `better-sqlite3@11.10.0` with SQLite 3.49.2 on Node 22.23.1 ABI 127.
+      Because an existing MCP process held the old Windows native binary open,
+      dependencies were built in isolation and swapped at the directory level;
+      newly launched processes use the rebuilt tree.
+- [x] Verified: two consecutive `install-global` runs produced zero second-run
+      hash changes across 10 tracked hook, skill, and AGENTS files. The active
+      MCP configuration points to the global checkout, all seven managed hook
+      events contain exactly one OTM command, and all four installed skills
+      hash-match their packaged sources.
+- [x] Verified: the global and repository managed AGENTS blocks exactly match
+      the concise generated three-tier/mixed-intent contract, including the
+      required thorough-completion and no-placeholder instruction.
+- [x] Verified: an installed stdio MCP smoke used SQLite to complete and
+      finalize a mixed review/documentation route with two gates, two internal
+      subtasks, two nested mini-steps, accumulated source context, recursive
+      evidence gates, audit, summary, and clear. Installed prompt and Stop hooks
+      auto-started an isolated route, synchronized AGENTS, and blocked an
+      incomplete stop before explicit disposable cleanup.
+
 ## 2026-07-25 - Full source validation and dependency audit remediation
 
 - [x] Verified: the complete source suite passes 173 tests with zero failures
@@ -33,9 +57,8 @@
       unsuccessful repair without deleting existing SQLite state; doctor reports
       the inactive SQLite path. Explicit SQLite and invalid backend names fail with
       typed actionable errors.
-- Verification so far: focused SQLite-runtime, migration, and CLI tests pass;
-  lint, syntax, and diff checks pass. Full test, coverage, package, installed
-  MCP, hook, and release checks remain pending.
+- Final verification: full tests, coverage, package, installed MCP, hook, native
+  SQLite, dependency, release, and global-install checks all pass.
 
 ## 2026-07-25 - Three-tier route and accumulated-context hardening
 
@@ -54,9 +77,9 @@
       and digest. Steering requires whole-contract review and preserves prior
       evidence/state through restart, summary/checkpoint memory, export/import, and
       canonical snapshots; workspace indexing stays lightweight.
-- Verification so far: targeted planner, source-context, manager, hook, and
-  syntax checks pass. Full release, coverage, package, and global-install
-  verification remains pending.
+- Final verification: targeted and full source checks plus installed mixed-route,
+  nested-progress, summary, lifecycle, hook, package, and global-install smokes
+  all pass.
 
 ## 2026-07-11 - Focused test-suite extraction and destructive store conformance
 
