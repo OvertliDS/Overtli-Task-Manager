@@ -32,6 +32,7 @@ export class JsonStore {
     return {
       schemaVersion: "otm.store.v1",
       runs: [],
+      sessionBindings: [],
       tasks: [],
       events: [],
       summaries: [],
@@ -185,8 +186,82 @@ export class JsonStore {
   }
 
   /** Atomically create a scoped route, its complete initial checklist, and event. */
-  createRoute({ run, tasks, event, replaceRunId = null }) {
+  createRoute({
+    run,
+    tasks,
+    event,
+    replaceRunId = null,
+    sessionBinding = null,
+  }) {
     return this.transaction((data) => {
+      let currentBinding = null;
+      if (sessionBinding) {
+        currentBinding = data.sessionBindings.find(
+          (item) => item.rootSessionId === sessionBinding.rootSessionId,
+        );
+        if (
+          currentBinding &&
+          sessionBinding.expectedRunId !== undefined &&
+          currentBinding.currentRunId !== sessionBinding.expectedRunId
+        )
+          throw new OtmError(
+            "Canonical session binding changed before route creation.",
+            { code: "CANONICAL_ROUTE_CONFLICT" },
+          );
+        if (
+          currentBinding?.currentRunId &&
+          currentBinding.currentRunId !== run.id &&
+          currentBinding.currentRunId !== replaceRunId
+        ) {
+          const prior = data.runs.find(
+            (item) => item.id === currentBinding.currentRunId,
+          );
+          if (
+            prior &&
+            ["active", "ready_to_finalize", "blocked", "paused"].includes(
+              prior.status,
+            )
+          )
+            throw new OtmError(
+              "An active canonical route already exists for this Codex session.",
+              {
+                code: "CANONICAL_ROUTE_CONFLICT",
+                details: { runId: prior.id },
+              },
+            );
+        }
+        const canonicalPrior = data.runs.find(
+          (item) => item.id === currentBinding?.currentRunId,
+        );
+        const rotating =
+          !canonicalPrior ||
+          !["active", "ready_to_finalize", "blocked", "paused"].includes(
+            canonicalPrior.status,
+          ) ||
+          replaceRunId === canonicalPrior.id;
+        if (rotating) {
+          for (const prior of data.runs) {
+            if (
+              prior.id === canonicalPrior?.id ||
+              prior.id === replaceRunId ||
+              prior.sessionId !== run.sessionId ||
+              !["active", "ready_to_finalize", "blocked", "paused"].includes(
+                prior.status,
+              )
+            )
+              continue;
+            prior.status = "abandoned";
+            prior.finalizedAt = run.createdAt;
+            prior.updatedAt = run.createdAt;
+            prior.metadata = {
+              ...(prior.metadata || {}),
+              canonicalSupersededAtRunId: run.id,
+              canonicalSupersededReason:
+                "A new route rotated the root-session binding; legacy route evidence was retained.",
+            };
+          }
+        }
+      }
       const active = data.runs.find(
         (item) =>
           item.workspaceRoot === run.workspaceRoot &&
@@ -227,6 +302,21 @@ export class JsonStore {
         )
       )
         data.events.push(event);
+      if (sessionBinding) {
+        const index = data.sessionBindings.findIndex(
+          (item) => item.rootSessionId === sessionBinding.rootSessionId,
+        );
+        const nextBinding = normalizeSessionBinding({
+          ...sessionBinding,
+          currentRunId: run.id,
+          primaryWorkspace: run.workspaceRoot,
+          status: "bound",
+          updatedAt: run.createdAt,
+          expectedRunId: undefined,
+        });
+        if (index >= 0) data.sessionBindings[index] = nextBinding;
+        else data.sessionBindings.push(nextBinding);
+      }
       return run;
     });
   }
@@ -313,6 +403,60 @@ export class JsonStore {
     return this.#read().runs.find((item) => item.id === id) || null;
   }
 
+  getCanonicalBinding(rootSessionId) {
+    return (
+      this.#read().sessionBindings.find(
+        (item) => item.rootSessionId === rootSessionId,
+      ) || null
+    );
+  }
+
+  listRunsBySession(sessionId) {
+    return this.#read()
+      .runs.filter((run) => run.sessionId === sessionId)
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+  }
+
+  ensureCanonicalBinding(binding) {
+    return this.transaction((data) => {
+      const existing = data.sessionBindings.find(
+        (item) => item.rootSessionId === binding.rootSessionId,
+      );
+      if (existing) return existing;
+      const normalized = normalizeSessionBinding(binding);
+      data.sessionBindings.push(normalized);
+      return normalized;
+    });
+  }
+
+  /** @param {{ expectedRunId?: string | null }} [options] */
+  updateCanonicalBinding(binding, options = {}) {
+    const { expectedRunId } = options;
+    return this.transaction((data) => {
+      const index = data.sessionBindings.findIndex(
+        (item) => item.rootSessionId === binding.rootSessionId,
+      );
+      const current = index < 0 ? null : data.sessionBindings[index];
+      if (
+        expectedRunId !== undefined &&
+        (current?.currentRunId || null) !== expectedRunId
+      ) {
+        throw new OtmError(
+          "Canonical session binding changed during resolution.",
+          { code: "CANONICAL_ROUTE_CONFLICT" },
+        );
+      }
+      const normalized = normalizeSessionBinding({
+        ...current,
+        ...binding,
+        updatedAt: binding.updatedAt || nowIso(),
+      });
+      if (index >= 0) data.sessionBindings[index] = normalized;
+      else data.sessionBindings.push(normalized);
+      return normalized;
+    });
+  }
+
   getActiveRun(workspaceRoot, sessionId) {
     const scoped = arguments.length >= 2;
     const runs = this.#read()
@@ -338,6 +482,35 @@ export class JsonStore {
           ),
       )
       .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+  }
+
+  /**
+   * @param {{ expectedRunId?: string | null, resolution?: object }} [options]
+   */
+  addCanonicalWorkspaceAlias(rootSessionId, workspaceRoot, options = {}) {
+    const { expectedRunId, resolution } = options;
+    return this.transaction((data) => {
+      const binding = data.sessionBindings.find(
+        (item) => item.rootSessionId === rootSessionId,
+      );
+      if (!binding) return null;
+      if (expectedRunId !== undefined && binding.currentRunId !== expectedRunId)
+        throw new OtmError(
+          "Canonical session binding changed while recording a workspace alias.",
+          { code: "CANONICAL_ROUTE_CONFLICT" },
+        );
+      const aliases = [...(binding.workspaceAliases || [])];
+      if (!aliases.some((item) => sameWorkspaceAlias(item, workspaceRoot)))
+        aliases.push(workspaceRoot);
+      const next = normalizeSessionBinding({
+        ...binding,
+        workspaceAliases: aliases,
+        lastResolution: resolution || binding.lastResolution || null,
+        updatedAt: nowIso(),
+      });
+      Object.assign(binding, next);
+      return binding;
+    });
   }
 
   claimLegacyActiveRun(workspaceRoot, sessionId, metadata = {}) {
@@ -462,6 +635,12 @@ export class JsonStore {
       .slice(0, limit);
   }
 
+  listSummariesForRun(runId) {
+    return this.#read()
+      .summaries.filter((summary) => summary.runId === runId)
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+  }
+
   upsertCache(entry) {
     return this.transaction((data) => {
       const index = data.cache.findIndex((item) => item.id === entry.id);
@@ -577,6 +756,14 @@ export class JsonStore {
         data.summaries = data.summaries.filter(
           (summary) => !removableRunIds.has(summary.runId),
         );
+        for (const binding of data.sessionBindings) {
+          if (removableRunIds.has(binding.currentRunId)) {
+            binding.currentRunId = null;
+            binding.status = "empty";
+            binding.primaryWorkspace = null;
+            binding.updatedAt = now;
+          }
+        }
         data.cache = data.cache.filter((entry) => !isOldCache(entry));
       }
       return {
@@ -610,6 +797,9 @@ export function parseStateDocument(text) {
   const normalized = {
     schemaVersion: data.schemaVersion || "otm.store.v1",
     runs: data.runs,
+    sessionBindings: Array.isArray(data.sessionBindings)
+      ? data.sessionBindings
+      : [],
     tasks: data.tasks,
     events: data.events,
     summaries: data.summaries,
@@ -627,7 +817,14 @@ export function parseStateDocument(text) {
 }
 
 function validateStateDocument(data) {
-  const collections = ["runs", "tasks", "events", "summaries", "cache"];
+  const collections = [
+    "runs",
+    "sessionBindings",
+    "tasks",
+    "events",
+    "summaries",
+    "cache",
+  ];
   for (const name of collections) {
     if (!Array.isArray(data[name]))
       throw new OtmError("JSON store document has an invalid collection.", {
@@ -658,6 +855,21 @@ function validateStateDocument(data) {
       ids.add(item.id);
     }
   }
+  for (const binding of data.sessionBindings) {
+    if (
+      typeof binding.rootSessionId !== "string" ||
+      binding.id !== binding.rootSessionId ||
+      !Array.isArray(binding.workspaceAliases) ||
+      !["empty", "bound", "needs_attention"].includes(binding.status)
+    )
+      throw new OtmError(
+        "JSON store has an invalid canonical session binding.",
+        {
+          code: "JSON_STORE_CORRUPTION",
+          details: { collection: "sessionBindings", id: binding.id },
+        },
+      );
+  }
   const runIds = new Set(data.runs.map((run) => run.id));
   for (const [name, records] of [
     ["tasks", data.tasks],
@@ -672,6 +884,56 @@ function validateStateDocument(data) {
         });
     }
   }
+}
+
+function normalizeSessionBinding(input = {}) {
+  const rootSessionId = String(input.rootSessionId || input.id || "").trim();
+  if (!rootSessionId)
+    throw new OtmError("Canonical session binding needs a root session id.", {
+      code: "INVALID_SESSION_BINDING",
+    });
+  const workspaceAliases = [];
+  for (const value of Array.isArray(input.workspaceAliases)
+    ? input.workspaceAliases
+    : []) {
+    const workspace = String(value || "").trim();
+    if (
+      workspace &&
+      !workspaceAliases.some((item) => sameWorkspaceAlias(item, workspace))
+    )
+      workspaceAliases.push(workspace);
+  }
+  if (workspaceAliases.length > 64)
+    throw new OtmError(
+      "Canonical session binding has too many workspace aliases.",
+      {
+        code: "INPUT_TOO_LARGE",
+      },
+    );
+  const status = input.status || (input.currentRunId ? "bound" : "empty");
+  if (!["empty", "bound", "needs_attention"].includes(status))
+    throw new OtmError("Canonical session binding status is invalid.", {
+      code: "INVALID_SESSION_BINDING",
+    });
+  return {
+    id: rootSessionId,
+    rootSessionId,
+    currentRunId: input.currentRunId || null,
+    primaryWorkspace: input.primaryWorkspace || null,
+    workspaceAliases,
+    status,
+    attention: input.attention || null,
+    lastResolution: input.lastResolution || null,
+    updatedAt: input.updatedAt || nowIso(),
+  };
+}
+
+function sameWorkspaceAlias(left, right) {
+  const a = String(left || "").replace(/[\\/]+$/, "");
+  const b = String(right || "").replace(/[\\/]+$/, "");
+  return process.platform === "win32"
+    ? a.toLowerCase() === b.toLowerCase()
+    : a === b;
 }
 
 function assertImportDoesNotConflict(data, payload) {

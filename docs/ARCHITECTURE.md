@@ -11,19 +11,41 @@ Codex hooks    ──┘                          ├─ session current.json/cu
 
 ## State
 
-The durable store tracks runs, tasks, events, summaries, and cache entries.
+The durable store tracks root-session bindings, runs, tasks, events, summaries,
+and cache entries.
 SQLite is preferred; `auto` can use JSON whenever the native runtime is
 unavailable, while explicit `sqlite` remains fail-closed.
 
-Active routes are selected by `(normalized workspaceRoot, sessionId)`. The
-session id resolves from explicit session/thread/conversation hook fields,
-`OTM_SESSION_ID`, or `CODEX_THREAD_ID`, in that order. A supplied `runId` is
-still validated against the current workspace and session. This makes separate
-chats and VS Code windows independent even when they share one repository and
-global store. Legacy active rows with no session id remain isolated unless
-`OTM_CLAIM_LEGACY_ROUTE=1` explicitly enables one-time adoption. SQLite uses WAL
-mode and a composite workspace/session/status index; the JSON fallback
-serializes mutations through a short-lived cross-process lock file.
+The root `CODEX_THREAD_ID` (or the consistent explicit/environment session
+identity) selects one current route before workspace paths are considered.
+The workspace where a route starts remains its primary evidence authority;
+later home, project, nested, and registered moved paths are persisted aliases.
+Different root sessions remain isolated even when they share one repository and
+global store. A new substantive task after finalization atomically rotates the
+session binding while preserving prior route history. Explicit run access still
+validates the route's session; paths outside the primary workspace must resolve
+to that session's current canonical route. Conflicting identity claims are
+rejected before state access. Legacy unscoped rows remain isolated unless
+`OTM_CLAIM_LEGACY_ROUTE=1` explicitly enables one-time adoption.
+
+When a session has no binding, legacy rows are considered once and the result is
+persisted. A unique active route takes precedence over older unrelated completed
+routes. An accepted completed route can represent an active duplicate only when
+its reviewed source covers the duplicate's full source and both contracts have
+compatible goals and the complete gate/internal/mini-step contract, including
+acceptance criteria, dependency edges, required/atomic constraints, and evidence
+requirements. Text values remain case-sensitive after whitespace cleanup, and
+route-local dependency IDs are compared through their structural targets. An
+active model-authored hierarchy also needs a current source-contract review;
+unreviewed scaffold structures are covered only by an exact structural match.
+Multiple incompatible authorities enter a bounded `needs_attention` state;
+read-only inspection cannot clear it. A
+model-authorized `otm_reconcile` with an explicit same-session run id, the
+candidate's workspace, and a non-empty selection reason records selection
+provenance and then applies normal source-review and descendant gates. SQLite
+uses a root-session binding primary key and an immediate route-creation
+transaction; the JSON fallback serializes binding, route, checklist, and event
+mutations through its cross-process lock file.
 
 SQLite availability is verified by constructing and querying an in-memory
 database because `better-sqlite3` loads its ABI-specific native binding lazily.
@@ -41,9 +63,14 @@ SQLite state carries a schema version independently from the package version.
 Opening an older schema runs ordered transactional migrations after a local
 pre-migration backup is made. JSON state is validated as a complete document;
 invalid or orphaned records are quarantined with recovery guidance rather than
-being silently replaced. Route creation is one store operation covering the
-run, all initial tasks, and its first event, so competing starts cannot create
-two active routes for one canonical workspace/session scope.
+being silently replaced. Canonical route creation is one store transaction
+covering the run, all initial tasks, its first event, and the root-session
+binding. SQLite acquires the write transaction before checking that binding;
+the JSON backend holds its cross-process lock. Competing starts from different
+workspace aliases therefore resolve to one route. The legacy per-workspace
+active-scope constraint remains as a database guard, and an atomic canonical
+rotation retires duplicate active route headers while retaining their tasks,
+events, and evidence.
 
 All evidence and hook command capture pass through credential redaction before
 they enter durable state or scratch files. `OTM_COMMAND_CAPTURE` selects
@@ -147,10 +174,12 @@ workflow cleanup removes only that session's expired scratch dumps; unscoped
 maintenance does not prune scoped scratch while scoped routes remain active.
 Atomic temp cleanup uses a shorter concurrency guard so active writes are not
 deleted.
-The top-level current files are a workspace-wide index when session scoping is
-active. Canonical route state lives under the hashed session key returned in
-each snapshot's `paths`; raw session ids are not exposed by the index. Clearing
-one route updates its canonical files and index entry while leaving other
+The top-level current files are a workspace-local index when session scoping is
+active. The session snapshot and summaries live only in the route's primary
+workspace under the hashed session key returned in each snapshot's `paths`; raw
+session ids are not exposed by the index. Alias-path reads resolve through the
+durable root-session binding and do not create a second route. Clearing one
+route updates its primary-workspace files and index entry while leaving other
 sessions and their scratch evidence intact. Index rebuilds use a short-lived
 workspace lock so separate OTM processes cannot publish a lost-update view.
 At route completion, `otm_clear_current` runs immediate OTM-owned temp/scratch
@@ -198,8 +227,11 @@ The Stop hook is the enforcement and default finalization gate. If required
 route segments remain open, the first invocation returns one block decision and
 Codex continues the turn with the remaining work. Once the audit passes, the
 hook automatically finalizes the route, persists the summary and checkpoint
-memory, clears active state, and blocks once with the saved summary so Codex can
-send the final user-facing reply. A host-marked continuation
+memory, clears active state, and allows Stop after deterministic bookkeeping.
+If Stop is retried for that completed route, a valid existing summary is reused
+without hierarchy reconciliation. If the model already sent the completed
+summary before Stop runs, the hook still allows Stop and returns only a compact
+summary reference; it does not request the same summary again. A host-marked repeated invocation
 (`stop_hook_active`) is released to bound the loop. Set
 `OTM_STOP_AUTO_FINALIZE=0` for the explicit audit, finalize, present, and clear
 workflow. Missing session identity is never mapped to a legacy route, and

@@ -11,6 +11,7 @@ import { toMcpResult } from "../src/mcp/result.mjs";
 import { tools as mcpTools } from "../src/mcp/tools.mjs";
 import { parseScopedResourceUri, validateMcpArgs } from "../src/mcp/server.mjs";
 import { currentJsonPath } from "../src/core/fs-utils.mjs";
+import { createTaskManager } from "../src/core/manager.mjs";
 
 function tempWorkspace(prefix = "otm-mcp-test-") {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -246,6 +247,20 @@ test("MCP stdio protocol rejects malformed arguments and returns scoped structur
       workspaceBeforeReviewRead,
       "reading the cached project-review resource must not create cache files",
     );
+    const projectRoot = tempWorkspace("otm-mcp-project-primary-");
+    const projectManager = createTaskManager({
+      cwd: projectRoot,
+      env: {
+        OTM_STORAGE: "json",
+        OTM_STATE_DIR: stateDir,
+        CODEX_THREAD_ID: "mcp-protocol-session",
+      },
+    });
+    const projectRoute = projectManager.start({
+      workspaceRoot: projectRoot,
+      goal: "Project route remains canonical in the home-workspace MCP",
+      tasks: [{ title: "Project MCP task" }],
+    });
     const started = await client.callTool({
       name: "otm_start",
       arguments: {
@@ -255,8 +270,18 @@ test("MCP stdio protocol rejects malformed arguments and returns scoped structur
       },
     });
     assert.equal(started.structuredContent.ok, true);
+    assert.equal(started.structuredContent.result.run.id, projectRoute.run.id);
+    assert.equal(
+      started.structuredContent.result.canonicalIdentity.primaryWorkspace,
+      projectRoot,
+    );
+    assert.ok(
+      started.structuredContent.result.canonicalIdentity.workspaceAliases.includes(
+        workspaceRoot,
+      ),
+    );
     const sessionCurrentPath = currentJsonPath(
-      workspaceRoot,
+      projectRoot,
       "mcp-protocol-session",
     );
     const currentBeforeAudit = fs.readFileSync(sessionCurrentPath, "utf8");
@@ -281,6 +306,11 @@ test("MCP stdio protocol rejects malformed arguments and returns scoped structur
     assert.equal(
       JSON.parse(resource.contents[0].text).sessionId,
       "mcp-protocol-session",
+    );
+    const currentResource = await client.readResource({ uri: "otm://current" });
+    assert.equal(
+      JSON.parse(currentResource.contents[0].text).workspaceRoot,
+      projectRoot,
     );
   } finally {
     await client.close();

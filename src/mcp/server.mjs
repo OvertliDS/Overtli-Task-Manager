@@ -11,14 +11,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve, relative, isAbsolute } from "node:path";
 import fs from "node:fs";
 import { createTaskManager } from "../core/manager.mjs";
-import {
-  findWorkspaceRoot,
-  currentJsonPath,
-  currentMarkdownPath,
-  readText,
-  readOtmJsonArtifact,
-  cacheDir,
-} from "../core/fs-utils.mjs";
+import { findWorkspaceRoot, readText, cacheDir } from "../core/fs-utils.mjs";
 import {
   installWorkspace,
   renderInstallResult,
@@ -46,7 +39,7 @@ export async function runMcpServer({ env = process.env } = {}) {
     {
       capabilities: { tools: {}, resources: {} },
       instructions:
-        "Overtli Task Manager keeps Codex work organized as route checklists and automatically isolates routes by workspace plus CODEX_THREAD_ID. Before otm_start/otm_reconcile, thoroughly analyze the full user request and pass specific route segments with internalSteps. Before task-scoped OTM calls, use exact task ids from the latest snapshot or its session-scoped current.json; never copy ids from another chat, the workspace index, memory, or prior route state. Use otm_progress to mark internal steps complete as work happens and otm_complete_task only after internal steps are terminal and segment-level evidence exists. Call otm_audit_stop before final answers. By default the Stop hook automatically finalizes, saves the summary, clears the route, and returns the saved summary for the final user-facing reply; set OTM_STOP_AUTO_FINALIZE=0 only when manual otm_finalize_turn and otm_clear_current behavior is required.",
+        "Overtli Task Manager keeps one canonical route for each root CODEX_THREAD_ID across home, project, and nested workspace paths. The primary workspace recorded when the route starts remains the evidence authority; later paths are persisted aliases. Conflicting payload/environment identities are rejected; a hook without session identity remains silent and safe. Before otm_start/otm_reconcile, thoroughly analyze the full user request and pass specific route segments with internalSteps. Before task-scoped OTM calls, use exact task ids from the latest canonical snapshot or its primary-workspace session current.json; never copy ids from another chat, the workspace index, memory, or prior route state. A new substantive request after finalization starts a new route; steering during active work reconciles that route. If legacy authority is ambiguous, read-only inspection leaves it unresolved; use otm_reconcile with an explicit same-session runId, its exact workspaceRoot, and a non-empty prompt explaining the choice. Then satisfy ordinary source-review and descendant gates. Use otm_progress to mark internal steps complete as work happens and otm_complete_task only after internal steps are terminal and segment-level evidence exists. Call otm_audit_stop before final answers. A completed canonical Stop with valid saved evidence allows Stop without duplicate hierarchy reconciliation. By default the Stop hook finalizes, saves the summary and checkpoint memory, clears the route, then allows Stop after deterministic bookkeeping; set OTM_STOP_AUTO_FINALIZE=0 only when manual otm_finalize_turn and otm_clear_current behavior is required.",
     },
   );
 
@@ -93,14 +86,14 @@ export async function runMcpServer({ env = process.env } = {}) {
         name: "OTM current JSON",
         mimeType: "application/json",
         description:
-          "Active OTM route state for the current workspace and Codex session.",
+          "Active canonical OTM route for the root Codex session, resolved across workspace aliases.",
       },
       {
         uri: "otm://current.md",
         name: "OTM current Markdown",
         mimeType: "text/markdown",
         description:
-          "Chat-friendly OTM route state for the current workspace and Codex session.",
+          "Chat-friendly active canonical OTM route for the root Codex session, resolved across workspace aliases.",
       },
       {
         uri: "otm://project-review",
@@ -119,14 +112,14 @@ export async function runMcpServer({ env = process.env } = {}) {
         name: "Scoped OTM current JSON",
         mimeType: "application/json",
         description:
-          "Current JSON for a configured workspace and the current resolved session only.",
+          "Current canonical JSON for the current resolved root session; the configured workspace path is treated as an alias.",
       },
       {
         uriTemplate: "otm://workspace/{workspace}/session/{session}/current.md",
         name: "Scoped OTM current Markdown",
         mimeType: "text/markdown",
         description:
-          "Current Markdown for a configured workspace and the current resolved session only.",
+          "Current canonical Markdown for the current resolved root session; the configured workspace path is treated as an alias.",
       },
     ],
   }));
@@ -138,12 +131,14 @@ export async function runMcpServer({ env = process.env } = {}) {
         env,
         cwd: process.cwd(),
       });
-      const filePath = scoped.markdown
-        ? currentMarkdownPath(workspaceRoot, scoped.sessionId)
-        : currentJsonPath(workspaceRoot, scoped.sessionId);
+      const current = getManager().snapshot({
+        workspaceRoot,
+        sessionId: scoped.sessionId,
+        write: false,
+      });
       const text = scoped.markdown
-        ? readText(filePath, "No active OTM route for this Codex session.\n")
-        : JSON.stringify(readOtmJsonArtifact(filePath) || {}, null, 2);
+        ? current.markdown
+        : JSON.stringify(current.snapshot, null, 2);
       return {
         contents: [
           {
@@ -157,31 +152,33 @@ export async function runMcpServer({ env = process.env } = {}) {
     const workspaceRoot = findWorkspaceRoot(process.cwd());
     const sessionId = resolveSessionId({}, env);
     if (request.params.uri === "otm://current") {
+      const current = getManager().snapshot({
+        workspaceRoot,
+        sessionId,
+        write: false,
+      });
       return {
         contents: [
           {
             uri: request.params.uri,
             mimeType: "application/json",
-            text: JSON.stringify(
-              readOtmJsonArtifact(currentJsonPath(workspaceRoot, sessionId)) ||
-                {},
-              null,
-              2,
-            ),
+            text: JSON.stringify(current.snapshot, null, 2),
           },
         ],
       };
     }
     if (request.params.uri === "otm://current.md") {
+      const current = getManager().snapshot({
+        workspaceRoot,
+        sessionId,
+        write: false,
+      });
       return {
         contents: [
           {
             uri: request.params.uri,
             mimeType: "text/markdown",
-            text: readText(
-              currentMarkdownPath(workspaceRoot, sessionId),
-              "No active OTM route for this Codex session.\n",
-            ),
+            text: current.markdown,
           },
         ],
       };

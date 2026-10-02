@@ -63,6 +63,230 @@ function sqliteTestEnv(name) {
   return env;
 }
 
+function seedLegacyRoute(
+  manager,
+  {
+    id,
+    workspaceRoot,
+    sessionId,
+    goal = "Legacy contract",
+    taskTitle = "Legacy requirement",
+    stableKey = "legacy-requirement",
+    evidenceSummary = "Legacy completion proof",
+    taskDefinitions = null,
+    status = "active",
+    sourceContext = {
+      digest: "legacy-digest",
+      entries: [
+        {
+          kind: "prompt",
+          path: "prompt",
+          sourceRef: "",
+          text: "Legacy contract",
+        },
+      ],
+    },
+    contractReview = {
+      status: "reviewed",
+      sourceContextDigest: sourceContext.digest,
+    },
+  },
+) {
+  const terminal = ["completed", "cleared"].includes(status);
+  const createdAt = "2026-01-01T00:00:00.000Z";
+  const finalizedAt = terminal ? "2026-01-02T00:00:00.000Z" : null;
+  const run = {
+    id,
+    workspaceRoot,
+    sessionId,
+    turnId: null,
+    promptHash: sourceContext.digest,
+    goal,
+    status,
+    routeRevision: terminal ? 3 : 1,
+    currentTaskId: terminal ? null : `${id}-task`,
+    createdAt,
+    updatedAt: finalizedAt || createdAt,
+    finalizedAt,
+    metadata: { sourceContext, contractReview },
+  };
+  const definitions = taskDefinitions || [
+    {
+      stableKey,
+      title: taskTitle,
+      acceptanceCriteria: ["Preserve the legacy requirement."],
+      evidenceSummary,
+    },
+  ];
+  const taskIds = new Map(
+    definitions.map((definition, index) => [
+      definition.stableKey || `legacy-task-${index}`,
+      `${id}-task-${index}`,
+    ]),
+  );
+  const tasks = definitions.map((definition, index) => ({
+    id: taskIds.get(definition.stableKey || `legacy-task-${index}`),
+    runId: id,
+    parentId: definition.parentStableKey
+      ? taskIds.get(definition.parentStableKey) || null
+      : null,
+    stableKey: definition.stableKey || `legacy-task-${index}`,
+    title: definition.title || `Legacy requirement ${index + 1}`,
+    description: definition.description || null,
+    status: terminal ? "done" : "active",
+    required: definition.required !== false,
+    priority: definition.priority ?? 50,
+    sortOrder: index + 1,
+    createdBy: "legacy-fixture",
+    acceptanceCriteria: definition.acceptanceCriteria || [
+      "Preserve the legacy requirement.",
+    ],
+    evidence:
+      terminal && definition.required !== false
+        ? [
+            {
+              kind: "test_result",
+              summary: definition.evidenceSummary || evidenceSummary,
+            },
+          ]
+        : [],
+    createdAt,
+    updatedAt: finalizedAt || createdAt,
+    completedAt: finalizedAt,
+    metadata: {
+      ...(definition.metadata || {}),
+      ...(definition.dependsOnStableKeys
+        ? {
+            dependsOn: definition.dependsOnStableKeys.map(
+              (key) => taskIds.get(key) || key,
+            ),
+          }
+        : {}),
+      internalSteps: definition.internalSteps || [],
+    },
+  }));
+  const task = tasks[0];
+  manager.store.createRoute({
+    run,
+    tasks,
+    event: {
+      id: `${id}-event`,
+      runId: id,
+      turnId: null,
+      hookEventName: null,
+      eventType: "run_started",
+      idempotencyKey: `${id}-start`,
+      payload: {},
+      createdAt,
+    },
+  });
+  if (terminal) {
+    manager.store.upsertSummary({
+      id: `${id}-summary`,
+      runId: id,
+      workspaceRoot,
+      turnId: "legacy-turn",
+      summaryMd: "Legacy accepted summary",
+      summaryJson: {
+        schemaVersion: "otm.summary.v1",
+        runId: id,
+        outcome: "completed",
+        sourceContext,
+        contractReview,
+        evidence: tasks.flatMap((item) =>
+          (item.evidence || []).map(
+            (evidence) => `${item.title}: ${evidence.summary || evidence.kind}`,
+          ),
+        ),
+        hierarchy: tasks.map((item) => ({
+          taskId: item.id,
+          title: item.title,
+          status: item.status,
+          internalSteps: item.metadata.internalSteps,
+        })),
+      },
+      currentCleared: status === "cleared",
+      createdAt: finalizedAt,
+    });
+  }
+  return { run, task };
+}
+
+function legacyHierarchyContract(
+  prefix,
+  {
+    mainRequired = true,
+    mainAcceptanceCriteria = ["Check API response field"],
+    mainDependsOnPrerequisite = true,
+    mainEvidenceRequired = true,
+    miniAcceptanceCriteria = ["Preserve API field casing"],
+    prerequisiteAtomicRationale = "One bounded fixture preparation.",
+    source = "model",
+  } = {},
+) {
+  const prerequisiteId = `${prefix}-prerequisite`;
+  const required = source !== "fallback_scaffold";
+  const completedStatus = required ? "done" : "pending";
+  const evidence = required
+    ? [
+        {
+          kind: "test_result",
+          summary: "Nested contract evidence captured.",
+          at: "2026-01-02T00:00:00.000Z",
+        },
+      ]
+    : [];
+  return [
+    {
+      id: prerequisiteId,
+      title: "Prepare fixture data",
+      status: completedStatus,
+      required,
+      kind: "implementation",
+      source,
+      atomic: true,
+      atomicRationale: prerequisiteAtomicRationale,
+      needsModelReview: source === "fallback_scaffold",
+      dependsOn: [],
+      sourceRefs: [],
+      evidenceRequired: false,
+      acceptanceCriteria: ["Preserve API fixture"],
+      evidence,
+      miniSteps: [],
+    },
+    {
+      id: `${prefix}-main`,
+      title: "Verify route behavior",
+      status: completedStatus,
+      required: required && mainRequired,
+      kind: "validation",
+      source,
+      atomic: false,
+      needsModelReview: source === "fallback_scaffold",
+      dependsOn: mainDependsOnPrerequisite ? [prerequisiteId] : [],
+      sourceRefs: [],
+      evidenceRequired: mainEvidenceRequired,
+      acceptanceCriteria: mainAcceptanceCriteria,
+      evidence,
+      miniSteps: [
+        {
+          id: `${prefix}-mini`,
+          title: "Inspect response field",
+          status: completedStatus,
+          required,
+          kind: "mini_step",
+          source,
+          dependsOn: [],
+          sourceRefs: [],
+          evidenceRequired: required,
+          acceptanceCriteria: miniAcceptanceCriteria,
+          evidence,
+        },
+      ],
+    },
+  ];
+}
+
 async function withCapturedStdout(fn) {
   const originalWrite = process.stdout.write;
   let captured = "";
@@ -451,7 +675,7 @@ test("two simultaneous starts for one workspace and session create exactly one a
   assert.equal(state.runs.length, 1);
 });
 
-test("the same Codex session keeps routes independent across workspaces", () => {
+test("one Codex session resolves project and home workspaces to the canonical route", () => {
   const workspaceA = tempWorkspace("otm-workspace-a-");
   const workspaceB = tempWorkspace("otm-workspace-b-");
   const env = {
@@ -464,22 +688,730 @@ test("the same Codex session keeps routes independent across workspaces", () => 
     goal: "Workspace A",
     tasks: [{ title: "A" }],
   });
+  manager.store.listRunsBySession = () => {
+    throw new Error("legacy session history should not be rescanned");
+  };
   const routeB = manager.start({
     workspaceRoot: workspaceB,
-    replaceExisting: true,
-    goal: "Workspace B",
-    tasks: [{ title: "B" }],
+    goal: "A second path in the same chat",
+    tasks: [{ title: "Must not replace the active route" }],
   });
 
+  assert.equal(routeB.reused, true);
+  assert.equal(routeB.run.id, routeA.run.id);
   assert.equal(manager.store.getRun(routeA.run.id).status, "active");
-  assert.equal(manager.store.getRun(routeB.run.id).status, "active");
-  assert.equal(
-    manager.snapshot({ workspaceRoot: workspaceA, write: false }).run.id,
-    routeA.run.id,
-  );
+  assert.equal(routeB.canonicalIdentity.primaryWorkspace, workspaceA);
+  assert.ok(routeB.canonicalIdentity.workspaceAliases.includes(workspaceB));
   assert.equal(
     manager.snapshot({ workspaceRoot: workspaceB, write: false }).run.id,
-    routeB.run.id,
+    routeA.run.id,
+  );
+
+  const otherSession = createTaskManager({
+    cwd: workspaceB,
+    env: { ...env, CODEX_THREAD_ID: "different-thread" },
+  });
+  const independent = otherSession.start({
+    workspaceRoot: workspaceB,
+    goal: "A different Codex chat",
+    tasks: [{ title: "Independent task" }],
+  });
+  assert.notEqual(independent.run.id, routeA.run.id);
+  assert.equal(
+    otherSession.snapshot({ workspaceRoot: workspaceB, write: false }).run.id,
+    independent.run.id,
+  );
+});
+
+test("canonical aliases survive restart and explicitly registered workspace moves", () => {
+  const originalWorkspace = tempWorkspace("otm-canonical-move-original-");
+  const movedWorkspace = `${originalWorkspace}-moved`;
+  const nestedWorkspace = path.join(movedWorkspace, "nested", "package");
+  const sessionId = "canonical-moved-workspace-session";
+  const env = {
+    ...testEnv("otm-canonical-moved-workspace"),
+    CODEX_THREAD_ID: sessionId,
+  };
+  const firstManager = createTaskManager({ cwd: originalWorkspace, env });
+  const started = firstManager.start({
+    workspaceRoot: originalWorkspace,
+    goal: "Preserve the canonical task across explicit workspace aliases",
+    tasks: [{ title: "Moved workspace task" }],
+  });
+  fs.renameSync(originalWorkspace, movedWorkspace);
+  fs.mkdirSync(nestedWorkspace, { recursive: true });
+  fs.writeFileSync(path.join(nestedWorkspace, "package.json"), "{}\n", "utf8");
+  try {
+    const restarted = createTaskManager({ cwd: movedWorkspace, env });
+    const moved = restarted.snapshot({
+      workspaceRoot: movedWorkspace,
+      write: false,
+    });
+    const nested = restarted.snapshot({
+      workspaceRoot: nestedWorkspace,
+      write: false,
+    });
+    assert.equal(moved.run.id, started.run.id);
+    assert.equal(nested.run.id, started.run.id);
+    assert.equal(nested.run.workspaceRoot, originalWorkspace);
+    const binding = restarted.store.getCanonicalBinding(sessionId);
+    assert.equal(binding.primaryWorkspace, originalWorkspace);
+    assert.ok(binding.workspaceAliases.includes(movedWorkspace));
+    assert.ok(binding.workspaceAliases.includes(nestedWorkspace));
+  } finally {
+    fs.rmSync(movedWorkspace, { recursive: true, force: true });
+  }
+});
+
+test("legacy selection keeps the unique active route when it contains newer source entries", () => {
+  const completedWorkspace = tempWorkspace("otm-legacy-old-completed-");
+  const activeWorkspace = tempWorkspace("otm-legacy-new-active-");
+  const sessionId = "legacy-new-steering-session";
+  const manager = createTaskManager({
+    cwd: activeWorkspace,
+    env: { ...testEnv("otm-legacy-new-steering"), CODEX_THREAD_ID: sessionId },
+  });
+  const oldEntry = {
+    kind: "prompt",
+    path: "prompt",
+    sourceRef: "",
+    text: "Implement the original task",
+  };
+  const completed = seedLegacyRoute(manager, {
+    id: "legacy-old-completed",
+    workspaceRoot: completedWorkspace,
+    sessionId,
+    goal: "Implement the task",
+    sourceContext: { digest: "original-source", entries: [oldEntry] },
+    status: "cleared",
+  });
+  const active = seedLegacyRoute(manager, {
+    id: "legacy-active-with-steering",
+    workspaceRoot: activeWorkspace,
+    sessionId,
+    goal: "Implement the task",
+    sourceContext: {
+      digest: "source-with-new-steering",
+      entries: [
+        oldEntry,
+        {
+          kind: "prompt",
+          path: "steering",
+          sourceRef: "",
+          text: "Also support the newly requested edge case",
+        },
+      ],
+    },
+  });
+
+  const snapshot = manager.snapshot({
+    workspaceRoot: activeWorkspace,
+    write: false,
+  });
+  assert.equal(snapshot.run.id, active.run.id);
+  assert.notEqual(snapshot.run.id, completed.run.id);
+  assert.equal(
+    manager.store.getCanonicalBinding(sessionId).currentRunId,
+    active.run.id,
+  );
+});
+
+test("legacy completion does not cover changed internal or mini-step contracts", () => {
+  const variations = [
+    {
+      name: "internal required constraint",
+      activeHierarchy: (prefix) =>
+        legacyHierarchyContract(prefix, { mainRequired: false }),
+    },
+    {
+      name: "internal atomic rationale",
+      activeHierarchy: (prefix) =>
+        legacyHierarchyContract(prefix, {
+          prerequisiteAtomicRationale: "Split fixture preparation into phases.",
+        }),
+    },
+    {
+      name: "internal acceptance criterion",
+      activeHierarchy: (prefix) =>
+        legacyHierarchyContract(prefix, {
+          mainAcceptanceCriteria: ["Check api response field"],
+        }),
+    },
+    {
+      name: "internal dependency",
+      activeHierarchy: (prefix) =>
+        legacyHierarchyContract(prefix, { mainDependsOnPrerequisite: false }),
+    },
+    {
+      name: "internal evidence requirement",
+      activeHierarchy: (prefix) =>
+        legacyHierarchyContract(prefix, { mainEvidenceRequired: false }),
+    },
+    {
+      name: "mini-step acceptance criterion",
+      activeHierarchy: (prefix) =>
+        legacyHierarchyContract(prefix, {
+          miniAcceptanceCriteria: ["Preserve api field casing"],
+        }),
+    },
+    {
+      name: "top-level dependency",
+      activeHierarchy: (prefix) => legacyHierarchyContract(prefix),
+      topLevelDependency: true,
+    },
+  ];
+
+  for (const [index, variation] of variations.entries()) {
+    const completedWorkspace = tempWorkspace(
+      `otm-legacy-contract-complete-${index}-`,
+    );
+    const activeWorkspace = tempWorkspace(
+      `otm-legacy-contract-active-${index}-`,
+    );
+    const sessionId = `legacy-inner-contract-${index}`;
+    const sourceContext = {
+      digest: `same-inner-contract-source-${index}`,
+      entries: [
+        {
+          kind: "prompt",
+          path: "prompt",
+          sourceRef: "",
+          text: "Verify the same legacy hierarchy",
+        },
+      ],
+    };
+    const manager = createTaskManager({
+      cwd: activeWorkspace,
+      env: {
+        ...testEnv(`otm-legacy-contract-${index}`),
+        CODEX_THREAD_ID: sessionId,
+      },
+    });
+    const primaryDefinition = (internalSteps, dependsOnStableKeys) => ({
+      stableKey: "same-gate",
+      title: "Verify the same gate",
+      acceptanceCriteria: ["Preserve top-level API field casing"],
+      internalSteps,
+      metadata: {
+        decomposition: {
+          source: "fallback_inferred",
+          internalStepSource: "fallback_scaffold",
+          needsModelReview: false,
+        },
+      },
+      ...(dependsOnStableKeys ? { dependsOnStableKeys } : {}),
+    });
+    const taskDefinitions = (internalSteps, dependsOnStableKeys) => [
+      primaryDefinition(internalSteps, dependsOnStableKeys),
+      ...(variation.topLevelDependency
+        ? [
+            {
+              stableKey: "prerequisite-gate",
+              title: "Preserve the prerequisite gate",
+              required: false,
+              acceptanceCriteria: ["Keep the prerequisite"],
+            },
+          ]
+        : []),
+    ];
+    const completed = seedLegacyRoute(manager, {
+      id: `legacy-inner-contract-completed-${index}`,
+      workspaceRoot: completedWorkspace,
+      sessionId,
+      goal: "Verify the same legacy hierarchy",
+      sourceContext,
+      status: "cleared",
+      taskDefinitions: taskDefinitions(
+        legacyHierarchyContract(`completed-${index}`),
+        variation.topLevelDependency ? ["prerequisite-gate"] : undefined,
+      ),
+    });
+    const active = seedLegacyRoute(manager, {
+      id: `legacy-inner-contract-active-${index}`,
+      workspaceRoot: activeWorkspace,
+      sessionId,
+      goal: "Verify the same legacy hierarchy",
+      sourceContext,
+      contractReview: {
+        status: "reviewed",
+        sourceContextDigest: sourceContext.digest,
+      },
+      taskDefinitions: taskDefinitions(
+        variation.activeHierarchy(`active-${index}`),
+        variation.topLevelDependency ? [] : undefined,
+      ),
+    });
+
+    const audit = manager.auditStop({
+      workspaceRoot: activeWorkspace,
+      sessionId,
+    });
+    assert.equal(audit.run.id, active.run.id, variation.name);
+    assert.notEqual(audit.run.id, completed.run.id, variation.name);
+    assert.equal(
+      manager.store.getCanonicalBinding(sessionId).currentRunId,
+      active.run.id,
+      variation.name,
+    );
+  }
+});
+
+test("identical unreviewed scaffold contracts can reuse a matching completion across route-local IDs", () => {
+  const completedWorkspace = tempWorkspace("otm-legacy-scaffold-complete-");
+  const activeWorkspace = tempWorkspace("otm-legacy-scaffold-active-");
+  const sessionId = "legacy-identical-scaffold-session";
+  const sourceContext = {
+    digest: "same-unreviewed-scaffold-source",
+    entries: [
+      {
+        kind: "prompt",
+        path: "prompt",
+        sourceRef: "",
+        text: "Verify the same legacy hierarchy",
+      },
+    ],
+  };
+  const manager = createTaskManager({
+    cwd: activeWorkspace,
+    env: {
+      ...testEnv("otm-legacy-scaffold-matching"),
+      CODEX_THREAD_ID: sessionId,
+    },
+  });
+  const definitions = (prefix) => [
+    {
+      stableKey: "same-gate",
+      title: "Verify the same gate",
+      acceptanceCriteria: ["Preserve top-level API field casing"],
+      internalSteps: legacyHierarchyContract(prefix, {
+        source: "fallback_scaffold",
+      }),
+      metadata: {
+        decomposition: {
+          source: "fallback_inferred",
+          internalStepSource: "fallback_scaffold",
+          needsModelReview: false,
+        },
+      },
+    },
+  ];
+  const completed = seedLegacyRoute(manager, {
+    id: "legacy-identical-scaffold-completed",
+    workspaceRoot: completedWorkspace,
+    sessionId,
+    goal: "Verify the same legacy hierarchy",
+    sourceContext,
+    status: "cleared",
+    taskDefinitions: definitions("completed-scaffold"),
+  });
+  const active = seedLegacyRoute(manager, {
+    id: "legacy-identical-scaffold-active",
+    workspaceRoot: activeWorkspace,
+    sessionId,
+    goal: "Verify the same legacy hierarchy",
+    sourceContext,
+    contractReview: {
+      status: "not_reviewed",
+      sourceContextDigest: sourceContext.digest,
+    },
+    taskDefinitions: definitions("active-scaffold"),
+  });
+
+  const audit = manager.auditStop({
+    workspaceRoot: activeWorkspace,
+    sessionId,
+  });
+  assert.equal(audit.run.id, completed.run.id);
+  assert.notEqual(audit.run.id, active.run.id);
+  assert.equal(audit.stopAllowed, true);
+  assert.equal(
+    manager.store.getCanonicalBinding(sessionId).currentRunId,
+    completed.run.id,
+  );
+});
+
+test("legacy completion does not cover stale model-authored source review", () => {
+  const completedWorkspace = tempWorkspace("otm-legacy-model-review-complete-");
+  const activeWorkspace = tempWorkspace("otm-legacy-model-review-active-");
+  const sessionId = "legacy-model-review-session";
+  const sourceContext = {
+    digest: "current-model-hierarchy-source",
+    entries: [
+      {
+        kind: "prompt",
+        path: "prompt",
+        sourceRef: "",
+        text: "Verify the same legacy hierarchy",
+      },
+    ],
+  };
+  const manager = createTaskManager({
+    cwd: activeWorkspace,
+    env: {
+      ...testEnv("otm-legacy-model-review"),
+      CODEX_THREAD_ID: sessionId,
+    },
+  });
+  const definitions = (prefix) => [
+    {
+      stableKey: "same-gate",
+      title: "Verify the same gate",
+      acceptanceCriteria: ["Preserve API field casing"],
+      internalSteps: legacyHierarchyContract(prefix, { source: "model" }),
+      metadata: { decomposition: { source: "model", contentOwner: "model" } },
+    },
+  ];
+  const completed = seedLegacyRoute(manager, {
+    id: "legacy-model-review-completed",
+    workspaceRoot: completedWorkspace,
+    sessionId,
+    goal: "Verify the same legacy hierarchy",
+    sourceContext,
+    status: "cleared",
+    taskDefinitions: definitions("completed-model"),
+  });
+  const active = seedLegacyRoute(manager, {
+    id: "legacy-model-review-active",
+    workspaceRoot: activeWorkspace,
+    sessionId,
+    goal: "Verify the same legacy hierarchy",
+    sourceContext,
+    contractReview: {
+      status: "reviewed",
+      sourceContextDigest: "stale-model-hierarchy-source",
+    },
+    taskDefinitions: definitions("active-model"),
+  });
+
+  const audit = manager.auditStop({
+    workspaceRoot: activeWorkspace,
+    sessionId,
+  });
+  assert.equal(audit.run.id, active.run.id);
+  assert.notEqual(audit.run.id, completed.run.id);
+  assert.equal(
+    manager.store.getCanonicalBinding(sessionId).currentRunId,
+    active.run.id,
+  );
+});
+
+test("legacy accepted completion wins over one duplicate and new work retires stale active headers only", () => {
+  const projectWorkspace = tempWorkspace("otm-legacy-complete-project-");
+  const homeWorkspace = tempWorkspace("otm-legacy-stale-home-");
+  const sessionId = "legacy-completed-duplicate-session";
+  const env = {
+    ...testEnv("otm-legacy-completed-duplicate"),
+    CODEX_THREAD_ID: sessionId,
+  };
+  const manager = createTaskManager({ cwd: projectWorkspace, env });
+  const sourceContext = {
+    digest: "identical-source-contract",
+    entries: [
+      {
+        kind: "prompt",
+        path: "prompt",
+        sourceRef: "",
+        text: "Finish the same substantive task",
+      },
+    ],
+  };
+  const completed = seedLegacyRoute(manager, {
+    id: "legacy-accepted-project",
+    workspaceRoot: projectWorkspace,
+    sessionId,
+    goal: "Finish the same substantive task",
+    sourceContext,
+    status: "cleared",
+  });
+  const stale = seedLegacyRoute(manager, {
+    id: "legacy-stale-home-active",
+    workspaceRoot: homeWorkspace,
+    sessionId,
+    goal: "Finish the same substantive task",
+    sourceContext,
+    status: "active",
+  });
+  const oldTasks = manager.store.getTasks(stale.run.id);
+  const oldEvents = manager.store.getEvents(stale.run.id, 20);
+
+  const audit = manager.auditStop({ workspaceRoot: homeWorkspace, sessionId });
+  assert.equal(audit.run.id, completed.run.id);
+  assert.equal(audit.stopAllowed, true);
+  assert.equal(
+    manager.store.getCanonicalBinding(sessionId).currentRunId,
+    completed.run.id,
+  );
+  assert.ok(
+    manager.store
+      .getCanonicalBinding(sessionId)
+      .workspaceAliases.includes(projectWorkspace),
+  );
+  assert.ok(
+    manager.store
+      .getCanonicalBinding(sessionId)
+      .workspaceAliases.includes(homeWorkspace),
+  );
+
+  const next = manager.start({
+    workspaceRoot: homeWorkspace,
+    goal: "Start genuinely new work after the accepted legacy completion",
+    tasks: [{ title: "New substantive task" }],
+  });
+  assert.notEqual(next.run.id, completed.run.id);
+  assert.equal(manager.store.getRun(stale.run.id).status, "abandoned");
+  assert.equal(
+    manager.store.getRun(stale.run.id).metadata.canonicalSupersededAtRunId,
+    next.run.id,
+  );
+  assert.deepEqual(manager.store.getTasks(stale.run.id), oldTasks);
+  assert.deepEqual(manager.store.getEvents(stale.run.id, 20), oldEvents);
+  assert.equal(manager.store.getRun(completed.run.id).status, "cleared");
+});
+
+test("legacy authority attention survives inspection and explicit reconcile records a recoverable selection", async () => {
+  const homeWorkspace = tempWorkspace("otm-legacy-attention-home-");
+  const projectWorkspace = tempWorkspace("otm-legacy-attention-project-");
+  const sessionId = "legacy-attention-recovery-session";
+  const env = {
+    ...testEnv("otm-legacy-attention-recovery"),
+    CODEX_THREAD_ID: sessionId,
+    OTM_DEDUPE_HOOKS: "0",
+  };
+  const manager = createTaskManager({ cwd: homeWorkspace, env });
+  const home = seedLegacyRoute(manager, {
+    id: "legacy-attention-home",
+    workspaceRoot: homeWorkspace,
+    sessionId,
+    goal: "Choose the home legacy route",
+  });
+  const project = seedLegacyRoute(manager, {
+    id: "legacy-attention-project",
+    workspaceRoot: projectWorkspace,
+    sessionId,
+    goal: "Choose the project legacy route",
+    taskTitle: "Different project requirement",
+    stableKey: "project-requirement",
+    sourceContext: {
+      digest: "project-contract",
+      entries: [
+        {
+          kind: "prompt",
+          path: "prompt",
+          sourceRef: "",
+          text: "Choose the project legacy route",
+        },
+      ],
+    },
+  });
+
+  assert.throws(
+    () => manager.snapshot({ workspaceRoot: homeWorkspace, write: false }),
+    { code: "CANONICAL_ROUTE_AMBIGUOUS" },
+  );
+  assert.equal(
+    manager.store.getCanonicalBinding(sessionId).status,
+    "needs_attention",
+  );
+  assert.throws(
+    () => manager.snapshot({ workspaceRoot: projectWorkspace, write: false }),
+    { code: "CANONICAL_ROUTE_AMBIGUOUS" },
+  );
+  assert.equal(
+    manager.store.getCanonicalBinding(sessionId).status,
+    "needs_attention",
+  );
+  assert.throws(
+    () =>
+      manager.reconcile({
+        workspaceRoot: homeWorkspace,
+        runId: home.run.id,
+        prompt: "  ",
+      }),
+    { code: "CANONICAL_SELECTION_REASON_REQUIRED" },
+  );
+  assert.equal(
+    manager.store.getCanonicalBinding(sessionId).status,
+    "needs_attention",
+  );
+  assert.throws(
+    () =>
+      manager.reconcile({
+        workspaceRoot: projectWorkspace,
+        runId: home.run.id,
+        prompt: "This must use the candidate's exact workspace.",
+      }),
+    { code: "WORKSPACE_SCOPE_MISMATCH" },
+  );
+  assert.equal(
+    manager.store.getCanonicalBinding(sessionId).status,
+    "needs_attention",
+  );
+
+  const selected = manager.reconcile({
+    workspaceRoot: homeWorkspace,
+    runId: home.run.id,
+    prompt:
+      "The current user request selects the home route because its requirements match the active implementation.",
+    tasks: [
+      {
+        title: home.task.title,
+        stableKey: home.task.stableKey,
+        workType: "implementation",
+        internalSteps: [],
+        metadata: {
+          decomposition: {
+            source: "model",
+            needsModelReview: false,
+            atomic: true,
+          },
+        },
+      },
+    ],
+  });
+  assert.equal(selected.run.id, home.run.id);
+  assert.equal(manager.store.getCanonicalBinding(sessionId).status, "bound");
+  assert.equal(
+    manager.store.getCanonicalBinding(sessionId).lastResolution.kind,
+    "explicit_legacy_selection",
+  );
+  assert.ok(
+    manager.store.getCanonicalBinding(sessionId).lastResolution
+      .selectionReasonHash,
+  );
+
+  manager.progress({
+    workspaceRoot: homeWorkspace,
+    runId: home.run.id,
+    taskId: home.task.id,
+    message: "Progress after explicit canonical selection.",
+  });
+  manager.completeTask({
+    workspaceRoot: homeWorkspace,
+    runId: home.run.id,
+    taskId: home.task.id,
+    evidence: { kind: "test_result", summary: "Selected route is complete." },
+  });
+  const stopped = await withCapturedStdout(() =>
+    runHookScript("stop", {
+      cwd: projectWorkspace,
+      env,
+      stdin: JSON.stringify({
+        cwd: projectWorkspace,
+        hook_event_name: "Stop",
+        turn_id: "legacy-selection-stop",
+        session_id: sessionId,
+      }),
+    }),
+  );
+  assert.equal(stopped.result.continue, true);
+  assert.equal(stopped.result.decision, undefined);
+  assert.equal(stopped.result.otmIdentity.canonicalTaskId, home.run.id);
+  assert.equal(stopped.result.otmIdentity.modelReasoningRequired, false);
+  assert.ok(stopped.result.otmIdentity.selectionProvenance.selectionReasonHash);
+  assert.equal(manager.store.getRun(project.run.id).status, "active");
+  assert.equal(
+    manager.store.getTasks(project.run.id)[0].title,
+    project.task.title,
+  );
+});
+
+test("contradictory completed legacy authorities remain in explicit attention", () => {
+  const projectA = tempWorkspace("otm-legacy-completed-a-");
+  const projectB = tempWorkspace("otm-legacy-completed-b-");
+  const sessionId = "legacy-completed-conflict-session";
+  const manager = createTaskManager({
+    cwd: projectA,
+    env: {
+      ...testEnv("otm-legacy-completed-conflict"),
+      CODEX_THREAD_ID: sessionId,
+    },
+  });
+  seedLegacyRoute(manager, {
+    id: "legacy-completed-a",
+    workspaceRoot: projectA,
+    sessionId,
+    goal: "Complete contract A",
+    status: "cleared",
+    sourceContext: {
+      digest: "contract-a",
+      entries: [
+        { kind: "prompt", path: "prompt", sourceRef: "", text: "Contract A" },
+      ],
+    },
+  });
+  seedLegacyRoute(manager, {
+    id: "legacy-completed-b",
+    workspaceRoot: projectB,
+    sessionId,
+    goal: "Complete contract B",
+    taskTitle: "Different requirement",
+    stableKey: "different-requirement",
+    status: "cleared",
+    sourceContext: {
+      digest: "contract-b",
+      entries: [
+        { kind: "prompt", path: "prompt", sourceRef: "", text: "Contract B" },
+      ],
+    },
+  });
+
+  assert.throws(
+    () => manager.auditStop({ workspaceRoot: projectA, sessionId }),
+    { code: "CANONICAL_ROUTE_AMBIGUOUS" },
+  );
+  const binding = manager.store.getCanonicalBinding(sessionId);
+  assert.equal(binding.status, "needs_attention");
+  assert.equal(binding.attention.candidates.length, 2);
+});
+
+test("completed legacy routes with matching gates but conflicting evidence require attention", () => {
+  const projectA = tempWorkspace("otm-legacy-evidence-a-");
+  const projectB = tempWorkspace("otm-legacy-evidence-b-");
+  const sessionId = "legacy-evidence-conflict-session";
+  const manager = createTaskManager({
+    cwd: projectA,
+    env: {
+      ...testEnv("otm-legacy-evidence-conflict"),
+      CODEX_THREAD_ID: sessionId,
+    },
+  });
+  const sourceContext = {
+    digest: "same-reviewed-source",
+    entries: [
+      {
+        kind: "prompt",
+        path: "prompt",
+        sourceRef: "",
+        text: "Verify the same behavior",
+      },
+    ],
+  };
+  seedLegacyRoute(manager, {
+    id: "legacy-evidence-a",
+    workspaceRoot: projectA,
+    sessionId,
+    goal: "Verify the same behavior",
+    sourceContext,
+    status: "cleared",
+    evidenceSummary: "Test suite passed against implementation A.",
+  });
+  seedLegacyRoute(manager, {
+    id: "legacy-evidence-b",
+    workspaceRoot: projectB,
+    sessionId,
+    goal: "Verify the same behavior",
+    sourceContext,
+    status: "cleared",
+    evidenceSummary: "Test suite failed against implementation B.",
+  });
+
+  assert.throws(
+    () => manager.auditStop({ workspaceRoot: projectA, sessionId }),
+    { code: "CANONICAL_ROUTE_AMBIGUOUS" },
+  );
+  assert.equal(
+    manager.store.getCanonicalBinding(sessionId).status,
+    "needs_attention",
   );
 });
 
@@ -570,9 +1502,17 @@ test("session identity resolves supported hook payload aliases before environmen
     resolveSessionId({}, { CODEX_THREAD_ID: "environment-id" }),
     "environment-id",
   );
+  assert.throws(
+    () =>
+      resolveSessionId(
+        { session_id: "payload-session" },
+        { CODEX_THREAD_ID: "different-environment-session" },
+      ),
+    { code: "SESSION_IDENTITY_CONFLICT" },
+  );
 });
 
-test("sqlite isolates multiple chats in one project and one chat across projects", () => {
+test("sqlite isolates different chats while sharing one chat across workspaces", () => {
   assert.ok(
     loadBetterSqlite3(),
     "better-sqlite3 is required for the SQLite conformance lane",
@@ -618,10 +1558,17 @@ test("sqlite isolates multiple chats in one project and one chat across projects
   );
   assert.equal(
     managerB1.snapshot({ workspaceRoot: workspaceB, write: false }).run.id,
-    routeB1.run.id,
+    routeA1.run.id,
+  );
+  assert.equal(routeB1.run.id, routeA1.run.id);
+  assert.equal(routeB1.reused, true);
+  assert.ok(
+    routeB1.canonicalIdentity.workspaceAliases.some(
+      (alias) => alias.toLowerCase() === workspaceB.toLowerCase(),
+    ),
   );
   assert.equal(managerA1.store.listActiveRuns(workspaceA).length, 2);
-  assert.equal(managerA1.store.listActiveRuns(workspaceB).length, 1);
+  assert.equal(managerA1.store.listActiveRuns(workspaceB).length, 0);
 });
 
 test("unscoped snapshots preserve the workspace index when scoped routes are active", () => {
@@ -2893,7 +3840,7 @@ test("project review counts only eligible files, reports limits, and cannot foll
   assert.doesNotMatch(broad.summary, /MUST_NOT_APPEAR/);
 });
 
-test("stop hook auto-finalizes and clears by default while returning the saved summary", async () => {
+test("stop hook auto-finalizes, clears, and allows Stop without another model turn", async () => {
   const workspaceRoot = tempWorkspace("otm-stop-auto-finalize-");
   const env = {
     ...testEnv("otm-stop-auto-finalize"),
@@ -2927,10 +3874,11 @@ test("stop hook auto-finalizes and clears by default while returning the saved s
       }),
     }),
   );
-  assert.equal(finalized.result.decision, "block");
-  assert.match(finalized.result.reason, /automatically finalized/i);
-  assert.match(finalized.result.reason, /## ✅ Overtli Task Manager summary/);
-  assert.match(finalized.result.reason, /Route task passed/);
+  assert.equal(finalized.result.continue, true);
+  assert.equal(finalized.result.decision, undefined);
+  assert.equal(finalized.result.suppressOutput, true);
+  assert.equal(finalized.result.otmIdentity.modelReasoningRequired, false);
+  assert.ok(finalized.result.otmIdentity.summaryId);
   assert.equal(manager.store.getRun(started.run.id).status, "cleared");
   assert.equal(
     manager.store
@@ -2962,6 +3910,164 @@ test("stop hook auto-finalizes and clears by default while returning the saved s
   );
   assert.equal(released.result.continue, true);
   assert.equal(released.result.decision, undefined);
+});
+
+test("completed project route Stop from home reuses saved evidence and allows without reconciliation", async () => {
+  const projectRoot = tempWorkspace("otm-stop-project-primary-");
+  const homeRoot = tempWorkspace("otm-stop-home-alias-");
+  const env = {
+    ...testEnv("otm-stop-home-alias"),
+    CODEX_THREAD_ID: "stop-home-alias-session",
+    OTM_DEDUPE_HOOKS: "0",
+  };
+  const manager = createTaskManager({ cwd: projectRoot, env });
+  const started = manager.start({
+    workspaceRoot: projectRoot,
+    goal: "Complete the project route before the home Stop hook runs",
+    tasks: [{ title: "Finish project evidence", internalSteps: ["Verify"] }],
+  });
+  const taskId = started.snapshot.tasks[0].id;
+  finishInternalSteps(manager, projectRoot, taskId);
+  manager.completeTask({
+    workspaceRoot: projectRoot,
+    taskId,
+    evidence: { kind: "test_result", summary: "Project acceptance passed." },
+  });
+
+  const firstStop = await withCapturedStdout(() =>
+    runHookScript("stop", {
+      cwd: homeRoot,
+      env,
+      stdin: JSON.stringify({
+        cwd: homeRoot,
+        hook_event_name: "Stop",
+        turn_id: "home-stop-first",
+        session_id: "stop-home-alias-session",
+      }),
+    }),
+  );
+  const canonicalIdentity = firstStop.result.otmIdentity;
+  assert.equal(firstStop.result.continue, true);
+  assert.equal(firstStop.result.decision, undefined);
+  assert.equal(canonicalIdentity.canonicalTaskId, started.run.id);
+  assert.equal(canonicalIdentity.stopResolvedTaskId, started.run.id);
+  assert.equal(canonicalIdentity.primaryWorkspace, projectRoot);
+  assert.ok(canonicalIdentity.workspaceAliases.includes(homeRoot));
+  assert.equal(canonicalIdentity.modelReasoningRequired, false);
+  assert.equal(manager.store.getRun(started.run.id).status, "cleared");
+  const eventCount = manager.store.getEvents(started.run.id, 100).length;
+  const summaryCount = manager.store.listSummariesForRun(started.run.id).length;
+
+  const restarted = createTaskManager({ cwd: homeRoot, env });
+  const repeatedStop = await withCapturedStdout(() =>
+    runHookScript("stop", {
+      cwd: homeRoot,
+      env,
+      stdin: JSON.stringify({
+        cwd: homeRoot,
+        hook_event_name: "Stop",
+        turn_id: "home-stop-retry",
+        session_id: "stop-home-alias-session",
+      }),
+    }),
+  );
+  assert.equal(repeatedStop.result.continue, true);
+  assert.equal(repeatedStop.result.decision, undefined);
+  assert.equal(
+    repeatedStop.result.otmIdentity.resolution,
+    "completed_canonical_summary_reused",
+  );
+  assert.equal(repeatedStop.result.otmIdentity.modelReasoningRequired, false);
+  assert.equal(
+    restarted.store.getEvents(started.run.id, 100).length,
+    eventCount,
+  );
+  assert.equal(
+    restarted.store.listSummariesForRun(started.run.id).length,
+    summaryCount,
+  );
+  assert.equal(
+    restarted.snapshot({ workspaceRoot: homeRoot, write: false }).run,
+    null,
+  );
+  const nextTask = restarted.start({
+    workspaceRoot: homeRoot,
+    goal: "A new substantive task after the completed route",
+    tasks: [{ title: "Do new work" }],
+  });
+  assert.notEqual(nextTask.run.id, started.run.id);
+  assert.equal(nextTask.canonicalIdentity.canonicalTaskId, nextTask.run.id);
+  assert.equal(nextTask.canonicalIdentity.primaryWorkspace, homeRoot);
+  assert.equal(restarted.store.getRun(started.run.id).status, "cleared");
+});
+
+test("Stop after an already sent completed summary allows twice without another summary instruction", async () => {
+  const projectRoot = tempWorkspace("otm-stop-existing-summary-project-");
+  const homeRoot = tempWorkspace("otm-stop-existing-summary-home-");
+  const sessionId = "stop-existing-summary-session";
+  const env = {
+    ...testEnv("otm-stop-existing-summary"),
+    CODEX_THREAD_ID: sessionId,
+    OTM_DEDUPE_HOOKS: "0",
+  };
+  const manager = createTaskManager({ cwd: projectRoot, env });
+  const started = manager.start({
+    workspaceRoot: projectRoot,
+    goal: "Model already finalized and sent the completed summary",
+    tasks: [
+      { title: "Complete the accepted route", internalSteps: ["Verify"] },
+    ],
+  });
+  const taskId = started.snapshot.tasks[0].id;
+  finishInternalSteps(manager, projectRoot, taskId);
+  manager.completeTask({
+    workspaceRoot: projectRoot,
+    taskId,
+    evidence: {
+      kind: "test_result",
+      summary: "The accepted route is complete.",
+    },
+  });
+  const sentSummary = manager.finalizeTurn({
+    workspaceRoot: projectRoot,
+    sessionId,
+    runId: started.run.id,
+    turnId: "model-already-sent-final-summary",
+  });
+  const eventCount = manager.store.getEvents(started.run.id, 100).length;
+
+  const invokeStop = (turnId) =>
+    withCapturedStdout(() =>
+      runHookScript("stop", {
+        cwd: homeRoot,
+        env,
+        stdin: JSON.stringify({
+          cwd: homeRoot,
+          hook_event_name: "Stop",
+          turn_id: turnId,
+          session_id: sessionId,
+        }),
+      }),
+    );
+  const first = await invokeStop("existing-summary-stop-first");
+  const repeated = await invokeStop("existing-summary-stop-repeated");
+
+  for (const response of [first.result, repeated.result]) {
+    assert.equal(response.continue, true);
+    assert.equal(response.suppressOutput, true);
+    assert.equal(response.decision, undefined);
+    assert.equal(response.reason, undefined);
+    assert.equal(response.systemMessage, undefined);
+    assert.equal(response.additionalContext, undefined);
+    assert.equal(response.otmIdentity.modelReasoningRequired, false);
+    assert.equal(response.otmIdentity.summaryId, sentSummary.summary.id);
+    assert.equal(response.summary, undefined);
+  }
+  assert.equal(manager.store.getRun(started.run.id).status, "completed");
+  assert.equal(manager.store.getEvents(started.run.id, 100).length, eventCount);
+  const summaries = manager.store.listSummariesForRun(started.run.id);
+  assert.equal(summaries.length, 1);
+  assert.equal(summaries[0].id, sentSummary.summary.id);
 });
 
 test("stop hook supports explicit manual finalization opt-out", async () => {

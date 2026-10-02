@@ -22,7 +22,7 @@ let cachedBetterSqlite3Runtime;
  * not fold a migration into CREATE TABLE: existing installations must take an
  * ordered, observable upgrade path.
  */
-export const SQLITE_SCHEMA_VERSION = 4;
+export const SQLITE_SCHEMA_VERSION = 5;
 
 export function loadBetterSqlite3() {
   return inspectBetterSqlite3Runtime().Database;
@@ -375,6 +375,8 @@ export class SqliteStore {
       // user_version.
       if (foreignKeysMissing) this.#migrateV3ToV4ForeignKeys();
       this.#assertRequiredForeignKeys();
+      if (currentVersion < 5) this.#migrateV4ToV5();
+      else this.#createCanonicalSessionBindings();
       this.db.pragma(`user_version = ${SQLITE_SCHEMA_VERSION}`);
     })();
   }
@@ -632,6 +634,28 @@ export class SqliteStore {
     this.#migrateV2ToV3();
   }
 
+  #migrateV4ToV5() {
+    this.#createCanonicalSessionBindings();
+  }
+
+  #createCanonicalSessionBindings() {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS session_bindings (
+        root_session_id TEXT PRIMARY KEY,
+        current_run_id TEXT,
+        primary_workspace TEXT,
+        workspace_aliases_json TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL DEFAULT 'empty',
+        attention_json TEXT,
+        last_resolution_json TEXT,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (current_run_id) REFERENCES runs(id) ON DELETE SET NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_session_bindings_current_run
+        ON session_bindings(current_run_id);
+    `);
+  }
+
   integrityCheck() {
     return this.db.pragma("integrity_check");
   }
@@ -640,8 +664,9 @@ export class SqliteStore {
     this.db.close();
   }
 
-  transaction(fn) {
-    return this.db.transaction(() => fn())();
+  transaction(fn, { immediate = false } = {}) {
+    const transaction = this.db.transaction(() => fn());
+    return immediate ? transaction.immediate() : transaction();
   }
 
   createRun(run) {
@@ -655,30 +680,117 @@ export class SqliteStore {
   }
 
   /** Atomically create a scoped route, its complete initial checklist, and event. */
-  createRoute({ run, tasks, event, replaceRunId = null }) {
+  createRoute({
+    run,
+    tasks,
+    event,
+    replaceRunId = null,
+    sessionBinding = null,
+  }) {
     try {
-      return this.transaction(() => {
-        if (replaceRunId) {
-          const prior = this.getRun(replaceRunId);
-          if (!prior) throw new Error("RUN_NOT_FOUND");
-          this.updateRun(replaceRunId, {
-            status: "abandoned",
-            finalizedAt: run.createdAt,
-            updatedAt: run.createdAt,
-            metadata: {
-              ...(prior.metadata || {}),
-              abandonedReason: "Replaced by new route",
-            },
-          });
-        }
-        this.createRun(run);
-        const stmt = this.db
-          .prepare(`INSERT INTO tasks (id, run_id, parent_id, stable_key, title, description, status, required, priority, sort_order, created_by, acceptance_criteria_json, evidence_json, created_at, updated_at, completed_at, metadata_json)
+      return this.transaction(
+        () => {
+          let currentBinding = null;
+          if (sessionBinding) {
+            currentBinding = this.getCanonicalBinding(
+              sessionBinding.rootSessionId,
+            );
+            if (
+              currentBinding &&
+              sessionBinding.expectedRunId !== undefined &&
+              currentBinding.currentRunId !== sessionBinding.expectedRunId
+            )
+              throw new OtmError(
+                "Canonical session binding changed before route creation.",
+                { code: "CANONICAL_ROUTE_CONFLICT" },
+              );
+            if (
+              currentBinding?.currentRunId &&
+              currentBinding.currentRunId !== run.id &&
+              currentBinding.currentRunId !== replaceRunId
+            ) {
+              const prior = this.getRun(currentBinding.currentRunId);
+              if (
+                prior &&
+                ["active", "ready_to_finalize", "blocked", "paused"].includes(
+                  prior.status,
+                )
+              )
+                throw new OtmError(
+                  "An active canonical route already exists for this Codex session.",
+                  {
+                    code: "CANONICAL_ROUTE_CONFLICT",
+                    details: { runId: prior.id },
+                  },
+                );
+            }
+            const canonicalPrior = currentBinding?.currentRunId
+              ? this.getRun(currentBinding.currentRunId)
+              : null;
+            const rotating =
+              !canonicalPrior ||
+              !["active", "ready_to_finalize", "blocked", "paused"].includes(
+                canonicalPrior.status,
+              ) ||
+              replaceRunId === canonicalPrior.id;
+            if (rotating) {
+              const priorRuns = this.db
+                .prepare(
+                  `SELECT * FROM runs WHERE session_id = ? AND status IN ('active','ready_to_finalize','blocked','paused')`,
+                )
+                .all(run.sessionId)
+                .map(fromRunRow);
+              for (const prior of priorRuns) {
+                if (
+                  prior.id === canonicalPrior?.id ||
+                  prior.id === replaceRunId
+                )
+                  continue;
+                this.updateRun(prior.id, {
+                  status: "abandoned",
+                  finalizedAt: run.createdAt,
+                  updatedAt: run.createdAt,
+                  metadata: {
+                    ...(prior.metadata || {}),
+                    canonicalSupersededAtRunId: run.id,
+                    canonicalSupersededReason:
+                      "A new route rotated the root-session binding; legacy route evidence was retained.",
+                  },
+                });
+              }
+            }
+          }
+          if (replaceRunId) {
+            const prior = this.getRun(replaceRunId);
+            if (!prior) throw new Error("RUN_NOT_FOUND");
+            this.updateRun(replaceRunId, {
+              status: "abandoned",
+              finalizedAt: run.createdAt,
+              updatedAt: run.createdAt,
+              metadata: {
+                ...(prior.metadata || {}),
+                abandonedReason: "Replaced by new route",
+              },
+            });
+          }
+          this.createRun(run);
+          const stmt = this.db
+            .prepare(`INSERT INTO tasks (id, run_id, parent_id, stable_key, title, description, status, required, priority, sort_order, created_by, acceptance_criteria_json, evidence_json, created_at, updated_at, completed_at, metadata_json)
           VALUES (@id, @runId, @parentId, @stableKey, @title, @description, @status, @required, @priority, @sortOrder, @createdBy, @acceptanceCriteriaJson, @evidenceJson, @createdAt, @updatedAt, @completedAt, @metadataJson)`);
-        for (const task of tasks) stmt.run(toTaskRow(task));
-        this.recordEvent(event);
-        return run;
-      });
+          for (const task of tasks) stmt.run(toTaskRow(task));
+          this.recordEvent(event);
+          if (sessionBinding)
+            this.#writeCanonicalBinding({
+              ...sessionBinding,
+              currentRunId: run.id,
+              primaryWorkspace: run.workspaceRoot,
+              status: "bound",
+              updatedAt: run.createdAt,
+            });
+          return run;
+        },
+        { immediate: true },
+      );
     } catch (error) {
       if (
         String(error?.message || "").includes("uq_runs_one_active_scope") ||
@@ -789,6 +901,145 @@ export class SqliteStore {
   getRun(id) {
     const row = this.db.prepare("SELECT * FROM runs WHERE id = ?").get(id);
     return row ? fromRunRow(row) : null;
+  }
+
+  getCanonicalBinding(rootSessionId) {
+    const row = this.db
+      .prepare("SELECT * FROM session_bindings WHERE root_session_id = ?")
+      .get(rootSessionId);
+    return row ? fromCanonicalBindingRow(row) : null;
+  }
+
+  listRunsBySession(sessionId) {
+    return this.db
+      .prepare(
+        "SELECT * FROM runs WHERE session_id = ? ORDER BY created_at DESC",
+      )
+      .all(sessionId)
+      .map(fromRunRow);
+  }
+
+  ensureCanonicalBinding(binding) {
+    return this.transaction(
+      () => {
+        const current = this.getCanonicalBinding(binding.rootSessionId);
+        if (current) return current;
+        this.#writeCanonicalBinding(binding);
+        return this.getCanonicalBinding(binding.rootSessionId);
+      },
+      { immediate: true },
+    );
+  }
+
+  /** @param {{ expectedRunId?: string | null }} [options] */
+  updateCanonicalBinding(binding, options = {}) {
+    const { expectedRunId } = options;
+    return this.transaction(
+      () => {
+        const current = this.getCanonicalBinding(binding.rootSessionId);
+        if (
+          expectedRunId !== undefined &&
+          (current?.currentRunId || null) !== expectedRunId
+        )
+          throw new OtmError(
+            "Canonical session binding changed during resolution.",
+            { code: "CANONICAL_ROUTE_CONFLICT" },
+          );
+        this.#writeCanonicalBinding({ ...current, ...binding });
+        return this.getCanonicalBinding(binding.rootSessionId);
+      },
+      { immediate: true },
+    );
+  }
+
+  /**
+   * @param {{ expectedRunId?: string | null, resolution?: object }} [options]
+   */
+  addCanonicalWorkspaceAlias(rootSessionId, workspaceRoot, options = {}) {
+    const { expectedRunId, resolution } = options;
+    return this.transaction(
+      () => {
+        const current = this.getCanonicalBinding(rootSessionId);
+        if (!current) return null;
+        if (
+          expectedRunId !== undefined &&
+          current.currentRunId !== expectedRunId
+        )
+          throw new OtmError(
+            "Canonical session binding changed while recording a workspace alias.",
+            { code: "CANONICAL_ROUTE_CONFLICT" },
+          );
+        const aliases = [...current.workspaceAliases];
+        if (!aliases.some((item) => sameWorkspaceAlias(item, workspaceRoot)))
+          aliases.push(workspaceRoot);
+        this.#writeCanonicalBinding({
+          ...current,
+          workspaceAliases: aliases,
+          lastResolution: resolution || current.lastResolution,
+        });
+        return this.getCanonicalBinding(rootSessionId);
+      },
+      { immediate: true },
+    );
+  }
+
+  #writeCanonicalBinding(binding) {
+    const rootSessionId = String(binding.rootSessionId || "").trim();
+    if (!rootSessionId)
+      throw new OtmError("Canonical session binding needs a root session id.", {
+        code: "INVALID_SESSION_BINDING",
+      });
+    const aliases = [];
+    for (const value of Array.isArray(binding.workspaceAliases)
+      ? binding.workspaceAliases
+      : []) {
+      const workspace = String(value || "").trim();
+      if (
+        workspace &&
+        !aliases.some((item) => sameWorkspaceAlias(item, workspace))
+      )
+        aliases.push(workspace);
+    }
+    if (aliases.length > 64)
+      throw new OtmError(
+        "Canonical session binding has too many workspace aliases.",
+        {
+          code: "INPUT_TOO_LARGE",
+        },
+      );
+    const status = binding.status || (binding.currentRunId ? "bound" : "empty");
+    if (!["empty", "bound", "needs_attention"].includes(status))
+      throw new OtmError("Canonical session binding status is invalid.", {
+        code: "INVALID_SESSION_BINDING",
+      });
+    this.db
+      .prepare(
+        `INSERT INTO session_bindings
+        (root_session_id, current_run_id, primary_workspace, workspace_aliases_json, status, attention_json, last_resolution_json, updated_at)
+        VALUES (@rootSessionId, @currentRunId, @primaryWorkspace, @workspaceAliasesJson, @status, @attentionJson, @lastResolutionJson, @updatedAt)
+        ON CONFLICT(root_session_id) DO UPDATE SET
+          current_run_id=excluded.current_run_id,
+          primary_workspace=excluded.primary_workspace,
+          workspace_aliases_json=excluded.workspace_aliases_json,
+          status=excluded.status,
+          attention_json=excluded.attention_json,
+          last_resolution_json=excluded.last_resolution_json,
+          updated_at=excluded.updated_at`,
+      )
+      .run({
+        rootSessionId,
+        currentRunId: binding.currentRunId || null,
+        primaryWorkspace: binding.primaryWorkspace || null,
+        workspaceAliasesJson: JSON.stringify(aliases),
+        status,
+        attentionJson: binding.attention
+          ? JSON.stringify(binding.attention)
+          : null,
+        lastResolutionJson: binding.lastResolution
+          ? JSON.stringify(binding.lastResolution)
+          : null,
+        updatedAt: binding.updatedAt || nowIso(),
+      });
   }
 
   getActiveRun(workspaceRoot, sessionId) {
@@ -993,6 +1244,15 @@ export class SqliteStore {
         "SELECT * FROM summaries WHERE workspace_root = ? ORDER BY created_at DESC LIMIT ?",
       )
       .all(workspaceRoot, limit)
+      .map(fromSummaryRow);
+  }
+
+  listSummariesForRun(runId) {
+    return this.db
+      .prepare(
+        "SELECT * FROM summaries WHERE run_id = ? ORDER BY created_at DESC",
+      )
+      .all(runId)
       .map(fromSummaryRow);
   }
 
@@ -1264,6 +1524,30 @@ function fromRunRow(row) {
     finalizedAt: row.finalized_at,
     metadata: parseJson(row.metadata_json, {}),
   };
+}
+
+function fromCanonicalBindingRow(row) {
+  return {
+    id: row.root_session_id,
+    rootSessionId: row.root_session_id,
+    currentRunId: row.current_run_id,
+    primaryWorkspace: row.primary_workspace,
+    workspaceAliases: parseJson(row.workspace_aliases_json, []),
+    status: row.status,
+    attention: row.attention_json ? parseJson(row.attention_json, {}) : null,
+    lastResolution: row.last_resolution_json
+      ? parseJson(row.last_resolution_json, {})
+      : null,
+    updatedAt: row.updated_at,
+  };
+}
+
+function sameWorkspaceAlias(left, right) {
+  const a = String(left || "").replace(/[\\/]+$/, "");
+  const b = String(right || "").replace(/[\\/]+$/, "");
+  return process.platform === "win32"
+    ? a.toLowerCase() === b.toLowerCase()
+    : a === b;
 }
 
 function toTaskRow(task) {

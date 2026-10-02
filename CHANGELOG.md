@@ -27,11 +27,28 @@
   research, or documentation gates into implementation. Snapshots, Markdown,
   summaries, MCP schemas, hooks, skills, examples, and installer guidance
   preserve the classification and outcome-appropriate evidence contract.
+- One current route is bound to each root `CODEX_THREAD_ID` across workspace
+  aliases; the route's starting workspace remains its primary evidence
+  authority. JSON and SQLite persist route creation and binding atomically,
+  while SQLite uses immediate binding writes to serialize cross-workspace races.
+- Stop reuses a validated completed summary and allows the host to stop without
+  asking for the same summary again. Incomplete or contradictory evidence still
+  blocks; the manual-finalization opt-out and repeated-Stop safeguards remain.
+- Legacy duplicates resolve only with reviewed, one-way source coverage and
+  compatible goals, full gate/internal/mini-step contracts, and evidence.
+  Acceptance values remain case-sensitive; dependency edges, required/atomic
+  constraints, and evidence requirements must match. Active model-authored
+  hierarchies require current source review; unreviewed scaffolds resolve only
+  on exact structural matches. Contradictory candidates remain readable and
+  recover through an explicit same-session `otm_reconcile` selection with
+  bounded provenance.
 
 ### Security and lifecycle hardening
 
 - Canonical workspace/path validation rejects traversal and root escapes.
-- Route creation is atomic across run, tasks, and initial event, with an active workspace/session uniqueness invariant.
+- Route creation is atomic across the run, tasks, first event, and canonical
+  root-session binding; the active workspace/session uniqueness invariant
+  remains as a local storage guard.
 - Public route inputs cannot initialize terminal task states, bypass evidence, or mutate cross-run tasks.
 - SQLite migrations use `PRAGMA user_version`, recoverable pre-migration backups, and strict JSON-column parsing.
 - Corrupt JSON state is quarantined and reported instead of reset.

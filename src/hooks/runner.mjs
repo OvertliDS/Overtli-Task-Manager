@@ -24,7 +24,19 @@ export async function runHookScript(
 ) {
   const input = parseJson(stdin, {});
   const workspaceRoot = findWorkspaceRoot(input.cwd || cwd);
-  const sessionId = resolveSessionId(input, env);
+  if (eventName === "stop" && isActiveStopHook(input))
+    return emitJson({ continue: true, suppressOutput: true });
+  let sessionId;
+  try {
+    sessionId = resolveSessionId(input, env);
+  } catch (error) {
+    const message = `OTM hook diagnostic: conflicting session identity; no route state was read or changed. ${redactSensitiveText(error?.message || String(error))}`;
+    return emitJson(
+      eventName === "stop"
+        ? { decision: "block", reason: message, suppressOutput: true }
+        : { continue: true, suppressOutput: true, systemMessage: message },
+    );
+  }
   let cleanupDiagnostic = null;
   try {
     cleanupWorkspaceStateTempFiles(workspaceRoot, {
@@ -151,6 +163,7 @@ function syncAgentsInstructions(workspaceRoot, env) {
 
 function handleUserPromptSubmit(manager, input, workspaceRoot, env) {
   const sessionId = resolveSessionId(input, env);
+  if (!sessionId) return { continue: true, suppressOutput: true };
   // SessionStart can be skipped by clients that attach hooks after opening a
   // workspace. Recheck here so the first substantive prompt still creates or
   // refreshes the root instruction block.
@@ -243,7 +256,7 @@ function handleUserPromptSubmit(manager, input, workspaceRoot, env) {
       : contextRoute
         ? "The new prompt and structured/attachment/visual context were appended to the canonical session contract. Re-review the entire accumulated contract and call otm_reconcile with the updated model-authored hierarchy before completing more route gates."
         : `Before editing files or running implementation commands, call ${action} with workspaceRoot set to ${workspaceRoot}.`,
-    `This Codex chat is isolated as session ${sessionId || "(unscoped legacy client)"}; OTM tools resolve CODEX_THREAD_ID automatically, so do not reuse route ids from another chat or workspace.`,
+    `This Codex chat resolves to root session ${sessionId || "(unscoped legacy client)"}. OTM uses that session before workspace paths; the route's primary workspace remains its evidence authority and later home/project/nested paths are aliases. Never reuse route ids from another Codex session.`,
     "Before that call, thoroughly analyze the full user request and all context available to you, including inline chat text, attached files, screenshots/images you can inspect, OCR/descriptions, IDE context, and prior steering in this turn.",
     "Map the full request before implementation, then keep reconciling it as evidence or steering arrives. Explicit identifiers, wording, order, constraints, and acceptance conditions remain authoritative.",
     'Tier 1 is a bounded route segment/completion gate for a major outcome (for example Phase 3), with a concise outcome/gist, dependencies, provenance/source references, acceptance conditions, and gate evidence policy. Do not collapse distinct requested work into a vague gate such as "fix all issues".',
@@ -256,9 +269,9 @@ function handleUserPromptSubmit(manager, input, workspaceRoot, env) {
     "Show the returned Markdown checklist snapshot in chat.",
     "Use Codex native goal control now when it is available: create one goal if this chat has none, with an objective that requires completion of every requested phase and task. Keep that goal active while OTM tracks detailed route progress; only mark it complete after the OTM stop audit passes, or blocked after a genuine unresolved blocker.",
     "Keep exactly one active route segment when possible; mark completion only with concrete evidence. After a valid otm_complete_task call, immediately continue work on the returned active next segment instead of stopping or sending a final answer.",
-    "Before task-scoped OTM calls, use exact task ids from the latest OTM snapshot/current.json; never guess ids from titles, memory, or prior route state.",
+    "Before task-scoped OTM calls, use exact task ids from the latest canonical OTM snapshot or current.json in the route's primary workspace; never use the workspace index or guess ids from titles, memory, or another session.",
     "Mark mini-steps and internal subtasks complete with otm_progress as evidence arrives; complete the parent gate only after all required descendants are terminal and segment-level evidence exists.",
-    "If the user steers, reconcile before continuing. A pause preserves this route by workspace/session; on a later continue/resume prompt, load the active snapshot and proceed from its current task. Before final response, call otm_audit_stop. If required tasks remain, continue working.",
+    "If the user steers, reconcile before continuing. A pause preserves this route by root Codex session across workspace aliases; on a later continue/resume prompt, load the canonical snapshot and proceed from its current task. Before final response, call otm_audit_stop. If required tasks remain, continue working.",
     "When the audit passes, allow the Stop hook to finalize, save the summary, and clear automatically. Only call otm_finalize_turn and otm_clear_current manually when OTM_STOP_AUTO_FINALIZE=0.",
   ].join("\n");
   return {
@@ -405,22 +418,87 @@ function handleStop(manager, input, workspaceRoot, env) {
   // choosing the newest/legacy route can block on another chat's checklist.
   if (!sessionId) return { continue: true, suppressOutput: true };
 
-  const audit = manager.auditStop({
-    workspaceRoot,
-    sessionId,
-    turnId: input.turn_id,
-    hookEventName: input.hook_event_name,
-  });
-  if (!audit.run) return { continue: true, suppressOutput: true };
+  let audit;
+  try {
+    audit = manager.auditStop({
+      workspaceRoot,
+      sessionId,
+      turnId: input.turn_id,
+      hookEventName: input.hook_event_name,
+    });
+  } catch (error) {
+    if (error?.code !== "CANONICAL_ROUTE_AMBIGUOUS") throw error;
+    return {
+      decision: "block",
+      reason: `Overtli Task Manager needs an explicit legacy route selection before Stop can continue. ${redactSensitiveText(error?.message || String(error))}`,
+      otmIdentity: {
+        rootSessionId: sessionId,
+        canonicalTaskId: null,
+        primaryWorkspace: null,
+        workspaceAliases: [],
+        stopResolvedTaskId: null,
+        modelReasoningRequired: true,
+        resolution: "legacy_conflict",
+        candidates: error.details?.candidates || [],
+      },
+    };
+  }
+  if (!audit.run)
+    return {
+      continue: true,
+      suppressOutput: true,
+      otmIdentity: audit.canonicalIdentity,
+    };
   if (!audit.stopAllowed) {
-    const current =
-      audit.remainingRequired.find(
-        (task) => task.id === audit.run.currentTaskId,
-      ) || audit.remainingRequired[0];
+    const current = audit.remainingRequired.find(
+      (task) => task.id === audit.run.currentTaskId,
+    ) ||
+      audit.remainingRequired[0] || {
+        title: "Reconcile the accumulated source contract",
+        status: "needs_model_review",
+      };
     const remainingCount = audit.remainingRequired.length;
     return {
       decision: "block",
       reason: `Overtli Task Manager audit blocked the stop. Continue the current route segment: ${current.title} (${current.status}). ${remainingCount > 1 ? `${remainingCount - 1} later required segment${remainingCount === 2 ? "" : "s"} remain queued.` : "This is the final required segment."}\n\nRecord the next concrete internal-step evidence, complete this segment only when its required internal steps are terminal, then continue directly to the returned next segment. The hook will finalize and clear automatically once the audit passes.`,
+      otmIdentity: audit.canonicalIdentity,
+    };
+  }
+  if (
+    audit.run.finalizedAt &&
+    ["completed", "cleared"].includes(audit.run.status)
+  ) {
+    let summary = manager.store.listSummariesForRun(audit.run.id)[0] || null;
+    if (!summary) {
+      try {
+        const repaired = manager.finalizeTurn({
+          workspaceRoot,
+          sessionId,
+          runId: audit.run.id,
+          turnId: input.turn_id || audit.run.turnId || "canonical-stop-repair",
+          outcome: "completed",
+        });
+        summary = repaired.summary;
+      } catch (error) {
+        return {
+          decision: "block",
+          reason: `The canonical route is complete, but its saved summary needs deterministic repair before Stop can continue. ${redactSensitiveText(error?.message || String(error))}`,
+          otmIdentity: {
+            ...audit.canonicalIdentity,
+            modelReasoningRequired: false,
+          },
+        };
+      }
+    }
+    return {
+      continue: true,
+      suppressOutput: true,
+      otmIdentity: {
+        ...audit.canonicalIdentity,
+        resolution: "completed_canonical_summary_reused",
+        summaryId: summary?.id || null,
+        modelReasoningRequired: false,
+      },
     };
   }
   if (env.OTM_STOP_AUTO_FINALIZE === "0") {
@@ -428,6 +506,10 @@ function handleStop(manager, input, workspaceRoot, env) {
       decision: "block",
       reason:
         "Overtli Task Manager audit passed. Automatic finalization is disabled for this session; call otm_finalize_turn, show its Markdown summary, then call otm_clear_current before the final response.",
+      otmIdentity: {
+        ...audit.canonicalIdentity,
+        modelReasoningRequired: false,
+      },
     };
   }
   let finalized;
@@ -446,18 +528,15 @@ function handleStop(manager, input, workspaceRoot, env) {
       reason: `OTM finalization failed and needs one repair pass: ${redactSensitiveText(error?.message || String(error))}`,
     };
   }
-  const summary = String(
-    finalized.summaryMd || finalized.markdown || "",
-  ).trim();
   return {
-    decision: "block",
-    reason: [
-      "Overtli Task Manager automatically finalized the completed route, saved its summary and checkpoint memory, and cleared the active route state.",
-      summary,
-      "Send the final user-facing response now using the saved summary above. The route is already finalized and cleared; do not call finalization or clearing tools again.",
-    ]
-      .filter(Boolean)
-      .join("\n\n"),
+    continue: true,
+    suppressOutput: true,
+    otmIdentity: {
+      ...audit.canonicalIdentity,
+      resolution: "completed_canonical_route_finalized",
+      summaryId: finalized.summary?.id || null,
+      modelReasoningRequired: false,
+    },
   };
 }
 

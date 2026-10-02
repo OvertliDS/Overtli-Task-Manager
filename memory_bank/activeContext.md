@@ -2,9 +2,10 @@
 
 ## Current objective
 
-Overtli Task Manager's Node-native storage recovery, model-guided three-tier
-route interpretation, mixed-intent gates, accumulated source contract, and
-installed lifecycle are production-hardened, released, and globally deployed.
+Canonical root-session identity, evidence-proven legacy recovery, and one-reply
+Stop closeout are installed and verified. The existing Node-native storage
+recovery, model-guided three-tier routes, accumulated source contract, and
+installed lifecycle retain their verified behavior.
 
 ## Preserved user contract
 
@@ -31,6 +32,31 @@ installed lifecycle are production-hardened, released, and globally deployed.
 - Canonical session snapshots, JSON/SQLite, restart, summaries, history,
   checkpoint memory, cache/scratch references, and export/import preserve the
   hierarchy/context. Top-level `current.json` stays a lightweight session index.
+- A root `CODEX_THREAD_ID` selects one current route across home, project,
+  nested, and registered moved paths. The route's starting workspace remains
+  the primary evidence authority; later paths are persisted aliases. A new
+  substantive request after finalization rotates to a new route and must not
+  reuse completed evidence.
+- JSON and SQLite create/rotate the session binding atomically with the route.
+  Distinct session IDs never alias; conflicting payload/environment claims fail
+  before route access. Explicit foreign-session run IDs remain rejected.
+- A unique active legacy route beats unrelated older completed history. A
+  completed duplicate is authoritative only when its reviewed source covers
+  the active duplicate and goals, full gate/internal/mini-step contracts,
+  descendant completion evidence, and summary evidence agree. Acceptance and
+  dependency values remain case-sensitive; required/atomic constraints and
+  evidence requirements must match. Active model-authored hierarchy requires
+  current source review, while unreviewed scaffolds require exact structure.
+  Contradictions remain in bounded attention state;
+  explicit same-session `otm_reconcile` selection records a reason hash and
+  applies normal contract and descendant gates. Read-only inspection cannot
+  clear attention.
+- Completed canonical Stop reuses a validated saved summary and returns an allow
+  response with a bounded reference, without requesting another model turn.
+  Missing summaries may be repaired deterministically;
+  stale review digests, incomplete descendants, or contradictory saved summaries
+  still block Stop. Manual finalization opt-out and repeated-Stop safeguards stay
+  unchanged.
 - Managed AGENTS content, MCP schemas/descriptions, hooks, four skills, examples,
   documentation, installer output, package contents, and the global copy must
   agree.
@@ -95,8 +121,42 @@ installed lifecycle are production-hardened, released, and globally deployed.
   `tests/source-context.test.mjs`, `tests/manager.test.mjs`: primary new
   regressions.
 
+## 2026-10-02 - Canonical session identity verification
+
+- Verified: root-session bindings resolve one route across home, project,
+  nested, explicitly moved, and restarted workspace aliases. A second session
+  remains isolated, and established bindings do not rescan legacy history.
+- Verified: JSON and SQLite cross-workspace concurrent starts create one route
+  and persist both aliases. SQLite binding writes use immediate transactions;
+  this fixes the reproduced `SQLITE_BUSY_SNAPSHOT` and stale-alias compare-and-
+  swap race.
+- Verified: legacy selection uses one-way completed-source coverage plus
+  compatible requirements, hierarchy, gate evidence, descendant evidence, and
+  summaries. Conflicting completed receipts remain in actionable attention;
+  explicit same-session reconciliation records only a bounded reason hash.
+- Verified: Stop after an already sent completed summary, fresh auto-finalized
+  Stop, and repeated Stop all return host allow responses without another
+  summary instruction. Manual-finalization opt-out and real open-gate blocks
+  remain covered.
+- Verification: six focused manager, hook, concurrency, store-conformance,
+  migration, and MCP suites passed 115 tests; syntax, lint, format, and type
+  checks passed.
+- Independent Luna Max review found one legacy full-contract comparison gap.
+  The same xhigh owner corrected it; 11 targeted legacy tests, 5 hook tests,
+  and quality guards passed. The same Max child confirmed the correction with
+  no supported residual defect. Unaffected broad checks were not repeated.
+- Fresh installed production CLI, Stop, and stdio MCP checks resolve the same
+  route across home/project/nested aliases. MCP initialization/discovery and
+  the real current resource passed with 25 tools and 3 resources. A genuine
+  unfinished gate still blocks; the completed-summary allow path is covered.
+- Runtime boundary: the fixture MCP stdio process and fresh hook runner passed.
+  A long-running Task Manager MCP process imports `manager.mjs` once and may
+  need a normal Codex MCP reload to load source changes. No Codex or ODC process
+  was stopped here.
+
 ## Exact next action
 
-No implementation action remains. Restart or reload long-running Codex
-workspaces so their already-running MCP process releases the retired native
-module mapping and reconnects to the verified installed release.
+Use a normal Codex MCP reload to refresh an already-running stdio process.
+No implementation or validation action remains. Root owns publication on
+`codex/full-production-hardening`; Git history and the scoped release packet
+are the commit/push authority rather than a self-referencing hash in this file.

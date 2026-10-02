@@ -1,5 +1,45 @@
 # Progress
 
+## 2026-10-02 - Canonical root-session task identity
+
+- [x] Verified: a root Codex session maps to one canonical current route across
+      project, home, nested, moved, and restarted workspace paths; a different
+      session remains isolated. Existing bindings avoid broad legacy history
+      scans.
+- [x] Verified: JSON and SQLite cross-workspace start races preserve one route
+      and all aliases. SQLite read/modify/write binding operations use immediate
+      transactions after the concurrency fixture reproduced
+      `SQLITE_BUSY_SNAPSHOT` and stale alias compare-and-swap failures.
+- [x] Verified: legacy recovery uses one-way completed-source coverage and
+      checks compatible requirements, terminal hierarchy, gate/descendant
+      evidence, and summaries. Contradictory active or completed candidates
+      stay readable in attention and recover through explicit same-session
+      `otm_reconcile` selection with reason-hash provenance.
+- [x] Verified: a Stop after the model already sent a completed summary and a
+      repeated Stop both return the host allow response with only a compact
+      summary id. Fresh auto-finalization also allows Stop; genuine incomplete
+      gates and manual-finalization opt-out retain their blocks.
+- Verification: six focused suites passed 115 tests; `npm run syntax:check`,
+  `npm run lint`, `npm run format:check`, `npm run type:check`, and
+  `git diff --check` passed. The stdio MCP fixture resolves a project-primary
+  route from its home-workspace process.
+- [x] Verified delta: legacy authority compares the complete gate/internal/mini
+      contract, including case-sensitive criteria, route-independent dependency
+      edges, required/atomic constraints, and evidence requirements. Active
+      model-authored hierarchy needs current source review; an unreviewed
+      scaffold is auto-covered only by an exact structural match.
+- Deployment limit: long-running Task Manager MCP imports need a normal Codex
+  MCP reload to load updated modules. No Codex or ODC process was stopped.
+- [x] Independent Luna Max final audit found one missing full-hierarchy legacy
+      contract comparison. The same xhigh owner fixed it; 11 targeted legacy
+      tests, 5 hooks, and code-quality guards passed. The same Max reviewer
+      confirmed no supported residual defect in the correction.
+- [x] Fresh production CLI, Stop, and stdio MCP resolve the real canonical
+      route across aliases; MCP discovery/current-resource/tool checks pass
+      with 25 tools and 3 resources. The existing host process remains live.
+- Release authority: root publishes the scoped change on
+  `codex/full-production-hardening`; use Git history for its commit identity.
+
 ## 2026-07-25 - Released and globally deployed production hardening
 
 - [x] Verified: `codex/full-production-hardening` was pushed and the global

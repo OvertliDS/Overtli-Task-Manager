@@ -14,10 +14,10 @@ function workspace() {
   return root;
 }
 
-function stateEnv(name) {
+function stateEnv(name, storage = "json") {
   return {
     ...process.env,
-    OTM_STORAGE: "json",
+    OTM_STORAGE: storage,
     OTM_STATE_DIR: fs.mkdtempSync(path.join(os.tmpdir(), `${name}-state-`)),
     CODEX_THREAD_ID: "concurrency-session",
   };
@@ -29,11 +29,18 @@ const CHILD = `
   const input = JSON.parse(process.env.OTM_TEST_INPUT);
   try {
     let result;
+    if (input.operation === 'start') result = manager.start(input.args);
     if (input.operation === 'progress') result = manager.progress(input.args);
     if (input.operation === 'reconcile') result = manager.reconcile(input.args);
     if (input.operation === 'complete') result = manager.completeTask(input.args);
     if (input.operation === 'clear') result = manager.clearCurrent(input.args);
-    process.stdout.write(JSON.stringify({ ok: true, revision: result.run?.routeRevision || null }));
+    process.stdout.write(JSON.stringify({
+      ok: true,
+      revision: result.run?.routeRevision || null,
+      runId: result.run?.id || null,
+      reused: Boolean(result.reused),
+      canonicalIdentity: result.canonicalIdentity || null,
+    }));
   } catch (error) {
     process.stdout.write(JSON.stringify({
       ok: false,
@@ -123,6 +130,55 @@ function modelReviewedAtomicTask(title) {
     },
   };
 }
+
+test("cross-workspace starts atomically share one JSON and SQLite session route", async () => {
+  const packageRoot = fileURLToPath(new URL("..", import.meta.url));
+  for (const storage of ["json", "sqlite"]) {
+    const workspaceA = workspace();
+    const workspaceB = workspace();
+    const env = stateEnv(`otm-start-alias-${storage}`, storage);
+    const inputFor = (workspaceRoot) => ({
+      operation: "start",
+      args: {
+        workspaceRoot,
+        goal: "One task started concurrently from two workspace aliases",
+        tasks: [modelReviewedAtomicTask("Concurrent canonical task")],
+      },
+    });
+    const results = await Promise.all([
+      concurrentChild(packageRoot, env, inputFor(workspaceA)),
+      concurrentChild(packageRoot, env, inputFor(workspaceB)),
+    ]);
+
+    assert.ok(
+      results.every((result) => result.ok),
+      JSON.stringify(results),
+    );
+    assert.equal(results[0].runId, results[1].runId);
+    assert.equal(results.filter((result) => !result.reused).length, 1);
+    const primaryWorkspace = results.find((result) => !result.reused)
+      .canonicalIdentity.primaryWorkspace;
+    for (const result of results) {
+      assert.equal(
+        result.canonicalIdentity.rootSessionId,
+        "concurrency-session",
+      );
+      assert.equal(result.canonicalIdentity.canonicalTaskId, results[0].runId);
+      assert.equal(result.canonicalIdentity.primaryWorkspace, primaryWorkspace);
+    }
+
+    const manager = createTaskManager({ cwd: workspaceA, env });
+    const binding = manager.store.getCanonicalBinding("concurrency-session");
+    assert.equal(binding.currentRunId, results[0].runId);
+    assert.ok(binding.workspaceAliases.includes(workspaceA));
+    assert.ok(binding.workspaceAliases.includes(workspaceB));
+    assert.equal(
+      manager.store.listRunsBySession("concurrency-session").length,
+      1,
+    );
+    assert.equal(manager.store.getRun(binding.currentRunId).status, "active");
+  }
+});
 
 test("separate processes serialize progression, reconciliation, completion, and clearing with revision safety", async () => {
   const packageRoot = fileURLToPath(new URL("..", import.meta.url));

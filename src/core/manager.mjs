@@ -110,42 +110,637 @@ export function createTaskManager(options = {}) {
     return next;
   }
 
-  function getScopedActiveRun(
-    workspaceRoot,
-    sessionId,
-    { claimLegacy = true } = {},
-  ) {
-    let run = store.getActiveRun(workspaceRoot, sessionId);
-    if (
-      !run &&
-      sessionId &&
-      claimLegacy &&
-      env.OTM_CLAIM_LEGACY_ROUTE === "1"
-    ) {
-      run = store.claimLegacyActiveRun(workspaceRoot, sessionId, {
-        legacySessionClaimedAt: nowIso(),
-      });
-      if (run) {
-        recordEvent(
-          run.id,
-          "legacy_session_claimed",
-          { sessionId },
-          { sessionId },
+  function getCanonicalBinding(workspaceRoot, sessionId) {
+    if (!sessionId) return null;
+    let binding = store.getCanonicalBinding(sessionId);
+    if (!binding) {
+      const candidates = store.listRunsBySession(sessionId);
+      const legacy = chooseLegacyAuthority(candidates);
+      const selected = legacy.run || null;
+      const initial = {
+        id: sessionId,
+        rootSessionId: sessionId,
+        currentRunId: selected?.id || null,
+        primaryWorkspace: selected?.workspaceRoot || null,
+        workspaceAliases: uniqueWorkspaces([
+          workspaceRoot,
+          selected?.workspaceRoot,
+        ]),
+        status: legacy.attention
+          ? "needs_attention"
+          : selected
+            ? "bound"
+            : "empty",
+        attention: legacy.attention || null,
+        lastResolution: {
+          kind: legacy.kind,
+          canonicalTaskId: selected?.id || null,
+          primaryWorkspace: selected?.workspaceRoot || null,
+          modelReasoningRequired: selected
+            ? !isAcceptedCompletedRun(selected)
+            : Boolean(legacy.attention),
+          at: nowIso(),
+        },
+        updatedAt: nowIso(),
+      };
+      if (store.readOnly) binding = initial;
+      else {
+        binding = store.ensureCanonicalBinding(initial);
+        if (
+          !binding.currentRunId &&
+          initial.currentRunId &&
+          binding.status !== "needs_attention"
+        ) {
+          try {
+            binding = store.updateCanonicalBinding(initial, {
+              expectedRunId: null,
+            });
+          } catch (error) {
+            if (error?.code !== "CANONICAL_ROUTE_CONFLICT") throw error;
+            binding = store.getCanonicalBinding(sessionId);
+          }
+        }
+      }
+    }
+    if (binding.status === "needs_attention")
+      throw new OtmError(
+        "Multiple legacy routes may belong to this Codex session; select the authoritative run after reviewing the reported candidates.",
+        {
+          code: "CANONICAL_ROUTE_AMBIGUOUS",
+          details: binding.attention || {},
+        },
+      );
+    if (binding.currentRunId) {
+      const run = store.getRun(binding.currentRunId);
+      if (!run) {
+        if (!store.readOnly)
+          binding = store.updateCanonicalBinding(
+            {
+              ...binding,
+              currentRunId: null,
+              primaryWorkspace: null,
+              status: "empty",
+              lastResolution: {
+                kind: "pruned_binding_recovered",
+                canonicalTaskId: null,
+                primaryWorkspace: null,
+                modelReasoningRequired: false,
+                at: nowIso(),
+              },
+            },
+            { expectedRunId: binding.currentRunId },
+          );
+      } else if (run.sessionId !== sessionId) {
+        throw new OtmError(
+          "Canonical session binding points to a run owned by another Codex session.",
+          { code: "CANONICAL_BINDING_INVALID" },
         );
       }
     }
-    return run;
+    if (
+      !store.readOnly &&
+      workspaceRoot &&
+      !binding.workspaceAliases?.some((item) =>
+        sameWorkspace(item, workspaceRoot),
+      )
+    ) {
+      // Alias writes merge with the latest binding. A compare-and-swap against
+      // this earlier read would reject a parallel first route creation even
+      // though alias registration must preserve, not replace, that route.
+      binding = store.addCanonicalWorkspaceAlias(sessionId, workspaceRoot);
+    }
+    return binding;
   }
 
-  function getRunOrActive({ runId, workspaceRoot, sessionId }) {
+  function chooseLegacyAuthority(candidates) {
+    const active = candidates.filter((run) =>
+      ["active", "ready_to_finalize", "blocked", "paused"].includes(run.status),
+    );
+    const finalized = candidates.filter((run) =>
+      ["completed", "cleared"].includes(run.status),
+    );
+    if (active.length) {
+      const matching = finalized.filter(
+        (candidate) =>
+          isAcceptedCompletedRun(candidate) &&
+          active.every((run) => legacyContractsCompatible(candidate, run)),
+      );
+      if (
+        matching.length &&
+        matching.every(
+          (candidate) =>
+            legacyContractsCompatible(matching[0], candidate) &&
+            legacyCompletionsCompatible(matching[0], candidate),
+        )
+      )
+        return {
+          run: matching.sort((a, b) => a.id.localeCompare(b.id))[0],
+          kind: "legacy_accepted_duplicate_contract",
+        };
+      if (matching.length)
+        return {
+          run: null,
+          kind: "legacy_conflict",
+          attention: legacyAttention([...active, ...matching]),
+        };
+      if (active.length === 1)
+        return { run: active[0], kind: "legacy_unique_active" };
+      return {
+        run: null,
+        kind: "legacy_conflict",
+        attention: legacyAttention([...active, ...finalized]),
+      };
+    }
+    if (finalized.length === 1)
+      return { run: finalized[0], kind: "legacy_unique_completed" };
+    if (finalized.length > 1) {
+      const accepted = finalized.filter(isAcceptedCompletedRun);
+      if (
+        accepted.length === finalized.length &&
+        accepted.every(
+          (candidate) =>
+            legacyContractsCompatible(accepted[0], candidate) &&
+            legacyCompletionsCompatible(accepted[0], candidate),
+        )
+      )
+        return {
+          run: accepted.sort((a, b) => a.id.localeCompare(b.id))[0],
+          kind: "legacy_accepted_duplicate_contract",
+        };
+      return {
+        run: null,
+        kind: "legacy_conflict",
+        attention: legacyAttention(finalized),
+      };
+    }
+    return { run: null, kind: "no_legacy_route" };
+  }
+
+  function isAcceptedCompletedRun(run) {
+    if (
+      !run.finalizedAt ||
+      !["completed", "cleared"].includes(run.status) ||
+      run.metadata?.contractReview?.status !== "reviewed" ||
+      !run.metadata?.sourceContext?.digest ||
+      run.metadata.contractReview.sourceContextDigest !==
+        run.metadata.sourceContext.digest
+    )
+      return false;
+    const tasks = store.getTasks(run.id);
+    if (!routeCompletionEvidenceAccepted(tasks)) return false;
+    const summary = store.listSummariesForRun(run.id)[0];
+    return summaryMatchesRun(run, tasks, summary);
+  }
+
+  function summaryMatchesRun(run, tasks, summary) {
+    try {
+      const digest = run.metadata?.sourceContext?.digest;
+      return Boolean(
+        digest &&
+        summary &&
+        summary.workspaceRoot === run.workspaceRoot &&
+        Boolean(summary.currentCleared) === (run.status === "cleared") &&
+        summary.summaryJson?.runId === run.id &&
+        summary.summaryJson?.outcome ===
+          (run.status === "blocked" ? "incomplete" : "completed") &&
+        summary.summaryJson?.sourceContext?.digest === digest &&
+        summary.summaryJson?.contractReview?.sourceContextDigest === digest &&
+        summaryHierarchyMatches(summary.summaryJson?.hierarchy, tasks) &&
+        JSON.stringify(summary.summaryJson?.evidence || []) ===
+          JSON.stringify(
+            tasks.flatMap((task) =>
+              (task.evidence || []).map(
+                (item) => `${task.title}: ${item.summary || item.kind}`,
+              ),
+            ),
+          ),
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function legacyContractsCompatible(left, right) {
+    if (
+      normalizedIdentityText(left.goal) !== normalizedIdentityText(right.goal)
+    )
+      return false;
+    const leftContext = left.metadata?.sourceContext;
+    const rightContext = right.metadata?.sourceContext;
+    const sameDigest =
+      leftContext?.digest && leftContext.digest === rightContext?.digest;
+    const contextCoverage =
+      sourceEntriesCover(leftContext, rightContext) ||
+      (sameDigest &&
+        Array.isArray(leftContext?.entries) &&
+        leftContext.entries.length === 0 &&
+        Array.isArray(rightContext?.entries) &&
+        rightContext.entries.length === 0);
+    if (!contextCoverage) return false;
+    if (
+      left.metadata?.contractReview?.status !== "reviewed" ||
+      left.metadata?.contractReview?.sourceContextDigest !== leftContext.digest
+    )
+      return false;
+    if (
+      hasModelAuthoredHierarchy(right) &&
+      (right.metadata?.contractReview?.status !== "reviewed" ||
+        right.metadata?.contractReview?.sourceContextDigest !==
+          rightContext?.digest)
+    )
+      return false;
+    return (
+      JSON.stringify(legacyRequirements(left)) ===
+      JSON.stringify(legacyRequirements(right))
+    );
+  }
+
+  function hasModelAuthoredHierarchy(run) {
+    return store.getTasks(run.id).some((task) => {
+      const decomposition = task.metadata?.decomposition || {};
+      return (
+        decomposition.contentOwner === "model" ||
+        decomposition.source === "model" ||
+        (task.metadata?.internalSteps || []).some((step) =>
+          ["model", "model_authored"].includes(step.source),
+        )
+      );
+    });
+  }
+
+  function legacyCompletionsCompatible(left, right) {
+    return (
+      JSON.stringify(legacyCompletionSignature(left)) ===
+      JSON.stringify(legacyCompletionSignature(right))
+    );
+  }
+
+  function legacyCompletionSignature(run) {
+    return store
+      .getTasks(run.id)
+      .filter((task) => task.required)
+      .map((task) => ({
+        stableKey: task.stableKey || "",
+        status: task.status,
+        evidence: stableLegacyEvidence(task.evidence),
+        internalSteps: (task.metadata?.internalSteps || []).map((step) => ({
+          stableKey: step.stableKey || "",
+          title: normalizedIdentityText(step.title || step),
+          status: step.status || "",
+          evidence: stableLegacyEvidence(step.evidence),
+          miniSteps: (step.miniSteps || []).map((mini) => ({
+            stableKey: mini.stableKey || "",
+            title: normalizedIdentityText(mini.title || mini),
+            status: mini.status || "",
+            evidence: stableLegacyEvidence(mini.evidence),
+          })),
+        })),
+      }))
+      .sort((a, b) => a.stableKey.localeCompare(b.stableKey));
+  }
+
+  function stableLegacyEvidence(evidence) {
+    const volatileIdentityFields = new Set([
+      "id",
+      "runid",
+      "evidenceid",
+      "eventid",
+      "invocationid",
+      "taskid",
+      "turnid",
+      "createdat",
+      "updatedat",
+      "completedat",
+      "recordedat",
+      "timestamp",
+      "at",
+    ]);
+    const stableValue = (value) => {
+      if (Array.isArray(value)) return value.map(stableValue);
+      if (!value || typeof value !== "object") return value;
+      return Object.fromEntries(
+        Object.entries(value)
+          .filter(
+            ([key]) =>
+              !volatileIdentityFields.has(
+                key.toLowerCase().replace(/[_-]/g, ""),
+              ),
+          )
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([key, item]) => [key, stableValue(item)]),
+      );
+    };
+    return (Array.isArray(evidence) ? evidence : [])
+      .map(stableValue)
+      .sort((left, right) =>
+        JSON.stringify(left).localeCompare(JSON.stringify(right)),
+      );
+  }
+
+  function routeCompletionEvidenceAccepted(tasks) {
+    try {
+      return tasks.every((task) => {
+        if (!task.required) return true;
+        if (["dropped", "superseded"].includes(task.status)) return true;
+        if (
+          task.status !== "done" ||
+          !task.completedAt ||
+          !Array.isArray(task.evidence) ||
+          task.evidence.length === 0 ||
+          task.metadata?.decomposition?.needsModelReview === true
+        )
+          return false;
+        const steps = normalizeInternalStepList(
+          task.metadata?.internalSteps || [],
+        );
+        return steps.every((step) => {
+          if (step.required === false) return true;
+          if (
+            step.needsModelReview === true ||
+            step.source === "fallback_scaffold" ||
+            !["done", "skipped"].includes(step.status) ||
+            (step.atomic !== true && step.miniSteps.length === 0) ||
+            (step.evidenceRequired !== false && !(step.evidence || []).length)
+          )
+            return false;
+          return step.miniSteps.every(
+            (mini) =>
+              mini.required === false ||
+              (["done", "skipped"].includes(mini.status) &&
+                (mini.evidenceRequired === false ||
+                  (mini.evidence || []).length > 0)),
+          );
+        });
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  function summaryHierarchyMatches(hierarchy, tasks) {
+    if (!Array.isArray(hierarchy) || hierarchy.length !== tasks.length)
+      return false;
+    const byId = new Map(hierarchy.map((item) => [item.taskId, item]));
+    return tasks.every((task) => {
+      const item = byId.get(task.id);
+      if (!item || item.title !== task.title || item.status !== task.status)
+        return false;
+      const expectedSteps = normalizeInternalStepList(
+        task.metadata?.internalSteps || [],
+      );
+      return (
+        JSON.stringify(item.internalSteps || []) ===
+        JSON.stringify(expectedSteps)
+      );
+    });
+  }
+
+  function sourceEntriesCover(covering, covered) {
+    if (
+      !Array.isArray(covering?.entries) ||
+      !Array.isArray(covered?.entries) ||
+      covered.entries.length === 0
+    )
+      return false;
+    const keys = new Set(covering.entries.map(sourceEntryKey));
+    return covered.entries.every((entry) => keys.has(sourceEntryKey(entry)));
+  }
+
+  function sourceEntryKey(entry) {
+    return JSON.stringify([
+      entry.kind || "",
+      entry.path || "",
+      entry.sourceRef || "",
+      entry.text || "",
+    ]);
+  }
+
+  function legacyRequirements(run) {
+    const tasks = store.getTasks(run.id);
+    const taskDependencies = legacyDependencyIndex(
+      tasks,
+      (task, index) =>
+        `task:${task.stableKey || legacyContractText(task.title)}#${index}`,
+    );
+    return tasks
+      .map((task, taskIndex) => {
+        const internalSteps = task.metadata?.internalSteps || [];
+        const stepDependencies = legacyDependencyIndex(
+          internalSteps,
+          (step, index) => `step:${legacyNodeContractKey(step)}#${index}`,
+        );
+        const parent = task.parentId
+          ? taskDependencies.get(task.parentId) ||
+            `unresolved:${legacyContractText(task.parentId)}`
+          : null;
+        const metadata = task.metadata || {};
+        return {
+          stableKey: legacyContractText(task.stableKey),
+          order: Number(task.sortOrder ?? taskIndex),
+          parent,
+          title: legacyContractText(task.title),
+          description: legacyContractText(task.description),
+          required: task.required !== false,
+          priority: Number(task.priority ?? 50),
+          acceptanceCriteria: legacyContractList(task.acceptanceCriteria),
+          dependsOn: legacyDependencyValues(
+            task.dependsOn ?? metadata.dependsOn,
+            taskDependencies,
+          ),
+          metadata: legacyContractValue(
+            Object.fromEntries(
+              Object.entries(metadata).filter(
+                ([key]) =>
+                  !["internalsteps", "dependson"].includes(
+                    legacyContractFieldName(key),
+                  ),
+              ),
+            ),
+          ),
+          internalSteps: internalSteps.map((step) => {
+            const miniSteps = step.miniSteps || [];
+            const miniDependencies = legacyDependencyIndex(
+              miniSteps,
+              (mini, index) => `mini:${legacyNodeContractKey(mini)}#${index}`,
+            );
+            return {
+              contract: legacyContractValue(
+                Object.fromEntries(
+                  Object.entries(step).filter(
+                    ([key]) =>
+                      legacyContractFieldName(key) !== "ministeps" &&
+                      legacyContractFieldName(key) !== "dependson",
+                  ),
+                ),
+              ),
+              dependsOn: legacyDependencyValues(
+                step.dependsOn,
+                stepDependencies,
+              ),
+              miniSteps: miniSteps.map((mini) => ({
+                contract: legacyContractValue(
+                  Object.fromEntries(
+                    Object.entries(mini).filter(
+                      ([key]) => legacyContractFieldName(key) !== "dependson",
+                    ),
+                  ),
+                ),
+                dependsOn: legacyDependencyValues(
+                  mini.dependsOn,
+                  miniDependencies,
+                ),
+              })),
+            };
+          }),
+        };
+      })
+      .sort((left, right) => left.order - right.order);
+  }
+
+  function legacyDependencyIndex(nodes, keyForNode) {
+    const result = new Map();
+    nodes.forEach((node, index) => {
+      const key = keyForNode(node, index);
+      if (node.id) result.set(String(node.id), key);
+      if (node.stableKey) result.set(String(node.stableKey), key);
+    });
+    return result;
+  }
+
+  function legacyDependencyValues(values, dependencies) {
+    return [...(Array.isArray(values) ? values : [])]
+      .map((value) => {
+        const raw = legacyContractText(value);
+        return dependencies.get(raw) || `unresolved:${raw}`;
+      })
+      .sort((left, right) => left.localeCompare(right));
+  }
+
+  function legacyNodeContractKey(node) {
+    const stableKey = legacyContractText(node.stableKey);
+    if (stableKey) return `stable:${stableKey}`;
+    const outline = legacyContractText(node.outline);
+    if (outline) return `outline:${outline}`;
+    return `title:${legacyContractText(node.title || node)}`;
+  }
+
+  function legacyContractFieldName(value) {
+    return String(value).toLowerCase().replace(/[_-]/g, "");
+  }
+
+  function legacyContractText(value) {
+    if (value === undefined || value === null) return "";
+    return String(value).trim().replace(/\s+/g, " ");
+  }
+
+  function legacyContractList(value) {
+    if (!Array.isArray(value)) return null;
+    return value.map(legacyContractText);
+  }
+
+  function legacyContractValue(value) {
+    const ignoredFields = new Set([
+      "at",
+      "completedat",
+      "createdat",
+      "evidence",
+      "eventid",
+      "id",
+      "invocationid",
+      "recordedat",
+      "routeid",
+      "runid",
+      "status",
+      "taskid",
+      "timestamp",
+      "turnid",
+      "updatedat",
+    ]);
+    if (Array.isArray(value)) return value.map(legacyContractValue);
+    if (typeof value === "string") return legacyContractText(value);
+    if (!value || typeof value !== "object") return value;
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([key]) => !ignoredFields.has(legacyContractFieldName(key)))
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => [key, legacyContractValue(item)]),
+    );
+  }
+
+  function legacyAttention(candidates) {
+    return {
+      reason: "legacy_routes_have_conflicting_authority",
+      candidates: candidates.map((run) => ({
+        runId: run.id,
+        status: run.status,
+        workspaceRoot: run.workspaceRoot,
+        sourceContextDigest: run.metadata?.sourceContext?.digest || null,
+        goalHash: sha256(normalizedIdentityText(run.goal)),
+      })),
+    };
+  }
+
+  function getScopedActiveRun(
+    workspaceRoot,
+    sessionId,
+    { claimLegacy = true, includeFinalized = false } = {},
+  ) {
+    if (!sessionId) return store.getActiveRun(workspaceRoot, sessionId);
+    const binding = claimLegacy
+      ? getCanonicalBinding(workspaceRoot, sessionId)
+      : store.getCanonicalBinding(sessionId);
+    if (!binding?.currentRunId) {
+      if (claimLegacy && binding && env.OTM_CLAIM_LEGACY_ROUTE === "1") {
+        const claimed = store.claimLegacyActiveRun(workspaceRoot, sessionId, {
+          legacySessionClaimedAt: nowIso(),
+        });
+        if (claimed) {
+          store.updateCanonicalBinding(
+            {
+              ...binding,
+              currentRunId: claimed.id,
+              primaryWorkspace: claimed.workspaceRoot,
+              status: "bound",
+              lastResolution: {
+                kind: "legacy_unscoped_claimed",
+                canonicalTaskId: claimed.id,
+                primaryWorkspace: claimed.workspaceRoot,
+                modelReasoningRequired: true,
+                at: nowIso(),
+              },
+            },
+            { expectedRunId: null },
+          );
+          recordEvent(
+            claimed.id,
+            "legacy_session_claimed",
+            { sessionId },
+            { sessionId },
+          );
+          return claimed;
+        }
+      }
+      return null;
+    }
+    const run = store.getRun(binding.currentRunId);
+    if (!run) return null;
+    if (
+      includeFinalized ||
+      ["active", "ready_to_finalize", "blocked", "paused"].includes(run.status)
+    )
+      return run;
+    return null;
+  }
+
+  function getRunOrActive({
+    runId,
+    workspaceRoot,
+    sessionId,
+    includeFinalized = false,
+  }) {
     if (runId) {
       const run = store.getRun(runId);
       assertCondition(run, `Run not found: ${runId}`, "RUN_NOT_FOUND");
-      assertCondition(
-        sameWorkspace(run.workspaceRoot, workspaceRoot),
-        "Run belongs to a different workspace.",
-        "WORKSPACE_SCOPE_MISMATCH",
-      );
       // An explicit id is never an authority bypass. In particular, an
       // identity-less caller must not gain access merely by knowing a scoped
       // route id. Legacy adoption is deliberately confined to
@@ -156,9 +751,28 @@ export function createTaskManager(options = {}) {
         "SESSION_SCOPE_MISMATCH",
         { requestedRunId: runId, runScoped: Boolean(run.sessionId) },
       );
+      if (run.sessionId && sessionId) {
+        const binding = getCanonicalBinding(workspaceRoot, sessionId);
+        if (
+          !sameWorkspace(run.workspaceRoot, workspaceRoot) &&
+          binding.currentRunId !== run.id
+        )
+          throw new OtmError(
+            "Run is not the current canonical task for this Codex session and workspace alias.",
+            { code: "WORKSPACE_SCOPE_MISMATCH" },
+          );
+      } else {
+        assertCondition(
+          sameWorkspace(run.workspaceRoot, workspaceRoot),
+          "Run belongs to a different workspace.",
+          "WORKSPACE_SCOPE_MISMATCH",
+        );
+      }
       return run;
     }
-    const run = getScopedActiveRun(workspaceRoot, sessionId);
+    const run = getScopedActiveRun(workspaceRoot, sessionId, {
+      includeFinalized,
+    });
     assertCondition(
       run,
       "No active Overtli Task Manager route exists for this workspace and Codex session.",
@@ -376,12 +990,49 @@ export function createTaskManager(options = {}) {
     return snapshot;
   }
 
+  function identityTelemetry(
+    sessionId,
+    runId,
+    resolution,
+    modelReasoningRequired,
+    stopResolvedTaskId = null,
+  ) {
+    const binding = sessionId ? store.getCanonicalBinding(sessionId) : null;
+    return {
+      rootSessionId: sessionId || null,
+      canonicalTaskId: runId || binding?.currentRunId || null,
+      primaryWorkspace: binding?.primaryWorkspace || null,
+      workspaceAliases: binding?.workspaceAliases || [],
+      stopResolvedTaskId:
+        stopResolvedTaskId ||
+        binding?.lastResolution?.stopResolvedTaskId ||
+        null,
+      selectionProvenance: binding ? selectionProvenance(binding) : null,
+      modelReasoningRequired: Boolean(modelReasoningRequired),
+      resolution,
+    };
+  }
+
+  function selectionProvenance(binding) {
+    const resolution = binding?.lastResolution;
+    if (resolution?.kind === "explicit_legacy_selection")
+      return {
+        selectedTaskId: resolution.canonicalTaskId || null,
+        selectionReasonHash: resolution.selectionReasonHash || null,
+        selectedAt: resolution.selectedAt || null,
+      };
+    return resolution?.selectionProvenance || null;
+  }
+
   function start(args = {}) {
     const workspaceRoot = resolveWorkspace(
       args.workspaceRoot || findWorkspaceRoot(args.cwd),
     );
     const sessionId = resolveSessionId(args, env);
     ensureDir(workspaceStateDir(workspaceRoot));
+    const currentBinding = sessionId
+      ? getCanonicalBinding(workspaceRoot, sessionId)
+      : null;
     const active = getScopedActiveRun(workspaceRoot, sessionId);
     if (!sessionId) {
       const scopedActive = store
@@ -405,6 +1056,14 @@ export function createTaskManager(options = {}) {
         snapshot,
         markdown: renderSnapshotMarkdown(snapshot),
         reused: true,
+        canonicalIdentity: sessionId
+          ? identityTelemetry(
+              sessionId,
+              active.id,
+              "active_route_reused",
+              false,
+            )
+          : null,
       };
     }
 
@@ -517,6 +1176,32 @@ export function createTaskManager(options = {}) {
       payload: { goal, taskCount: tasks.length, promptHash: run.promptHash },
       createdAt: nowIso(),
     };
+    const sessionBinding = sessionId
+      ? {
+          ...(currentBinding || {}),
+          id: sessionId,
+          rootSessionId: sessionId,
+          currentRunId: run.id,
+          expectedRunId: currentBinding?.currentRunId || null,
+          primaryWorkspace: workspaceRoot,
+          workspaceAliases: uniqueWorkspaces([
+            ...(currentBinding?.workspaceAliases || []),
+            workspaceRoot,
+          ]),
+          status: "bound",
+          attention: null,
+          lastResolution: {
+            kind: currentBinding?.currentRunId
+              ? "new_task_rotation"
+              : "new_task_created",
+            canonicalTaskId: run.id,
+            primaryWorkspace: workspaceRoot,
+            modelReasoningRequired: false,
+            at: createdAt,
+          },
+          updatedAt: createdAt,
+        }
+      : null;
     try {
       store.createRoute({
         run,
@@ -524,13 +1209,29 @@ export function createTaskManager(options = {}) {
         event: startEvent,
         replaceRunId:
           active && args.replaceExisting === true ? active.id : null,
+        sessionBinding,
       });
     } catch (error) {
-      if (error?.code !== "ACTIVE_ROUTE_CONFLICT") throw error;
+      if (
+        !["ACTIVE_ROUTE_CONFLICT", "CANONICAL_ROUTE_CONFLICT"].includes(
+          error?.code,
+        )
+      )
+        throw error;
       const concurrent = getScopedActiveRun(workspaceRoot, sessionId, {
         claimLegacy: false,
       });
       if (!concurrent) throw error;
+      // Another workspace can win the route transaction after this caller
+      // read the empty binding. Persist this path as an alias after resolving
+      // the winner, since the winner's atomic binding write may have replaced
+      // this caller's earlier empty-binding alias update.
+      const concurrentBinding = getCanonicalBinding(workspaceRoot, sessionId);
+      assertCondition(
+        concurrentBinding?.currentRunId === concurrent.id,
+        "Canonical session binding changed while recovering a concurrent start.",
+        "CANONICAL_ROUTE_CONFLICT",
+      );
       const snapshot = snapshotForRun(concurrent, {
         kind: "reuse_active",
         message:
@@ -542,6 +1243,14 @@ export function createTaskManager(options = {}) {
         snapshot,
         markdown: renderSnapshotMarkdown(snapshot),
         reused: true,
+        canonicalIdentity: sessionId
+          ? identityTelemetry(
+              sessionId,
+              concurrent.id,
+              "concurrent_route_reused",
+              false,
+            )
+          : null,
       };
     }
     const snapshot = snapshotForRun(run, {
@@ -554,6 +1263,9 @@ export function createTaskManager(options = {}) {
       snapshot,
       markdown: renderSnapshotMarkdown(snapshot),
       reused: false,
+      canonicalIdentity: sessionId
+        ? identityTelemetry(sessionId, run.id, "new_task_created", false)
+        : null,
     };
   }
 
@@ -562,7 +1274,58 @@ export function createTaskManager(options = {}) {
       args.workspaceRoot || findWorkspaceRoot(args.cwd),
     );
     const sessionId = resolveSessionId(args, env);
-    let run = getRunOrActive({ runId: args.runId, workspaceRoot, sessionId });
+    let run = null;
+    const attention = sessionId ? store.getCanonicalBinding(sessionId) : null;
+    if (attention?.status === "needs_attention" && args.runId) {
+      const selected = store.getRun(args.runId);
+      assertCondition(
+        selected,
+        `Run not found: ${args.runId}`,
+        "RUN_NOT_FOUND",
+      );
+      assertCondition(
+        selected.sessionId === sessionId,
+        "Run belongs to a different Codex session.",
+        "SESSION_SCOPE_MISMATCH",
+      );
+      assertCondition(
+        sameWorkspace(selected.workspaceRoot, workspaceRoot),
+        "Explicit legacy selection must use the candidate's exact primary workspace.",
+        "WORKSPACE_SCOPE_MISMATCH",
+      );
+      const selectionReason = String(args.prompt || "").trim();
+      assertCondition(
+        selectionReason,
+        "Selecting a canonical route requires a non-empty prompt explaining the choice.",
+        "CANONICAL_SELECTION_REASON_REQUIRED",
+      );
+      const selectedAt = nowIso();
+      store.updateCanonicalBinding(
+        {
+          ...attention,
+          currentRunId: selected.id,
+          primaryWorkspace: selected.workspaceRoot,
+          workspaceAliases: uniqueWorkspaces([
+            ...(attention.workspaceAliases || []),
+            selected.workspaceRoot,
+            workspaceRoot,
+          ]),
+          status: "bound",
+          attention: null,
+          lastResolution: {
+            kind: "explicit_legacy_selection",
+            canonicalTaskId: selected.id,
+            primaryWorkspace: selected.workspaceRoot,
+            selectionReasonHash: sha256(selectionReason),
+            selectedAt,
+            modelReasoningRequired: true,
+          },
+          updatedAt: selectedAt,
+        },
+        { expectedRunId: attention.currentRunId || null },
+      );
+    }
+    run = getRunOrActive({ runId: args.runId, workspaceRoot, sessionId });
     assertExpectedRevision(run, args);
     const mode = args.mode || "append";
     const now = nowIso();
@@ -1183,7 +1946,12 @@ export function createTaskManager(options = {}) {
     const sessionId = resolveSessionId(args, env);
     let run = null;
     try {
-      run = getRunOrActive({ runId: args.runId, workspaceRoot, sessionId });
+      run = getRunOrActive({
+        runId: args.runId,
+        workspaceRoot,
+        sessionId,
+        includeFinalized: true,
+      });
     } catch (error) {
       if (error?.code !== "NO_ACTIVE_RUN") throw error;
     }
@@ -1194,11 +1962,35 @@ export function createTaskManager(options = {}) {
         null,
         sessionId,
       );
+      if (sessionId && !store.readOnly) {
+        const binding = store.getCanonicalBinding(sessionId);
+        if (binding)
+          store.updateCanonicalBinding(
+            {
+              ...binding,
+              lastResolution: {
+                kind: "stop_resolved_no_current_task",
+                canonicalTaskId: null,
+                primaryWorkspace: binding.primaryWorkspace,
+                stopResolvedTaskId: null,
+                ...(selectionProvenance(binding)
+                  ? { selectionProvenance: selectionProvenance(binding) }
+                  : {}),
+                modelReasoningRequired: false,
+                at: nowIso(),
+              },
+            },
+            { expectedRunId: binding.currentRunId || null },
+          );
+      }
       return {
         stopAllowed: true,
         run: null,
         snapshot,
         markdown: renderSnapshotMarkdown(snapshot),
+        canonicalIdentity: sessionId
+          ? identityTelemetry(sessionId, null, "no_route", false)
+          : null,
       };
     }
     const tasks = store.getTasks(run.id);
@@ -1207,9 +1999,60 @@ export function createTaskManager(options = {}) {
         task.required &&
         !["done", "dropped", "superseded"].includes(task.status),
     );
+    const sourceContextDigest = run.metadata?.sourceContext?.digest || null;
     const contractNeedsReview =
-      run.metadata?.contractReview?.status === "needs_model_review";
-    const stopAllowed = remainingRequired.length === 0 && !contractNeedsReview;
+      !sourceContextDigest ||
+      run.metadata?.contractReview?.status !== "reviewed" ||
+      run.metadata?.contractReview?.sourceContextDigest !== sourceContextDigest;
+    const incompleteEvidence = tasks.filter(
+      (task) =>
+        task.required &&
+        task.status === "done" &&
+        !routeCompletionEvidenceAccepted([task]),
+    );
+    const finalizedCompletedRun =
+      Boolean(run.finalizedAt) && ["completed", "cleared"].includes(run.status);
+    const savedSummaries = finalizedCompletedRun
+      ? store.listSummariesForRun(run.id)
+      : [];
+    const summaryConflict =
+      savedSummaries.length > 0 &&
+      !summaryMatchesRun(run, tasks, savedSummaries[0]);
+    const stopAllowed =
+      remainingRequired.length === 0 &&
+      incompleteEvidence.length === 0 &&
+      !contractNeedsReview &&
+      !summaryConflict;
+    const canonicalIdentity = sessionId
+      ? identityTelemetry(
+          sessionId,
+          run.id,
+          "stop_resolved",
+          !stopAllowed,
+          run.id,
+        )
+      : null;
+    if (sessionId && !store.readOnly) {
+      const binding = store.getCanonicalBinding(sessionId);
+      if (binding)
+        store.updateCanonicalBinding(
+          {
+            ...binding,
+            lastResolution: {
+              kind: "stop_resolved",
+              canonicalTaskId: run.id,
+              primaryWorkspace: run.workspaceRoot,
+              stopResolvedTaskId: run.id,
+              ...(selectionProvenance(binding)
+                ? { selectionProvenance: selectionProvenance(binding) }
+                : {}),
+              modelReasoningRequired: !stopAllowed,
+              at: nowIso(),
+            },
+          },
+          { expectedRunId: binding.currentRunId || null },
+        );
+    }
     const snapshot = snapshotForRun(
       run,
       {
@@ -1234,6 +2077,27 @@ export function createTaskManager(options = {}) {
           required: task.required,
         }))
         .concat(
+          incompleteEvidence.map((task) => ({
+            id: task.id,
+            title: task.title,
+            status: "evidence_incomplete",
+            required: true,
+          })),
+        )
+        .concat(
+          summaryConflict
+            ? [
+                {
+                  id: "summary_evidence",
+                  title:
+                    "Review the saved summary against durable route evidence",
+                  status: "contradictory",
+                  required: true,
+                },
+              ]
+            : [],
+        )
+        .concat(
           contractNeedsReview
             ? [
                 {
@@ -1247,26 +2111,36 @@ export function createTaskManager(options = {}) {
         ),
       snapshot,
       markdown: renderSnapshotMarkdown(snapshot),
+      canonicalIdentity,
     };
   }
 
   function finalizeTurn(args = {}) {
-    const workspaceRoot = resolveWorkspace(
+    let workspaceRoot = resolveWorkspace(
       args.workspaceRoot || findWorkspaceRoot(args.cwd),
     );
     const sessionId = resolveSessionId(args, env);
-    let run = getRunOrActive({ runId: args.runId, workspaceRoot, sessionId });
+    let run = getRunOrActive({
+      runId: args.runId,
+      workspaceRoot,
+      sessionId,
+      includeFinalized: true,
+    });
+    workspaceRoot = run.workspaceRoot;
     assertExpectedRevision(run, args);
     const requestedSummaryId =
       args.summaryId || deterministicSummaryId(run.id, args);
-    const existingSummary = requestedSummaryId
-      ? store
-          .listSummaries(workspaceRoot, 10_000)
-          .find(
-            (item) => item.runId === run.id && item.id === requestedSummaryId,
-          )
-      : null;
-    if (existingSummary && run.finalizedAt) {
+    const runSummaries = store.listSummariesForRun(run.id);
+    const existingSummary =
+      (requestedSummaryId
+        ? runSummaries.find((item) => item.id === requestedSummaryId)
+        : null) || (run.finalizedAt ? runSummaries[0] || null : null);
+    if (
+      existingSummary &&
+      run.finalizedAt &&
+      ["completed", "cleared", "blocked"].includes(run.status) &&
+      summaryMatchesRun(run, store.getTasks(run.id), existingSummary)
+    ) {
       publishSummaryFiles(workspaceRoot, run.id, existingSummary);
       const snapshot = snapshotForRun(run, {
         kind: "turn_finalized",
@@ -1284,6 +2158,63 @@ export function createTaskManager(options = {}) {
       };
     }
     const audit = auditStop({ workspaceRoot, runId: run.id, sessionId });
+    if (
+      run.finalizedAt &&
+      ["completed", "cleared", "blocked"].includes(run.status)
+    ) {
+      if (!audit.stopAllowed)
+        throw new OtmError(
+          "Finalized route evidence is incomplete or requires model reconciliation.",
+          { code: "STOP_AUDIT_FAILED", details: audit.remainingRequired },
+        );
+      const tasks = store.getTasks(run.id);
+      const summaryJson = buildSummaryJson({
+        run,
+        tasks,
+        outcome: run.status === "blocked" ? "incomplete" : "completed",
+        nextSteps: args.nextSteps || [],
+      });
+      const summaryMd = renderSummaryMarkdown(summaryJson);
+      const summaryId =
+        requestedSummaryId ||
+        `summary_${shortHash(`${run.id}:canonical-finalized`)}`;
+      const summary = {
+        id: summaryId,
+        runId: run.id,
+        workspaceRoot,
+        turnId: args.turnId || run.turnId || "canonical-finalized",
+        summaryMd,
+        summaryJson,
+        currentCleared: run.status === "cleared",
+        createdAt: run.finalizedAt,
+      };
+      store.upsertSummary(summary);
+      publishSummaryFiles(workspaceRoot, run.id, summary);
+      upsertMemory({
+        id: `mem_${shortHash(`turn-summary:${run.id}:${summaryId}`)}`,
+        workspaceRoot,
+        kind: "turn_summary",
+        title: `Turn summary: ${run.goal}`,
+        body: summaryMd,
+        tags: ["turn-summary", "checkpoint"],
+        source: { runId: run.id, summaryId, turnId: summary.turnId },
+      });
+      const snapshot = snapshotForRun(run, {
+        kind: "turn_finalized",
+        message: "Saved summary repaired from finalized canonical evidence.",
+        at: nowIso(),
+      });
+      return {
+        run,
+        summary,
+        summaryJson,
+        summaryMd,
+        snapshot,
+        markdown: summaryMd,
+        idempotent: true,
+        repaired: true,
+      };
+    }
     if (!audit.stopAllowed && args.allowIncomplete !== true) {
       throw new OtmError(
         "Cannot finalize while required route segments remain open.",
@@ -1429,13 +2360,18 @@ ${cleared.markdown || ""}`,
   }
 
   function clearCurrent(args = {}) {
-    const workspaceRoot = resolveWorkspace(
+    let workspaceRoot = resolveWorkspace(
       args.workspaceRoot || findWorkspaceRoot(args.cwd),
     );
     const sessionId = resolveSessionId(args, env);
     let run = null;
     try {
-      run = getRunOrActive({ runId: args.runId, workspaceRoot, sessionId });
+      run = getRunOrActive({
+        runId: args.runId,
+        workspaceRoot,
+        sessionId,
+        includeFinalized: true,
+      });
     } catch (error) {
       if (error?.code !== "NO_ACTIVE_RUN") throw error;
     }
@@ -1456,6 +2392,7 @@ ${cleared.markdown || ""}`,
       }
     }
     if (run) {
+      workspaceRoot = run.workspaceRoot;
       assertExpectedRevision(run, args);
       const finalized =
         Boolean(run.finalizedAt) &&
@@ -2330,6 +3267,23 @@ function omitEmpty(value) {
 
 function sameWorkspace(left, right) {
   return workspaceIdentity(left) === workspaceIdentity(right);
+}
+
+function uniqueWorkspaces(values) {
+  const unique = [];
+  for (const value of values) {
+    if (value && !unique.some((existing) => sameWorkspace(existing, value)))
+      unique.push(value);
+  }
+  return unique;
+}
+
+function normalizedIdentityText(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLocaleLowerCase("en-US");
 }
 
 function clampLimit(value, fallback, maximum) {

@@ -16,8 +16,8 @@ Overtli Task Manager (OTM) structures AI coding sessions into evidence-backed ro
 - **Evidence Enforcement:** Tasks can only be marked complete once concrete proof (changed files, test results, command outputs) is provided.
 - **Chat Integration:** Renders real-time, user-friendly Markdown progress dashboards directly in your Codex chat.
 - **Persistent Task List:** Keeps a full checked-off task list in chat Markdown and the current chat's session-scoped `current.json.checklist`.
-- **Concurrent Session Isolation:** Keys routes by normalized workspace plus `CODEX_THREAD_ID` (or explicit `sessionId`), so separate chats and VS Code windows cannot replace each other's work.
-- **Durable State Cache:** Syncs canonical routes under `.codex/overtli-task-manager/sessions/<session-key>/`; top-level `current.json` and `current.md` provide a workspace-wide session index.
+- **Canonical Chat Identity:** Binds one current route to the root `CODEX_THREAD_ID` across home, project, and nested paths. The route's starting workspace remains its primary evidence location; later paths are persisted aliases. Different Codex sessions remain isolated.
+- **Durable State Cache:** Persists root-session bindings in the JSON or SQLite store. Route snapshots and summaries remain under the primary workspace; top-level `current.json` and `current.md` provide a workspace-local session index.
 - **Optimized Rendering:** Shows a full checklist at route start and finalization, then compact progress cards during routine work.
 - **Task Normalization:** Keeps one active route segment where possible, blocks manual jumps until the active task is handled, and lets reconciliation intentionally add, merge, reopen, or reorder work.
 - **Model-Guided Three-Tier Routes:** Represents major outcomes as route gates, substantive explicit/inferred work as internal subtasks, and concrete actions as nested mini-steps without prescribing generic domain content.
@@ -266,7 +266,7 @@ Global Durable Store (~/.codex/overtli-task-manager/)
  └── state.json (automatic or explicit JSON backend; SQLite files are preserved)
 
 Workspace State (.codex/overtli-task-manager/)
- ├── current.json / current.md (Workspace index of active Codex sessions)
+ ├── current.json / current.md (Workspace-local index of active root sessions)
  ├── sessions/<session-key>/
  │   ├── current.json / current.md (Canonical route for one Codex chat)
  │   └── cache/scratch/ (Session-owned raw hook/tool payloads)
@@ -280,8 +280,8 @@ Workspace State (.codex/overtli-task-manager/)
 
 | File / Folder                                   | Purpose                                                                                                |
 | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `current.json` / `current.md`                   | Workspace-wide index; never use it as a mutable route when session scoping is active                   |
-| `sessions/<session-key>/current.md`             | Chat-friendly canonical route checklist for one Codex session                                          |
+| `current.json` / `current.md`                   | Workspace-local index; never use it as a mutable route when session scoping is active                  |
+| `sessions/<session-key>/current.md`             | Chat-friendly canonical route checklist under the route's primary workspace                            |
 | `sessions/<session-key>/current.json`           | Canonical gate/subtask/mini-step hierarchy, accumulated source contract, evidence, and lifecycle state |
 | `sessions/<session-key>/current.json.checklist` | Compact machine-readable gate checklist for that session's UIs and hooks                               |
 | `cache/tmp`                                     | Atomic write staging and stale `current.*.tmp` cleanup                                                 |
@@ -310,11 +310,12 @@ the full checklist unnecessarily.
 ### Concurrent chats and windows
 
 OTM resolves a session from explicit `sessionId`/hook session, thread, or
-conversation fields, then `OTM_SESSION_ID`, then `CODEX_THREAD_ID`. Active-run
-lookup always includes both the workspace and that session.
-`replaceExisting=true` therefore replaces only the current session's route.
-Explicit `runId` calls are rejected when the run belongs to another workspace
-or session.
+conversation fields, then `OTM_SESSION_ID`, then `CODEX_THREAD_ID`. All supplied
+identity claims must agree. The root session binding selects the current route
+first; workspace paths are recorded as aliases and do not create a second
+route. The primary workspace stays the route's evidence authority. A new
+substantive task after finalization rotates the binding to a new route while
+retaining prior history. Explicit run access still rejects a different session.
 
 Legacy unscoped routes are not adopted automatically because doing so could
 attach another chat's stale checklist to a new session. Set
@@ -322,10 +323,17 @@ attach another chat's stale checklist to a new session. Set
 route creation is rejected while scoped routes are active, and unscoped
 diagnostics cannot overwrite the workspace session index.
 
-SQLite uses WAL mode and a workspace/session index. The JSON fallback uses a
-cross-process lock for mutations so concurrent Codex processes do not lose one
-another's runs. Session-owned scratch cleanup does not delete another active
-chat's evidence.
+SQLite uses WAL mode, an indexed root-session binding, and an atomic route
+creation transaction. The JSON fallback uses a cross-process lock for
+mutations so concurrent Codex processes do not lose one another's routes.
+Provable legacy duplicates resolve only when the completed authority's reviewed
+contract covers the duplicate and their full gate/internal/mini-step contracts
+and completion evidence agree. This includes case-sensitive acceptance values,
+dependency edges, required/atomic constraints, and evidence requirements; an
+active model-authored hierarchy must have a current source review. Unreviewed
+scaffolds resolve only on an exact structural match. Unresolved candidates
+require an explicit route selection. Session-owned scratch cleanup does not
+delete another active chat's evidence.
 
 ### Route Planning
 
@@ -387,15 +395,18 @@ override allows it.
 | Finalization       | Stop-hook finalization is enabled by default; set `OTM_STOP_AUTO_FINALIZE=0` only to require manual finalization and clearing                                     |
 | Hook timeouts      | SessionStart 15s, UserPromptSubmit 12s, PreToolUse 8s, PostToolUse 12s, Pre/PostCompact 15s, Stop 45s                                                             |
 
-Normal closeout is automatic and model-visible. Run `otm_audit_stop`; if
-required work remains, continue the active route. Once the audit passes, the
-Stop hook automatically writes the durable summary and checkpoint memory,
-clears the active route, and blocks once with the saved Markdown summary so
-Codex can send the final user-facing reply. The host-marked follow-up Stop is
-released to bound the loop. Set `OTM_STOP_AUTO_FINALIZE=0` only when a client
-must manually call `otm_finalize_turn`, present its summary, and then call
-`otm_clear_current`. Stop-hook execution failures fail open with a warning,
-while explicit `otm_audit_stop` remains the authoritative completion check.
+Normal closeout is automatic. Run `otm_audit_stop`; if required work remains,
+continue the active route. Once the audit passes, the Stop hook writes the
+durable summary and checkpoint memory, clears active state, and allows Stop
+after deterministic bookkeeping. A later Stop for the same completed route
+reuses the validated summary without requesting hierarchy reconciliation. This
+also allows Stop after the model has already sent that summary; the hook returns
+only its compact id and does not ask the model to send it again. The host-marked
+repeated Stop is also released. Set `OTM_STOP_AUTO_FINALIZE=0` only
+when a client must manually call `otm_finalize_turn`, present its summary, and
+then call `otm_clear_current`. Stop-hook execution failures fail open with a
+warning, while explicit `otm_audit_stop` remains the authoritative completion
+check.
 
 For a substantive new implementation request, `UserPromptSubmit` creates a
 conservative session-scoped bootstrap route before the model edits files unless

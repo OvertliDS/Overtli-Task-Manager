@@ -11,7 +11,7 @@ export const tools = [
   {
     name: "otm_start",
     description:
-      "Start a session-scoped route after the model reviews the complete accumulated request. Supply major outcomes as route gates, tag every gate with its actual workType (planning, review, research, documentation, implementation, validation, release, deployment, operations, mixed, or a justified custom label), add substantive explicit or model-inferred internalSteps, and add concrete miniSteps under each non-atomic subtask. A mixed prompt remains mixed at route level; do not convert planning/review/documentation gates into implementation. OTM guides structure and recursive gates; the model owns domain content. Routes are isolated by workspace plus CODEX_THREAD_ID unless sessionId is explicit.",
+      "Start the one canonical route for the root CODEX_THREAD_ID after the model reviews the complete accumulated request. The starting workspace remains the route's primary evidence authority; home, project, and nested paths become persisted aliases. A new substantive request after a finalized route creates a new route; active work is reconciled. Supply major outcomes as route gates, tag every gate with its actual workType (planning, review, research, documentation, implementation, validation, release, deployment, operations, mixed, or a justified custom label), add substantive explicit or model-inferred internalSteps, and add concrete miniSteps under each non-atomic subtask. A mixed prompt remains mixed at route level; do not convert planning/review/documentation gates into implementation. OTM guides structure and recursive gates; the model owns domain content. Conflicting payload/environment session identities are rejected.",
     inputSchema: {
       type: "object",
       properties: {
@@ -54,7 +54,7 @@ export const tools = [
   {
     name: "otm_reconcile",
     description:
-      "Re-review the accumulated contract and update an active route after steering, new prompt/attachment/OCR/visual context, continuation, discoveries, or replacement. Preserve explicit identifiers, per-gate workType intent, valid evidence, and supersession history while replacing fallback scaffolds with model-authored three-tier structure. Recompute a mixed route from its gates instead of applying one lossy route-wide label.",
+      "Re-review the accumulated contract and update an active route after steering, new prompt/attachment/OCR/visual context, continuation, discoveries, or replacement. If OTM reports ambiguous legacy route authority, resolve it only with an explicit same-session runId, that candidate's exact workspaceRoot, and a non-empty prompt explaining the selection; this records the choice but leaves ordinary source-review and descendant gates in force. Preserve explicit identifiers, per-gate workType intent, valid evidence, and supersession history while replacing fallback scaffolds with model-authored three-tier structure. Recompute a mixed route from its gates instead of applying one lossy route-wide label.",
     inputSchema: {
       type: "object",
       properties: {
@@ -119,7 +119,7 @@ export const tools = [
   {
     name: "otm_start_task",
     description:
-      "Mark one route segment active before doing related work. Use an exact taskId from the latest OTM snapshot or session-scoped current.json; do not copy ids from another chat or the workspace index.",
+      "Mark one route segment active before doing related work. Use an exact taskId from the latest canonical OTM snapshot or the canonical session current.json in the route's primary workspace; do not copy ids from another chat or the workspace index.",
     inputSchema: {
       type: "object",
       properties: {

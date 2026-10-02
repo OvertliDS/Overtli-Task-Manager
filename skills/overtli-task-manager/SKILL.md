@@ -20,15 +20,22 @@ Use this skill when the user asks Codex to build, fix, refactor, research, revie
 6. Attach concise outcomes/gists, dependencies, source references/provenance, acceptance conditions, and evidence expectations where useful. Do not collapse distinct work into a vague gate such as `fix all issues`.
 7. Interpret intent per gate, not once for the whole prompt. Preserve a mixed route when the request combines planning/review/documentation and implementation. Planning, review, research, and documentation gates use evidence appropriate to those outcomes without implying unrequested code changes; implementation gates still require implementation, integration, validation, and synchronized affected documentation.
 8. Show the returned Markdown snapshot in chat and keep one active route gate whenever possible.
-9. OTM scopes routes by workspace and `CODEX_THREAD_ID` (or explicit `sessionId`). Use exact task, internal-step, and mini-step ids from the latest snapshot or session-scoped `current.json`. The top-level `current.json` is only a workspace session index.
+9. OTM binds one current route to the root `CODEX_THREAD_ID` (or a consistent explicit `sessionId`) across home, project, nested, and registered moved paths. The route's starting workspace remains its primary evidence authority; later paths are aliases. Use exact task, internal-step, and mini-step ids from the latest canonical snapshot or that route's primary-workspace `current.json`. The top-level `current.json` is only a workspace-local session index.
 10. Use `otm_progress` as evidence arrives. Mark mini-steps and their parent internal subtasks terminal promptly; do not backfill them at the end.
 11. Complete a gate with `otm_complete_task` only after the accumulated contract is reviewed, all required descendants are terminal with required evidence, and concrete gate evidence exists.
 12. When steering arrives, append the new typed/attached/visual context, re-review the whole accumulated contract, and call `otm_reconcile`. Preserve valid IDs, evidence, order, constraints, and supersession history; reopen only invalidated work.
 13. Before final response, call `otm_audit_stop`. If it is blocked, continue the listed work.
 14. When the audit passes, send the final response. By default the Stop hook finalizes, saves the hierarchy-aware summary/checkpoint memory, and clears active state. If `OTM_STOP_AUTO_FINALIZE=0`, call `otm_finalize_turn`, show its Markdown summary, then call `otm_clear_current`.
 
-OTM hooks enforce only a resolved Codex session. Never substitute the
-workspace index or a legacy unscoped route when a hook lacks session identity.
+OTM hooks enforce only a resolved Codex session. Conflicting payload and
+environment session ids are rejected; a hook with no session identity remains
+silent and safe. A new substantive task after a finalized route rotates the
+binding to a new route, so prior completed evidence is not reused as new work.
+Never substitute the workspace index or a legacy unscoped route when a hook
+lacks session identity. When legacy route authority is ambiguous, inspect the
+bounded candidate details, then use `otm_reconcile` with an explicit same-session
+`runId`, that candidate's exact workspace, and a non-empty selection reason.
+Read-only snapshot/history inspection does not clear the attention state.
 Duplicate global/workspace hook invocations and host-marked repeated Stop calls
 are termination safeguards; do not counteract their silent allow response by
 manually repeating stale hook feedback.
