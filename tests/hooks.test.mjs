@@ -7,6 +7,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createTaskManager } from "../src/core/manager.mjs";
+import { createProviderSession } from "../src/core/provider-session.mjs";
 import { runHookScript } from "../src/hooks/runner.mjs";
 
 function workspace() {
@@ -22,6 +23,162 @@ function env(name) {
     OTM_STATE_DIR: fs.mkdtempSync(path.join(os.tmpdir(), `${name}-state-`)),
   };
 }
+
+test("Codex compaction checkpoints shared OTM state and restores it through compact SessionStart", async () => {
+  const workspaceRoot = workspace();
+  const sessionId = "codex-compact-session";
+  const hookEnv = {
+    ...env("otm-codex-compact"),
+    CODEX_THREAD_ID: sessionId,
+    OTM_AUTO_SYNC_AGENTS: "0",
+    OTM_DEDUPE_HOOKS: "0",
+  };
+  const owner = createProviderSession({
+    provider: "codex",
+    nativeSessionId: sessionId,
+  });
+  const manager = createTaskManager({ cwd: workspaceRoot, env: hookEnv });
+  const route = manager.start({
+    workspaceRoot,
+    sessionId,
+    goal: "Keep the Codex route available after compaction",
+    prompt: "Keep the Codex route available after compaction",
+    source: "test",
+    providerContext: {
+      provider: owner.provider,
+      providerSessionKey: owner.providerSessionKey,
+      nativeSessionId: sessionId,
+    },
+    tasks: [{ title: "Restore canonical work context" }],
+  });
+
+  await capture(() =>
+    runHookScript("pre-tool-use", {
+      cwd: workspaceRoot,
+      env: hookEnv,
+      stdin: JSON.stringify({
+        cwd: workspaceRoot,
+        session_id: sessionId,
+        hook_event_name: "PreToolUse",
+        turn_id: "compact-turn",
+        tool_name: "Bash",
+        tool_use_id: "codex-compact-pending",
+        tool_input: { command: "long running operation" },
+      }),
+    }),
+  );
+  const beforeCompact = await capture(() =>
+    runHookScript("pre-compact", {
+      cwd: workspaceRoot,
+      env: hookEnv,
+      stdin: JSON.stringify({
+        cwd: workspaceRoot,
+        session_id: sessionId,
+        hook_event_name: "PreCompact",
+        turn_id: "compact-turn",
+        trigger: "manual",
+      }),
+    }),
+  );
+  assert.equal(beforeCompact.result.continue, true);
+  assert.equal(beforeCompact.result.systemMessage, undefined);
+
+  const afterCompact = await capture(() =>
+    runHookScript("post-compact", {
+      cwd: workspaceRoot,
+      env: hookEnv,
+      stdin: JSON.stringify({
+        cwd: workspaceRoot,
+        session_id: sessionId,
+        hook_event_name: "PostCompact",
+        turn_id: "compact-turn",
+        trigger: "manual",
+      }),
+    }),
+  );
+  assert.equal(afterCompact.result.continue, true);
+  assert.equal(afterCompact.result.systemMessage, undefined);
+
+  const compactResume = await capture(() =>
+    runHookScript("session-start", {
+      cwd: workspaceRoot,
+      env: hookEnv,
+      stdin: JSON.stringify({
+        cwd: workspaceRoot,
+        session_id: sessionId,
+        hook_event_name: "SessionStart",
+        source: "compact",
+      }),
+    }),
+  );
+  assert.equal(
+    compactResume.result.hookSpecificOutput.hookEventName,
+    "SessionStart",
+  );
+  assert.match(
+    compactResume.result.hookSpecificOutput.additionalContext,
+    /Keep the Codex route available after compaction/,
+  );
+  assert.equal(compactResume.result.systemMessage, undefined);
+
+  const run = manager.store.getRun(route.run.id);
+  const events = manager.store.getEvents(route.run.id);
+  assert.equal(run.sessionId, sessionId);
+  assert.equal(run.status, "active");
+  assert.ok(
+    events.some((event) => event.eventType === "provider_checkpoint_recorded"),
+    "PreCompact saves the canonical OTM checkpoint",
+  );
+  assert.ok(
+    events.some(
+      (event) =>
+        event.eventType === "provider_host_work_started" &&
+        event.payload.workId === "tool:codex-compact-pending",
+    ),
+  );
+  assert.equal(
+    events.some(
+      (event) =>
+        event.eventType === "provider_host_work_settled" &&
+        event.payload.workId === "tool:codex-compact-pending",
+    ),
+    false,
+    "compaction does not settle active host work",
+  );
+  assert.equal(
+    events.some((event) => event.eventType === "provider_session_ended"),
+    false,
+  );
+
+  const clearResume = await capture(() =>
+    runHookScript("session-start", {
+      cwd: workspaceRoot,
+      env: hookEnv,
+      stdin: JSON.stringify({
+        cwd: workspaceRoot,
+        session_id: sessionId,
+        hook_event_name: "SessionStart",
+        source: "clear",
+      }),
+    }),
+  );
+  assert.equal(clearResume.result.continue, true);
+  assert.match(
+    clearResume.result.systemMessage,
+    /Keep the Codex route available/,
+  );
+  const afterClear = manager.store.getEvents(route.run.id);
+  assert.ok(
+    afterClear.some(
+      (event) =>
+        event.eventType === "provider_host_work_started" &&
+        event.payload.workId === "tool:codex-compact-pending",
+    ),
+    "clearing chat context does not erase pending native work",
+  );
+  assert.equal(manager.store.getRun(route.run.id).status, "active");
+  manager.close();
+});
 
 async function capture(fn) {
   const originalWrite = process.stdout.write;
@@ -40,6 +197,38 @@ async function capture(fn) {
     process.stdout.write = originalWrite;
   }
 }
+
+test("Codex hook identity cannot fall back to CODEX_THREAD_ID for ODC dispatch", async () => {
+  const workspaceRoot = workspace();
+  const hookEnv = {
+    ...env("otm-hook-official-identity"),
+    CODEX_THREAD_ID: "environment-only-session",
+    OTM_DEDUPE_HOOKS: "0",
+  };
+  const result = await capture(() =>
+    runHookScript("pre-tool-use", {
+      cwd: workspaceRoot,
+      env: hookEnv,
+      stdin: JSON.stringify({
+        cwd: workspaceRoot,
+        hook_event_name: "PreToolUse",
+        turn_id: "identity-turn",
+        tool_use_id: "identity-tool",
+        tool_name: "mcp__desktop-commander__process_job",
+        tool_input: { action: "start" },
+      }),
+    }),
+  );
+
+  assert.equal(result.result.hookSpecificOutput.permissionDecision, "deny");
+  assert.match(
+    result.result.hookSpecificOutput.permissionDecisionReason,
+    /official Codex session identity is missing or conflicting/,
+  );
+  const manager = createTaskManager({ cwd: workspaceRoot, env: hookEnv });
+  assert.equal(manager.listRuns({ workspaceRoot }).runs.length, 0);
+  manager.close();
+});
 
 test("duplicate hook commands emit user guidance only once per host invocation", async () => {
   const workspaceRoot = workspace();
@@ -214,6 +403,138 @@ test("repeated Stop feedback is released and cannot create an unbounded loop", a
   assert.match(first.result.reason, /Still open/);
   assert.equal(repeated.result.continue, true);
   assert.equal(repeated.result.decision, undefined);
+});
+
+test("Codex Stop preserves a live subagent until its exact SubagentStop receipt", async () => {
+  const workspaceRoot = workspace();
+  const sessionId = "codex-subagent-stop-session";
+  const hookEnv = {
+    ...env("otm-codex-subagent-stop"),
+    CODEX_THREAD_ID: sessionId,
+    OTM_AUTO_SYNC_AGENTS: "0",
+    OTM_DEDUPE_HOOKS: "0",
+  };
+  const provider = createProviderSession({
+    provider: "codex",
+    nativeSessionId: sessionId,
+  });
+  const manager = createTaskManager({ cwd: workspaceRoot, env: hookEnv });
+  const route = manager.start({
+    workspaceRoot,
+    sessionId,
+    providerContext: {
+      provider: provider.provider,
+      providerSessionKey: provider.providerSessionKey,
+      nativeSessionId: sessionId,
+    },
+    goal: "Wait for the native child to finish before clearing the route",
+    tasks: [{ title: "Finish the routed work" }],
+  });
+  const task = manager.store.getTask(route.snapshot.tasks[0].id);
+  manager.reconcile({
+    workspaceRoot,
+    prompt:
+      "Review this isolated test route as one complete validation action.",
+    tasks: [
+      {
+        stableKey: task.stableKey,
+        title: task.title,
+        acceptanceCriteria: task.acceptanceCriteria,
+        internalSteps: [
+          {
+            title: "Verify the host child lifecycle",
+            source: "test_fixture",
+            atomic: true,
+            atomicRationale: "This test isolates the Stop lifecycle behavior.",
+          },
+        ],
+        metadata: {
+          decomposition: {
+            version: 2,
+            source: "test_fixture",
+            needsModelReview: false,
+          },
+        },
+      },
+    ],
+  });
+  manager.progress({
+    workspaceRoot,
+    taskId: task.id,
+    message: "The exact native child lifecycle has been exercised.",
+    internalStepTitle: "Verify the host child lifecycle",
+    internalStepStatus: "done",
+    evidence: {
+      kind: "internal_step",
+      summary: "The tested native child lifecycle was exercised.",
+    },
+  });
+  manager.completeTask({
+    workspaceRoot,
+    runId: route.run.id,
+    taskId: route.snapshot.tasks[0].id,
+    evidence: { kind: "test_result", summary: "Route acceptance passed." },
+  });
+
+  const childPayload = {
+    cwd: workspaceRoot,
+    session_id: sessionId,
+    turn_id: "codex-subagent-turn-1",
+    agent_id: "native-agent-17",
+    agent_type: "explorer",
+  };
+  await capture(() =>
+    runHookScript("subagent-start", {
+      cwd: workspaceRoot,
+      env: hookEnv,
+      stdin: JSON.stringify({
+        ...childPayload,
+        hook_event_name: "SubagentStart",
+      }),
+    }),
+  );
+  const blocked = await capture(() =>
+    runHookScript("stop", {
+      cwd: workspaceRoot,
+      env: hookEnv,
+      stdin: JSON.stringify({
+        cwd: workspaceRoot,
+        session_id: sessionId,
+        hook_event_name: "Stop",
+        turn_id: "codex-subagent-stop-pending",
+      }),
+    }),
+  );
+  assert.equal(blocked.result.decision, "block");
+  assert.match(blocked.result.reason, /HOST_WORK_PENDING/);
+  assert.equal(manager.store.getRun(route.run.id).status, "ready_to_finalize");
+
+  await capture(() =>
+    runHookScript("subagent-stop", {
+      cwd: workspaceRoot,
+      env: hookEnv,
+      stdin: JSON.stringify({
+        ...childPayload,
+        hook_event_name: "SubagentStop",
+      }),
+    }),
+  );
+  const allowed = await capture(() =>
+    runHookScript("stop", {
+      cwd: workspaceRoot,
+      env: hookEnv,
+      stdin: JSON.stringify({
+        cwd: workspaceRoot,
+        session_id: sessionId,
+        hook_event_name: "Stop",
+        turn_id: "codex-subagent-stop-settled",
+      }),
+    }),
+  );
+  assert.equal(allowed.result.continue, true);
+  assert.equal(allowed.result.decision, undefined);
+  assert.equal(manager.store.getRun(route.run.id).status, "cleared");
+  manager.close();
 });
 
 test("Stop hook process failures fail open without another stop block", () => {

@@ -390,6 +390,157 @@ export class JsonStore {
     });
   }
 
+  /** Atomically transfer one active route and both session bindings. */
+  transferRunOwnership({
+    runId,
+    fromSessionId,
+    toSessionId,
+    expectedRevision,
+    expectedOwnerActivityEventId,
+    fromProviderSessionKey,
+    event,
+    toProviderContext = null,
+    updatedAt = nowIso(),
+  }) {
+    return this.transaction((data) => {
+      const run = data.runs.find((item) => item.id === runId);
+      if (!run) throw new OtmError("Run not found.", { code: "RUN_NOT_FOUND" });
+      if ((run.sessionId || null) !== fromSessionId) {
+        throw new OtmError("Route ownership changed before continuation.", {
+          code: "SESSION_SCOPE_MISMATCH",
+        });
+      }
+      if (Number(run.routeRevision || 1) !== Number(expectedRevision)) {
+        throw new OtmError("Route revision conflict.", {
+          code: "REVISION_CONFLICT",
+          details: {
+            expectedRevision,
+            currentRevision: run.routeRevision || 1,
+            runId,
+          },
+        });
+      }
+      const latestOwnerActivity = data.events
+        .filter(
+          (item) =>
+            item.runId === runId &&
+            item.eventType === "provider_session_activity" &&
+            item.payload?.ownerSessionId === fromSessionId &&
+            item.payload?.providerSessionKey === fromProviderSessionKey,
+        )
+        .sort(
+          (left, right) =>
+            String(left.createdAt).localeCompare(String(right.createdAt)) ||
+            String(left.id).localeCompare(String(right.id)),
+        )
+        .at(-1);
+      if (!expectedOwnerActivityEventId || latestOwnerActivity?.id !== expectedOwnerActivityEventId) {
+        throw new OtmError("The prior owner recorded fresh activity during continuation inspection; inspect again before retrying.", {
+          code: "OWNER_ACTIVITY_CHANGED",
+          details: { runId },
+        });
+      }
+      if (!["active", "ready_to_finalize", "blocked", "paused"].includes(run.status)) {
+        throw new OtmError("Only an active route can change owners.", {
+          code: "RUN_NOT_ACTIVE",
+          details: { runId, status: run.status },
+        });
+      }
+
+      const oldBindingIndex = data.sessionBindings.findIndex(
+        (item) => item.rootSessionId === fromSessionId,
+      );
+      const oldBinding = oldBindingIndex < 0 ? null : data.sessionBindings[oldBindingIndex];
+      if (!oldBinding || oldBinding.currentRunId !== runId) {
+        throw new OtmError("The prior owner's canonical route binding is missing or changed.", {
+          code: "CANONICAL_BINDING_INVALID",
+          details: { runId },
+        });
+      }
+      const newBindingIndex = data.sessionBindings.findIndex(
+        (item) => item.rootSessionId === toSessionId,
+      );
+      const newBinding = newBindingIndex < 0 ? null : data.sessionBindings[newBindingIndex];
+      if (newBinding?.currentRunId && newBinding.currentRunId !== runId) {
+        const conflictingRun = data.runs.find((item) => item.id === newBinding.currentRunId);
+        if (conflictingRun && ["active", "ready_to_finalize", "blocked", "paused"].includes(conflictingRun.status)) {
+          throw new OtmError("The receiving provider session already owns an active route.", {
+            code: "PROVIDER_SESSION_ALREADY_OWNS_ROUTE",
+            details: { conflictingRunId: conflictingRun.id },
+          });
+        }
+      }
+
+      const at = updatedAt;
+      data.sessionBindings[oldBindingIndex] = normalizeSessionBinding({
+        ...oldBinding,
+        currentRunId: null,
+        status: "empty",
+        lastResolution: {
+          kind: "ownership_transferred",
+          canonicalTaskId: null,
+          previousRunId: runId,
+          modelReasoningRequired: false,
+          at,
+        },
+        updatedAt: at,
+      });
+      const nextBinding = normalizeSessionBinding({
+        ...newBinding,
+        rootSessionId: toSessionId,
+        currentRunId: runId,
+        primaryWorkspace: run.workspaceRoot,
+        workspaceAliases: [...(newBinding?.workspaceAliases || []), run.workspaceRoot],
+        status: "bound",
+        lastResolution: {
+          kind: "explicit_provider_continuation",
+          canonicalTaskId: runId,
+          primaryWorkspace: run.workspaceRoot,
+          modelReasoningRequired: true,
+          at,
+        },
+        updatedAt: at,
+      });
+      if (newBindingIndex < 0) data.sessionBindings.push(nextBinding);
+      else data.sessionBindings[newBindingIndex] = nextBinding;
+
+      run.sessionId = toSessionId;
+      run.routeRevision = Number(run.routeRevision || 1) + 1;
+      run.updatedAt = at;
+      if (toProviderContext) {
+        run.metadata = {
+          ...(run.metadata || {}),
+          providerSession: toProviderContext,
+        };
+      }
+      if (event && !data.events.some((item) => item.idempotencyKey === event.idempotencyKey))
+        data.events.push(event);
+      return run;
+    });
+  }
+
+  /** Record a provider hook event only while its captured owner and revision remain current. */
+  recordOwnedEvent({ runId, sessionId, expectedRevision, event }) {
+    return this.transaction((data) => {
+      const run = data.runs.find((item) => item.id === runId);
+      if (!run) throw new OtmError("Run not found.", { code: "RUN_NOT_FOUND" });
+      if ((run.sessionId || null) !== sessionId) {
+        throw new OtmError("Route ownership changed before the event was recorded.", {
+          code: "SESSION_SCOPE_MISMATCH",
+        });
+      }
+      if (Number(run.routeRevision || 1) !== Number(expectedRevision)) {
+        throw new OtmError("Route revision conflict.", {
+          code: "REVISION_CONFLICT",
+          details: { expectedRevision, currentRevision: run.routeRevision || 1, runId },
+        });
+      }
+      if (!data.events.some((item) => item.idempotencyKey === event.idempotencyKey))
+        data.events.push(event);
+      return event;
+    });
+  }
+
   updateRun(id, patch) {
     return this.transaction((data) => {
       const run = data.runs.find((item) => item.id === id);
@@ -613,8 +764,23 @@ export class JsonStore {
   getEvents(runId, limit = 100) {
     return this.#read()
       .events.filter((event) => event.runId === runId)
-      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
+      .sort(
+        (a, b) =>
+          String(a.createdAt).localeCompare(String(b.createdAt)) ||
+          String(a.id).localeCompare(String(b.id)),
+      )
       .slice(-limit);
+  }
+
+  getEventSnapshot(runId, limit = 10_000) {
+    const events = this.#read().events
+      .filter((event) => event.runId === runId)
+      .sort(
+        (a, b) =>
+          String(a.createdAt).localeCompare(String(b.createdAt)) ||
+          String(a.id).localeCompare(String(b.id)),
+      );
+    return { events: events.slice(-limit), totalCount: events.length };
   }
 
   upsertSummary(summary) {

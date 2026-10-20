@@ -40,6 +40,16 @@ Duplicate global/workspace hook invocations and host-marked repeated Stop calls
 are termination safeguards; do not counteract their silent allow response by
 manually repeating stale hook feedback.
 
+For work already routed by Claude Code, inspect `otm shared-history`, then
+read the exact run with `otm shared-task --run-id <id>` and note its
+`routeRevision`. Only after the user explicitly asks to continue that run, call
+`otm continue-task --run-id <id> --expected-revision <revision>` from the active
+Codex environment. The command takes the receiver identity from trusted
+`CODEX_THREAD_ID`, performs host-work and recency checks, and atomically
+transfers the existing route. A denial requires resolving the reported host
+evidence; do not create a competing route or assume the old owner stopped
+because its chat closed.
+
 ## Quality bar
 
 - Aim for complete, production-quality work.
@@ -57,3 +67,6 @@ When the user says continue, resume, checkpoint, or adds to the same workstream:
 3. Call `otm_reconcile` with mode `continue` or `append` and a complete reviewed three-tier route.
 4. Keep prior completed evidence and still-valid descendant state intact.
 5. Add new required gates/subtasks/mini-steps when scope expands; supersede stale structure when scope redirects.
+6. Preserve provider-native transcript and usage histories. OTM's route,
+   evidence, checkpoint, and summary are shared canonical state; restore them
+   through each host's own supported lifecycle hooks.

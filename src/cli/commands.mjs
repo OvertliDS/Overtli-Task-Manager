@@ -26,6 +26,11 @@ import {
 import { reviewProjectContext } from "../context/project-review.mjs";
 import { runHookScript } from "../hooks/runner.mjs";
 import { resolveSessionId } from "../core/session-scope.mjs";
+import { createProviderAdapter } from "../core/provider-adapter.mjs";
+import {
+  loadHostEvidenceModule,
+  resolveHostEvidenceModulePath,
+} from "../core/continuation.mjs";
 import {
   loadBetterSqlite3,
   SQLITE_SCHEMA_VERSION,
@@ -80,6 +85,11 @@ export async function handleCli({ argv, cwd, stdin, packageRoot, env }) {
   const workspaceRoot = canonicalizeWorkspaceRoot(
     flags.workspace || flags.workspaceRoot || findWorkspaceRoot(cwd),
   ).displayPath;
+  if (command === "continue-task" && flags.sessionId !== undefined) {
+    throw new Error(
+      "continue-task does not accept --session-id; the receiving Codex identity comes from CODEX_THREAD_ID.",
+    );
+  }
   const sessionId = resolveSessionId({ sessionId: flags.sessionId }, env);
   // Installer lifecycle commands intentionally run before store creation.
   // In particular, their dry-run forms must create neither state directories
@@ -327,6 +337,111 @@ export async function handleCli({ argv, cwd, stdin, packageRoot, env }) {
     return;
   }
 
+  if (command === "shared-history") {
+    const limit = flags.limit ?? 20;
+    if (limit > 100) {
+      throw new Error("shared-history --limit must be between 1 and 100.");
+    }
+    const listed = manager.listRuns({ workspaceRoot, limit });
+    const result = {
+      workspaceRoot,
+      runs: listed.runs.map(sharedRunView),
+      summaries: manager.store.listSummaries(workspaceRoot, limit),
+    };
+    const markdown = [
+      "## Shared OTM history",
+      "",
+      ...result.runs.map(
+        (run) =>
+          `- ${run.id} — ${run.status} — ${run.metadata?.providerSession?.provider || "legacy owner"} — ${run.goal}`,
+      ),
+      `${result.summaries.length} shared summary record(s)`,
+      "",
+    ].join("\n");
+    printCli(flags, result, markdown);
+    manager.close?.();
+    return;
+  }
+
+  if (command === "shared-task") {
+    if (!flags.runId) throw new Error("shared-task requires --run-id.");
+    const result = manager.snapshotShared({
+      runId: flags.runId,
+      workspaceRoot,
+      write: false,
+    });
+    const output = { ...result, run: sharedRunView(result.run) };
+    printCli(flags, output, result.markdown);
+    manager.close?.();
+    return;
+  }
+
+  if (command === "continue-task") {
+    if (!flags.runId) throw new Error("continue-task requires --run-id.");
+    if (!Number.isSafeInteger(flags.expectedRevision)) {
+      throw new Error(
+        "continue-task requires --expected-revision from the latest shared-task snapshot.",
+      );
+    }
+    const nativeSessionId = String(env.CODEX_THREAD_ID || "").trim();
+    if (!nativeSessionId) {
+      throw new Error(
+        "continue-task requires the current Codex CODEX_THREAD_ID environment value.",
+      );
+    }
+    resolveSessionId({ threadId: nativeSessionId }, env);
+    const hostEvidencePath = resolveHostEvidenceModulePath(env);
+    const hostEvidence = hostEvidencePath
+      ? await loadHostEvidenceModule(hostEvidencePath)
+      : null;
+    const adapter = createProviderAdapter({
+      provider: "codex",
+      nativeSessionId,
+      workspaceRoot,
+      env,
+      store: manager.store,
+      inspectOwnerWork: hostEvidence?.inspectOwnerWork || null,
+    });
+    try {
+      const result = adapter.continueTask({
+        runId: flags.runId,
+        expectedRevision: flags.expectedRevision,
+        workspaceRoot,
+      });
+      const output = {
+        continued: result.continued,
+        alreadyOwner: result.alreadyOwner,
+        run: sharedRunView(result.run),
+        snapshot: result.snapshot,
+        eligibility: result.eligibility
+          ? {
+              code: result.eligibility.code,
+              idleMs: result.eligibility.idleMs,
+              evidenceObservedAt: result.eligibility.evidenceObservedAt,
+              lastActivityEventId: result.eligibility.lastActivityEventId,
+              sources: [
+                ...new Set(
+                  (result.eligibility.evidenceRefs || []).map(
+                    (ref) => ref.source,
+                  ),
+                ),
+              ],
+            }
+          : undefined,
+        markdown: result.markdown,
+      };
+      printCli(
+        flags,
+        output,
+        result.markdown || `Continued shared route ${result.run.id}.`,
+      );
+    } finally {
+      adapter.close();
+      manager.close?.();
+    }
+    return;
+  }
+
   if (command === "status") {
     const result = manager.snapshot({ workspaceRoot, sessionId, write: false });
     printCli(
@@ -557,6 +672,13 @@ function validateNumericFlags(flags) {
     }
     flags[key] = value;
   }
+  if (flags.expectedRevision !== undefined) {
+    const value = Number(flags.expectedRevision);
+    if (!Number.isSafeInteger(value) || value < 1) {
+      throw new Error("--expected-revision must be a positive safe integer.");
+    }
+    flags.expectedRevision = value;
+  }
   for (const key of ["minAgeMs", "scratchMaxAgeMs", "retentionDays"]) {
     if (flags[key] === undefined) continue;
     const value = Number(flags[key]);
@@ -590,6 +712,9 @@ function allowedFlagsFor(command) {
     archive: ["runId", "reason", "confirm"],
     abandon: ["runId", "reason", "confirm", "deleteFiles"],
     snapshot: [],
+    "shared-history": ["limit"],
+    "shared-task": ["runId"],
+    "continue-task": ["runId", "expectedRevision"],
     status: [],
     "list-runs": ["limit"],
     history: ["runId", "limit"],
@@ -749,6 +874,22 @@ function exportCounts(document) {
   );
 }
 
+function sharedRunView(run) {
+  if (!run) return run;
+  const metadata = run.metadata || {};
+  const providerSession = metadata.providerSession;
+  return {
+    ...run,
+    sessionId: undefined,
+    metadata: {
+      ...metadata,
+      ...(providerSession
+        ? { providerSession: { provider: providerSession.provider } }
+        : {}),
+    },
+  };
+}
+
 function packageVersion(packageRoot) {
   try {
     return (
@@ -796,6 +937,9 @@ Commands:
   otm backup [--output PATH] [--dry-run] [--json]
   otm restore --input PATH --confirm [--dry-run] [--json]
   otm snapshot [--workspace PATH] [--session-id ID]
+  otm shared-history [--workspace PATH] [--limit N] [--json]
+  otm shared-task --run-id ID [--workspace PATH] [--json]
+  otm continue-task --run-id ID --expected-revision N [--workspace PATH] [--json]
   otm status [--workspace PATH] [--session-id ID] [--json]
   otm list-runs [--workspace PATH] [--limit N] [--json]
   otm history --run-id ID [--workspace PATH] [--limit N] [--json]

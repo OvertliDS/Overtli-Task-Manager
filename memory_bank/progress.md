@@ -1,5 +1,52 @@
 # Progress
 
+## 2026-10-20 - Shared provider routes and Claude native source
+
+- Implemented a provider-neutral shared route/history frontend and explicit
+  ownership transfer over the same OTM store. Transfer checks recent activity,
+  complete OTM event history, and fresh complete host evidence for native
+  broker and ODC jobs, then atomically fences the prior owner by route revision
+  and latest activity-event compare-and-swap. Task-owned resource claims remain
+  part of native broker evidence; global GPU availability is not required.
+- Added Claude's signed stdio tool surface and all eleven official hook events.
+  Claude PreCompact records an OTM checkpoint; PostCompact reads canonical
+  state without importing the native summary, and compact SessionStart injects
+  the route and refreshes the capability. Codex PreCompact now writes the same
+  canonical checkpoint, while compact SessionStart injects the route using
+  its supported additionalContext output. Neither provider's compact hooks
+  mark work settled or transfer ownership. The Node executable user-settings
+  installer merges, hash-checks, and supports guarded rollback.
+- Claude Stop now also requires a complete trusted owner-coverage receipt and a
+  fresh validated native-broker/ODC inspection for the exact current route;
+  active or unknown counts block finalization. The provider lifecycle helper
+  checks complete OTM event history and exact owner activity without applying
+  the cross-provider continuation idle interval. Its loop guard returns before
+  fallible observer/store work.
+- Focused checks passed for Codex-to-Claude and Claude-to-Codex transfer,
+  denial on recent/unknown/active work, activity races, truncated event
+  history, injected SQLite transfer-receipt failure with full binding/run
+  rollback, hook lifecycle/Stop decisions, signed MCP tool access, and settings
+  merge/idempotency/rollback. Stop now also blocks unmatched OTM PreToolUse and
+  SubagentStart receipts when official hooks provide no terminal event. The
+  Claude PreCompact checkpoint assertions passed in the focused lifecycle
+  test; the bounded Codex compact lifecycle case also passed, covering its
+  checkpoint, supported context injection, and preservation of pending host
+  work. The focused command,
+  `node --test --test-name-pattern="Claude lifecycle hooks|SQLite ownership transfer rolls back" tests/claude-shared-continuation.test.mjs`, passed 2/2. The subsequent coherent integration suite passed 153/153; the retained Codex concurrency, lifecycle, security-path and MCP-protocol suites passed 23/23 without source changes.
+- The continuation consumer now preserves a safe blocker code from an
+  incomplete trusted inspection in the denied response, while keeping
+  ownership unchanged. The focused transfer
+  regression set passed 4/4, including recent/unknown inventory, blocker
+  transparency, activity race, and truncated event history.
+- The source worker did not modify live global settings. Root subsequently
+  activated the trusted host configuration, user hooks and registered Claude
+  frontend against the existing canonical Codex SQLite store. Actual official
+  initialization invoked the installed startup hook without a model prompt;
+  the 12-tool frontend read the same Codex run and rejected legacy-owner
+  continuation without changing binding/revision. Eligible transfer remains
+  fixture-qualified and manual compaction was not forced. See
+  [`Claude integration`](../docs/CLAUDE_INTEGRATION.md).
+
 ## 2026-10-02 - Canonical root-session task identity
 
 - [x] Verified: a root Codex session maps to one canonical current route across

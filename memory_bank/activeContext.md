@@ -2,10 +2,53 @@
 
 ## Current objective
 
-Canonical root-session identity, evidence-proven legacy recovery, and one-reply
-Stop closeout are installed and verified. The existing Node-native storage
-recovery, model-guided three-tier routes, accumulated source contract, and
-installed lifecycle retain their verified behavior.
+Implement shared canonical OTM history and safe, explicit exclusive
+continuation across Codex and Claude Code. The provider-neutral transfer,
+complete Claude hook source, signed Claude stdio tools, and supported user
+settings installer are implemented. Local workstation qualification on
+2026-10-20 verified the installed official startup hook and registered 12-tool
+Claude frontend against the existing canonical Codex SQLite store. The coherent
+integration suite passed 153 tests and retained Codex regressions passed 23.
+Independent final review accepted the implementation after a documentation
+correction. The release identity belongs in Git history and the parent
+integration's publication receipt.
+
+### Shared provider contract
+
+- Codex and Claude read the same workspace-scoped canonical run, events,
+  checkpoint history, and summaries; task summaries are not copied between
+  provider stores.
+- Provider identity, usage, transcripts, live workers, and agent teams remain
+  independent. Cross-provider ownership changes require an explicit user
+  request, at least 15 minutes of owner inactivity, full untruncated OTM event
+  history, and fresh complete owner-bound evidence from native broker and ODC
+  jobs. Task-owned resource claims are checked in native broker evidence; OTM
+  does not require global GPU availability or a Manager lease ledger.
+- Unknown or missing liveness proof denies transfer with a concrete recovery
+  path. Closing a chat or observing a stale timestamp is never proof of
+  settled work. Store transfer compares owner activity and route revision
+  atomically so a delayed former owner is fenced.
+- Claude Stop also blocks finalization when complete owner coverage, full OTM
+  event history, or fresh native-broker/ODC proof is missing or reports active
+  work. It skips fallible work immediately when the official Stop loop guard is
+  set and does not apply the cross-provider idle interval to local finalization.
+- Local Claude user hooks and the stdio MCP registration are active on the
+  qualified workstation. Actual official initialization created the startup
+  journal without a model prompt; the frontend read the existing Codex run and
+  denied legacy-owner continuation without changing its binding or revision.
+  Existing clients must reload configuration. Eligible transfers remain covered
+  by isolated JSON/SQLite tests; the live user task was not transferred.
+- Codex can read Claude-created routes through `shared-history` and
+  `shared-task`, then continue only through explicit `continue-task` with the
+  exact route revision and trusted active `CODEX_THREAD_ID`. Codex hooks now
+  observe official SessionStart, pre/post tool, and subagent lifecycle events;
+  supported ODC mutations require a durably recorded pre-dispatch intent.
+- Compaction preserves provider-native summaries and uses provider-specific
+  hooks to checkpoint/restore the same canonical route. Codex injects it from
+  `SessionStart(source=compact)` through the supported `additionalContext`
+  shape; Claude does so through `SessionStart(source=compact)` and refreshes
+  its signed capability. Compact events never settle host workers, detached
+  jobs, task-owned resource claims, or route ownership.
 
 ## Preserved user contract
 
@@ -38,8 +81,9 @@ installed lifecycle retain their verified behavior.
   substantive request after finalization rotates to a new route and must not
   reuse completed evidence.
 - JSON and SQLite create/rotate the session binding atomically with the route.
-  Distinct session IDs never alias; conflicting payload/environment claims fail
-  before route access. Explicit foreign-session run IDs remain rejected.
+  Distinct session IDs never alias; conflicting identity claims fail before
+  owned route access. Foreign-session mutations remain rejected; shared reads
+  and explicit, verified ownership continuation use their separate APIs.
 - A unique active legacy route beats unrelated older completed history. A
   completed duplicate is authoritative only when its reviewed source covers
   the active duplicate and goals, full gate/internal/mini-step contracts,
@@ -120,6 +164,15 @@ installed lifecycle retain their verified behavior.
 - `tests/sqlite-runtime.test.mjs`, `tests/planner.test.mjs`,
   `tests/source-context.test.mjs`, `tests/manager.test.mjs`: primary new
   regressions.
+- `src/core/provider-session.mjs`, `src/core/provider-adapter.mjs`,
+  `src/core/continuation.mjs`, and the shared stores: provider-neutral session
+  identity, route reads, liveness evidence checks, event history, and atomic
+  ownership transfer.
+- `src/claude/mcp-server.mjs`, `src/core/claude-capability.mjs`,
+  `hooks/claude-code.mjs`, `src/install/claude-settings.mjs`, and
+  `scripts/install-claude-hooks.mjs`: signed Claude OTM tools, native hooks,
+  and reviewable/reversible user-settings merge; see
+  [`docs/CLAUDE_INTEGRATION.md`](../docs/CLAUDE_INTEGRATION.md).
 
 ## 2026-10-02 - Canonical session identity verification
 
@@ -154,9 +207,13 @@ installed lifecycle retain their verified behavior.
   need a normal Codex MCP reload to load source changes. No Codex or ODC process
   was stopped here.
 
-## Exact next action
+## Operator handoff
 
-Use a normal Codex MCP reload to refresh an already-running stdio process.
-No implementation or validation action remains. Root owns publication on
-`codex/full-production-hardening`; Git history and the scoped release packet
-are the commit/push authority rather than a self-referencing hash in this file.
+Trusted host integration, canonical SQLite alignment, user settings
+installation and actual official startup/registered-MCP qualification are
+complete locally. Preserve the seven unrelated dirty shared-broker files.
+Eligible ownership transfers remain fixture-qualified; manual compaction and
+transfer of the active user task were not forced. Existing clients must load
+the changed configuration before relying on its new lifecycle observations.
+Use shared history/task lookup before an explicit continuation; retain the
+canonical run ID and fresh revision instead of copying a provider summary.

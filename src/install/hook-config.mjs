@@ -4,7 +4,7 @@ import { readText, atomicWriteText } from "../core/fs-utils.mjs";
 
 const EVENT_COMMANDS = {
   SessionStart: {
-    matcher: "startup|resume|compact",
+    matcher: "startup|resume|clear|compact|fork",
     statusMessage: "Loading OTM route",
     event: "session-start",
     timeout: 15,
@@ -14,13 +14,23 @@ const EVENT_COMMANDS = {
     event: "user-prompt-submit",
     timeout: 12,
   },
+  SubagentStart: {
+    matcher: "*",
+    event: "subagent-start",
+    timeout: 8,
+  },
+  SubagentStop: {
+    matcher: "*",
+    event: "subagent-stop",
+    timeout: 12,
+  },
   PreToolUse: {
-    matcher: "Bash|apply_patch",
+    matcher: "*",
     event: "pre-tool-use",
     timeout: 8,
   },
   PostToolUse: {
-    matcher: "Bash|apply_patch",
+    matcher: "*",
     event: "post-tool-use",
     timeout: 12,
   },

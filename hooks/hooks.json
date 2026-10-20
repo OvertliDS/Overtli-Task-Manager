@@ -2,7 +2,7 @@
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "startup|resume|compact",
+        "matcher": "startup|resume|clear|compact|fork",
         "hooks": [
           {
             "type": "command",
@@ -25,9 +25,33 @@
         ]
       }
     ],
+    "SubagentStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${PLUGIN_ROOT}/hooks/subagent-start.mjs",
+            "timeout": 8
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${PLUGIN_ROOT}/hooks/subagent-stop.mjs",
+            "timeout": 12
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
-        "matcher": "Bash|apply_patch",
+        "matcher": "*",
         "hooks": [
           {
             "type": "command",
@@ -39,7 +63,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Bash|apply_patch",
+        "matcher": "*",
         "hooks": [
           {
             "type": "command",

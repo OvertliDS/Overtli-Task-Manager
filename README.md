@@ -1,6 +1,6 @@
 # 🧭 Overtli Task Manager
 
-**Codex-first task control for serious engineering.**
+**Shared, evidence-backed task control for Codex and Claude Code.**
 
 Overtli Task Manager (OTM) structures AI coding sessions into evidence-backed routes. It enforces a strict, checklist-driven development flow to ensure complete, verified implementations without premature session stops.
 
@@ -14,7 +14,7 @@ Overtli Task Manager (OTM) structures AI coding sessions into evidence-backed ro
 
 - **Route Checklists:** Deconstruct complex goals into discrete segments (`pending` ➔ `active` ➔ `done` / `blocked`).
 - **Evidence Enforcement:** Tasks can only be marked complete once concrete proof (changed files, test results, command outputs) is provided.
-- **Chat Integration:** Renders real-time, user-friendly Markdown progress dashboards directly in your Codex chat.
+- **Chat Integration:** Renders progress in Codex and exposes the same canonical routes, summaries, and history to Claude Code through its native hooks and stdio MCP server.
 - **Persistent Task List:** Keeps a full checked-off task list in chat Markdown and the current chat's session-scoped `current.json.checklist`.
 - **Canonical Chat Identity:** Binds one current route to the root `CODEX_THREAD_ID` across home, project, and nested paths. The route's starting workspace remains its primary evidence location; later paths are persisted aliases. Different Codex sessions remain isolated.
 - **Durable State Cache:** Persists root-session bindings in the JSON or SQLite store. Route snapshots and summaries remain under the primary workspace; top-level `current.json` and `current.md` provide a workspace-local session index.
@@ -43,6 +43,110 @@ git clone https://github.com/OvertliDS/Overtli-Task-Manager.git ~/.codex/plugins
 cd ~/.codex/plugins/overtli-task-manager
 npm install
 ```
+
+### 2. Connect Claude Code to the shared OTM route
+
+Claude Code uses a separate local stdio MCP frontend and native command hooks.
+Both must point at the same OTM state directory and storage backend used by
+Codex; a different path creates an isolated store. Preserve the configured
+`OTM_STORAGE` and `OTM_STATE_DIR` values when registering the Claude MCP server.
+Set `OTM_HOST_EVIDENCE_MODULE` on that server to the trusted local host-evidence
+module when cross-provider continuation is enabled. Without it, reads still
+work, but explicit continuation fails closed. Also set
+`OTM_HOST_EVIDENCE_CONFIG` in the environment used to launch Claude Code and
+in the MCP server environment; Claude's hook child process and its MCP server
+do not inherit each other's environment.
+
+Codex's existing `PostToolUse` hook uses the same trusted observer. It loads the
+bundled local observer automatically when the default host-evidence config
+exists; setting `OTM_HOST_EVIDENCE_MODULE` explicitly overrides that module
+selection. This lets official Codex tool responses create trusted ODC job-join
+receipts without changing the Codex MCP server.
+
+Register the MCP server in Claude's user scope with the supported stdio command
+form (replace the placeholders with the local Node executable, OTM checkout,
+and the same state/evidence configuration used by Codex):
+
+```powershell
+claude mcp add --scope user --transport stdio otm `
+  --env 'OTM_STORAGE=<same-backend-as-Codex>' `
+  --env 'OTM_STATE_DIR=<same-OTM-state-directory-as-Codex>' `
+  --env 'OTM_HOST_EVIDENCE_MODULE=<absolute-trusted-host-evidence-module>' `
+  --env 'OTM_HOST_EVIDENCE_CONFIG=<absolute-trusted-host-evidence-config.json>' `
+  -- '<absolute-node.exe>' '<OTM-repository>\bin\otm-claude-mcp.mjs'
+```
+
+For the hook subprocesses, start Claude Code with the same trusted host config
+path in its environment:
+
+```powershell
+$env:OTM_HOST_EVIDENCE_CONFIG = '<absolute-trusted-host-evidence-config.json>'
+claude
+```
+
+Install the complete hook set into Claude's supported user settings file only
+after reviewing the dry run. The installer merges the managed entries while
+preserving unrelated settings and hooks:
+
+```powershell
+npm run install:claude-hooks -- --dry-run --state-dir '<canonical-OTM-state-directory>' --storage sqlite --host-evidence-module '<absolute-trusted-host-evidence-module>'
+npm run install:claude-hooks -- --state-dir '<canonical-OTM-state-directory>' --storage sqlite --host-evidence-module '<absolute-trusted-host-evidence-module>'
+```
+
+Use the same `OTM_STATE_DIR` and `OTM_STORAGE=sqlite` for the Claude MCP
+process and Claude hooks as the existing Codex OTM server. The installer writes
+these fixed values into each managed hook command so a missing SQLite runtime
+fails visibly instead of creating a separate JSON history. `auto` remains
+available for standalone use, but cross-provider sharing requires the exact
+same canonical directory and backend on both processes.
+
+### 3. Continue a Claude route from Codex
+
+Codex can inspect and explicitly continue a route created by Claude using the
+same local canonical OTM store. Read the shared history, then the exact route
+snapshot and its `routeRevision`; continue only when the user explicitly asks
+to resume that work:
+
+```powershell
+$otm = '<OTM-repository>\bin\otm.mjs'
+node $otm shared-history --workspace '<project-root>' --json
+node $otm shared-task --run-id '<run-id>' --workspace '<project-root>' --json
+node $otm continue-task --run-id '<run-id>' --expected-revision <routeRevision> --workspace '<project-root>' --json
+```
+
+The last command uses the active Codex host's `CODEX_THREAD_ID`; it does not
+accept a caller-supplied session ID. Trusted host inspection, inactivity and
+complete-history checks can deny continuation when work is active or unknown.
+Claude continues the same route with its signed `otm_continue` tool. Neither
+direction copies provider transcripts, usage, workers, or summaries into a
+second store.
+
+The hook installer prints hashes and the rollback backup path. To restore the
+previous settings, use those exact receipt values with
+`node scripts/install-claude-hooks.mjs --rollback --backup '<backup-path>' --backup-hash '<backup-hash>' --expected-current-hash '<installed-hash>'`.
+If the settings file did not exist before installation, rollback instead uses
+`--rollback --remove-created-settings true --expected-current-hash '<installed-hash>'`.
+See [the Claude integration contract](docs/CLAUDE_INTEGRATION.md) for storage
+matching, capability security, hook lifecycle, and continuation rules.
+
+Claude can read shared history without taking ownership. To request an
+eligible active route, use `/otm continue <runId>` or the `otm_continue` tool.
+OTM changes the exclusive route owner only after an explicit request, a
+15-minute idle interval, and fresh complete evidence that native broker work
+and ODC jobs owned by the prior session are settled. Task-owned resource claims
+remain part of the native broker proof; no global GPU availability scan is
+required.
+Missing or unknown evidence leaves the old binding in place and returns a
+recovery instruction. Provider usage,
+native transcripts, and agent teams remain provider-specific; OTM does not
+copy summaries or hand work between provider agents.
+
+Compaction keeps each host's own native transcript summary. Both providers
+checkpoint and restore the same canonical OTM route through their supported
+compaction lifecycle hooks: Codex injects the route on
+`SessionStart(source=compact)`, and Claude injects it and refreshes its signed
+session capability on the same source. Compact hooks never mark workers,
+detached jobs, or leases inactive and never transfer route ownership.
 
 ## Operations and recovery
 

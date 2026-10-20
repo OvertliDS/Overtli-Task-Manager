@@ -17,20 +17,54 @@ import { patchAgentsFile } from "../install/agent-block.mjs";
 import { resolveSessionId } from "../core/session-scope.mjs";
 import { redactSensitiveText } from "../core/validation.mjs";
 import { compactOneLine } from "../core/text-utils.mjs";
+import { createProviderSession } from "../core/provider-session.mjs";
+import { createProviderAdapter } from "../core/provider-adapter.mjs";
+import {
+  findPendingWork,
+  loadHostEvidenceModule,
+  resolveHostEvidenceModulePath,
+} from "../core/continuation.mjs";
 
 export async function runHookScript(
   eventName,
   { stdin = "", cwd = process.cwd(), env = process.env } = {},
 ) {
   const input = parseJson(stdin, {});
+  const hookEnv = Object.fromEntries(
+    Object.entries(env).filter(
+      ([key]) =>
+        !["OTM_SESSION_ID", "CODEX_THREAD_ID"].includes(key.toUpperCase()),
+    ),
+  );
   const workspaceRoot = findWorkspaceRoot(input.cwd || cwd);
   if (eventName === "stop" && isActiveStopHook(input))
     return emitJson({ continue: true, suppressOutput: true });
   let sessionId;
   try {
-    sessionId = resolveSessionId(input, env);
+    const officialSessionId =
+      typeof input.session_id === "string" ? input.session_id.trim() : "";
+    if (!officialSessionId) {
+      throw new Error(
+        "The official Codex hook payload must contain session_id; environment and alias fields cannot replace it.",
+      );
+    }
+    sessionId = resolveSessionId(input, hookEnv);
+    if (sessionId !== officialSessionId) {
+      throw new Error(
+        "Codex hook session_id conflicts with another supplied session alias.",
+      );
+    }
   } catch (error) {
-    const message = `OTM hook diagnostic: conflicting session identity; no route state was read or changed. ${redactSensitiveText(error?.message || String(error))}`;
+    const message = `OTM hook diagnostic: invalid or missing official session identity; no route state was read or changed. ${redactSensitiveText(error?.message || String(error))}`;
+    if (eventName === "pre-tool-use" && isOdcBackgroundDispatch(input)) {
+      return emitJson({
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: `OTM blocked this ODC background-work call because the official Codex session identity is missing or conflicting. ${message}`,
+        },
+      });
+    }
     return emitJson(
       eventName === "stop"
         ? { decision: "block", reason: message, suppressOutput: true }
@@ -50,38 +84,231 @@ export async function runHookScript(
   }
   let result;
   if (
-    !claimHookInvocation({ eventName, input, workspaceRoot, sessionId, env })
+    !claimHookInvocation({
+      eventName,
+      input,
+      workspaceRoot,
+      sessionId,
+      env: hookEnv,
+    })
   ) {
     result = { continue: true, suppressOutput: true };
   } else {
-    const manager = createTaskManager({ cwd: workspaceRoot, env });
-    switch (eventName) {
-      case "session-start":
-        result = handleSessionStart(manager, input, workspaceRoot, env);
-        break;
-      case "user-prompt-submit":
-        result = handleUserPromptSubmit(manager, input, workspaceRoot, env);
-        break;
-      case "pre-tool-use":
-        result = handlePreToolUse(manager, input, workspaceRoot, env);
-        break;
-      case "post-tool-use":
-        result = handlePostToolUse(manager, input, workspaceRoot, env);
-        break;
-      case "pre-compact":
-        result = handlePreCompact(manager, input, workspaceRoot, env);
-        break;
-      case "post-compact":
-        result = handlePostCompact(manager, input, workspaceRoot, env);
-        break;
-      case "stop":
-        result = handleStop(manager, input, workspaceRoot, env);
-        break;
-      default:
-        result = { continue: true, suppressOutput: true };
+    const manager = createTaskManager({ cwd: workspaceRoot, env: hookEnv });
+    const actualEventName =
+      input.hook_event_name || codexHookEventName(eventName);
+    const isOdcDispatch =
+      eventName === "pre-tool-use" && isOdcBackgroundDispatch(input);
+    try {
+      // Record the route-scoped activity before dispatch. A concurrent owner
+      // transfer then sees this newer event, and a stale owner cannot proceed
+      // after the transfer CAS has changed the binding.
+      if (eventName === "pre-tool-use") {
+        recordCodexHostObservation(
+          manager,
+          eventName,
+          input,
+          workspaceRoot,
+          sessionId,
+          { activityOnly: true },
+        );
+      }
+      const observation = await recordTrustedCodexHostObservation(
+        manager,
+        actualEventName,
+        input,
+        workspaceRoot,
+        sessionId,
+        hookEnv,
+      );
+      if (
+        isOdcDispatch &&
+        (!observation || observation.dispatchAllowed !== true)
+      ) {
+        const code = observation?.code || "HOST_OBSERVER_UNAVAILABLE";
+        result = {
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "deny",
+            permissionDecisionReason: `OTM blocked this ODC background-work call because trusted owner coverage was not recorded (${code}). Resolve the host evidence issue, then retry the exact operation.`,
+          },
+        };
+      } else {
+        switch (eventName) {
+          case "session-start":
+            result = handleSessionStart(manager, input, workspaceRoot, hookEnv);
+            break;
+          case "user-prompt-submit":
+            result = handleUserPromptSubmit(
+              manager,
+              input,
+              workspaceRoot,
+              hookEnv,
+            );
+            break;
+          case "pre-tool-use":
+            result = handlePreToolUse(manager, input, workspaceRoot, hookEnv);
+            break;
+          case "post-tool-use":
+          case "post-tool-use-failure":
+            result = handlePostToolUse(manager, input, workspaceRoot, hookEnv);
+            break;
+          case "subagent-start":
+          case "subagent-stop":
+            result = { continue: true, suppressOutput: true };
+            break;
+          case "pre-compact":
+            result = handlePreCompact(manager, input, workspaceRoot, hookEnv);
+            break;
+          case "post-compact":
+            result = handlePostCompact(manager, input, workspaceRoot, hookEnv);
+            break;
+          case "stop":
+            result = handleStop(
+              manager,
+              input,
+              workspaceRoot,
+              hookEnv,
+              observation,
+            );
+            break;
+          default:
+            result = { continue: true, suppressOutput: true };
+        }
+      }
+      if (eventName === "pre-tool-use") {
+        const blockedOdc =
+          isOdcDispatch &&
+          result?.hookSpecificOutput?.permissionDecision === "deny";
+        if (!blockedOdc) {
+          recordCodexHostObservation(
+            manager,
+            eventName,
+            input,
+            workspaceRoot,
+            sessionId,
+            { workOnly: true },
+          );
+        }
+      } else {
+        recordCodexHostObservation(
+          manager,
+          eventName,
+          input,
+          workspaceRoot,
+          sessionId,
+        );
+      }
+    } catch (error) {
+      if (isOdcDispatch) {
+        result = {
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "deny",
+            permissionDecisionReason: `OTM blocked this ODC background-work call because its pre-dispatch owner receipt failed. ${redactSensitiveText(error?.message || String(error))}`,
+          },
+        };
+      } else if (eventName === "stop" && !isActiveStopHook(input)) {
+        result = {
+          decision: "block",
+          reason: `OTM could not verify settled host work before Stop. ${redactSensitiveText(error?.message || String(error))} Resolve the exact host evidence or route-history error, then retry.`,
+        };
+      }
+      cleanupDiagnostic = [
+        cleanupDiagnostic,
+        `OTM hook diagnostic: provider liveness evidence was not recorded. ${redactSensitiveText(error?.message || String(error))}`,
+      ]
+        .filter(Boolean)
+        .join("\n");
     }
   }
   return emitJson(appendHookDiagnostic(result, cleanupDiagnostic));
+}
+
+async function recordTrustedCodexHostObservation(
+  manager,
+  eventName,
+  input,
+  workspaceRoot,
+  sessionId,
+  env,
+) {
+  const modulePath = resolveHostEvidenceModulePath(env);
+  if (!sessionId) return null;
+  if (!modulePath) return null;
+  const providerSession = createProviderSession({
+    provider: "codex",
+    nativeSessionId: sessionId,
+  });
+  const current = manager.snapshot({ workspaceRoot, sessionId, write: false });
+  const run =
+    current.run?.metadata?.providerSession?.provider === "codex" &&
+    current.run.metadata.providerSession.nativeSessionId === sessionId
+      ? current.run
+      : null;
+  const module = await loadHostEvidenceModule(modulePath);
+  if (!module.observeHostHook) return null;
+  return module.observeHostHook({
+    schemaVersion: "otm.host-hook-observation.v1",
+    provider: "codex",
+    eventName,
+    payload: input,
+    workspaceRoot,
+    nativeSessionId: sessionId,
+    providerSessionKey: providerSession.providerSessionKey,
+    sessionId: providerSession.sessionId,
+    run,
+    routeRevision: run?.routeRevision ?? null,
+  });
+}
+
+function codexHookEventName(eventName) {
+  return (
+    {
+      "session-start": "SessionStart",
+      "user-prompt-submit": "UserPromptSubmit",
+      "pre-tool-use": "PreToolUse",
+      "post-tool-use": "PostToolUse",
+      "post-tool-use-failure": "PostToolUseFailure",
+      "subagent-start": "SubagentStart",
+      "subagent-stop": "SubagentStop",
+      "pre-compact": "PreCompact",
+      "post-compact": "PostCompact",
+      stop: "Stop",
+    }[eventName] || eventName
+  );
+}
+
+function isOdcBackgroundDispatch(input) {
+  const name = String(input?.tool_name || "");
+  const prefix = "mcp__desktop-commander__";
+  if (!name.startsWith(prefix)) return false;
+  let operation = name.slice(prefix.length);
+  let action = String(input?.tool_input?.action || "").toLowerCase();
+  if (operation === "system_write") {
+    operation = String(input?.tool_input?.operationId || "");
+    if (!operation) return false;
+  }
+  const asynchronousOperations = new Set([
+    "process_job",
+    "script_job",
+    "execution_provider",
+    "agent_delegate",
+    "orchestration",
+    "process_run",
+    "script_run",
+    "youtube_media",
+    "audio_analysis",
+    "media_proxy_pool",
+    "provider_contract",
+    "batch_execute",
+  ]);
+  if (!asynchronousOperations.has(operation)) return false;
+  if (["status", "output", "get", "list", "inspect", "search"].includes(action))
+    return false;
+  // Unknown actions on a known asynchronous route require trusted host review;
+  // a missing or changed schema must not bypass the pre-dispatch gate.
+  return true;
 }
 
 function appendHookDiagnostic(result, diagnostic) {
@@ -137,6 +364,16 @@ function handleSessionStart(manager, input, workspaceRoot, env) {
   const syncMessage = agentsSync.ok
     ? `AGENTS.md managed instructions: ${agentsSync.action}.`
     : `AGENTS.md managed instructions were not synchronized: ${agentsSync.reason}`;
+  if (input.source === "compact") {
+    return {
+      continue: true,
+      suppressOutput: true,
+      hookSpecificOutput: {
+        hookEventName: "SessionStart",
+        additionalContext: `${context}\n${syncMessage}`,
+      },
+    };
+  }
   return {
     continue: true,
     suppressOutput: true,
@@ -198,6 +435,7 @@ function handleUserPromptSubmit(manager, input, workspaceRoot, env) {
       screenshots: input.screenshots,
       images: input.images,
       source: "hook-auto-start",
+      providerContext: providerContextFor(sessionId),
       hookEventName:
         input.hook_event_name || input.hookEventName || "UserPromptSubmit",
       invocationId:
@@ -293,6 +531,122 @@ function handleUserPromptSubmit(manager, input, workspaceRoot, env) {
   };
 }
 
+function recordCodexHostObservation(
+  manager,
+  eventName,
+  input,
+  workspaceRoot,
+  sessionId,
+  { activityOnly = false, workOnly = false } = {},
+) {
+  if (!sessionId) return;
+  const current = manager.snapshot({ workspaceRoot, sessionId, write: false });
+  const run = current.run;
+  const providerSession = run?.metadata?.providerSession;
+  if (
+    !run ||
+    providerSession?.provider !== "codex" ||
+    providerSession.nativeSessionId !== sessionId
+  )
+    return;
+  const provider = createProviderSession({
+    provider: "codex",
+    nativeSessionId: sessionId,
+  });
+  const common = {
+    provider: "codex",
+    providerSessionKey: provider.providerSessionKey,
+    ownerSessionId: sessionId,
+    nativeSessionId: sessionId,
+    hookEventName: input.hook_event_name || eventName,
+  };
+  const operationId = (kind) =>
+    crypto
+      .createHash("sha256")
+      .update(
+        `${provider.providerSessionKey}:${eventName}:${input.tool_use_id || input.toolUseId || input.turn_id || "session"}:${kind}:${Date.now()}`,
+      )
+      .digest("hex");
+  const observations = activityOnly
+    ? [
+        {
+          eventType: "provider_session_activity",
+          payload: { ...common, activityKind: eventName },
+        },
+      ]
+    : workOnly
+      ? []
+      : [
+          {
+            eventType: "provider_session_activity",
+            payload: { ...common, activityKind: eventName },
+          },
+        ];
+  const toolId = input.tool_use_id || input.toolUseId;
+  const agentId = input.agent_id || input.agentId;
+  const isOtmTool = String(input.tool_name || "").includes(
+    "overtli_task_manager",
+  );
+  if (
+    !activityOnly &&
+    !isOtmTool &&
+    (eventName === "pre-tool-use" || eventName === "post-tool-use")
+  ) {
+    observations.push({
+      eventType:
+        eventName === "pre-tool-use"
+          ? "provider_host_work_started"
+          : "provider_host_work_settled",
+      payload: {
+        ...common,
+        workId: typeof toolId === "string" && toolId ? `tool:${toolId}` : null,
+        workLabel: "Codex tool use",
+      },
+    });
+  }
+  if (eventName === "subagent-start" || eventName === "subagent-stop") {
+    const validAgentId =
+      typeof agentId === "string" && agentId.trim() && agentId.length <= 256;
+    observations.push({
+      eventType:
+        eventName === "subagent-start"
+          ? "provider_host_work_started"
+          : "provider_host_work_settled",
+      payload: {
+        ...common,
+        workId: validAgentId ? `subagent:${agentId.trim()}` : null,
+        workLabel: "Codex subagent",
+        agentType:
+          typeof input.agent_type === "string" && input.agent_type.length <= 128
+            ? input.agent_type
+            : null,
+      },
+    });
+  }
+  for (const observation of observations) {
+    manager.recordOwnedEvent({
+      runId: run.id,
+      sessionId,
+      expectedRevision: run.routeRevision,
+      ...observation,
+      context: {
+        operationId: operationId(observation.eventType),
+        hookEventName: common.hookEventName,
+        turnId: input.turn_id || null,
+      },
+    });
+  }
+}
+
+function providerContextFor(nativeSessionId) {
+  const session = createProviderSession({ provider: "codex", nativeSessionId });
+  return {
+    provider: session.provider,
+    providerSessionKey: session.providerSessionKey,
+    nativeSessionId,
+  };
+}
+
 function handlePreToolUse(manager, input, workspaceRoot, env) {
   const sessionId = resolveSessionId(input, env);
   if (!sessionId) return { continue: true, suppressOutput: true };
@@ -379,34 +733,43 @@ function hookDiagnostic(context, error) {
 function handlePreCompact(manager, input, workspaceRoot, env) {
   const sessionId = resolveSessionId(input, env);
   if (!sessionId) return { continue: true, suppressOutput: true };
-  const snap = manager.snapshot({
+  const snap = manager.snapshot({ workspaceRoot, sessionId, write: false });
+  if (!snap.run) return { continue: true, suppressOutput: true };
+  const adapter = createProviderAdapter({
+    provider: "codex",
+    nativeSessionId: sessionId,
     workspaceRoot,
-    sessionId,
-    lastUpdate: {
-      kind: "pre_compact",
-      message: "Route saved before context compaction.",
-      at: new Date().toISOString(),
-    },
+    env,
+    store: manager.store,
   });
-  return { continue: true, suppressOutput: true, systemMessage: snap.markdown };
+  try {
+    adapter.checkpoint({
+      runId: snap.run.id,
+      workspaceRoot,
+      checkpointKey: `codex-compact:${input.trigger || "unknown"}:${snap.run.routeRevision}`,
+    });
+  } catch (error) {
+    return hookDiagnostic("canonical route checkpoint was not recorded", error);
+  } finally {
+    adapter.close();
+  }
+  return { continue: true, suppressOutput: true };
 }
 
 function handlePostCompact(manager, input, workspaceRoot, env) {
   const sessionId = resolveSessionId(input, env);
   if (!sessionId) return { continue: true, suppressOutput: true };
-  const snap = manager.snapshot({
-    workspaceRoot,
-    sessionId,
-    lastUpdate: {
-      kind: "post_compact",
-      message: "Route restored after context compaction.",
-      at: new Date().toISOString(),
-    },
-  });
-  return { continue: true, suppressOutput: true, systemMessage: snap.markdown };
+  manager.snapshot({ workspaceRoot, sessionId, write: false });
+  return { continue: true, suppressOutput: true };
 }
 
-function handleStop(manager, input, workspaceRoot, env) {
+function handleStop(
+  manager,
+  input,
+  workspaceRoot,
+  env,
+  hostObservation = null,
+) {
   const sessionId = resolveSessionId(input, env);
   // Codex marks a Stop invocation triggered by prior Stop-hook feedback. Never
   // block that follow-up again: doing so creates an unbounded continuation loop
@@ -462,6 +825,22 @@ function handleStop(manager, input, workspaceRoot, env) {
       decision: "block",
       reason: `Overtli Task Manager audit blocked the stop. Continue the current route segment: ${current.title} (${current.status}). ${remainingCount > 1 ? `${remainingCount - 1} later required segment${remainingCount === 2 ? "" : "s"} remain queued.` : "This is the final required segment."}\n\nRecord the next concrete internal-step evidence, complete this segment only when its required internal steps are terminal, then continue directly to the returned next segment. The hook will finalize and clear automatically once the audit passes.`,
       otmIdentity: audit.canonicalIdentity,
+    };
+  }
+  const workBlocker = codexStopWorkBlocker(
+    manager,
+    audit.run,
+    sessionId,
+    hostObservation,
+  );
+  if (workBlocker) {
+    return {
+      decision: "block",
+      reason: `Overtli Task Manager cannot finalize this route while host work is active or unknown (${workBlocker}). Wait for the exact tools and subagents to settle, verify trusted owner coverage and complete OTM hook receipts, then retry Stop.`,
+      otmIdentity: {
+        ...audit.canonicalIdentity,
+        modelReasoningRequired: false,
+      },
     };
   }
   if (
@@ -540,6 +919,59 @@ function handleStop(manager, input, workspaceRoot, env) {
   };
 }
 
+function codexStopWorkBlocker(manager, run, sessionId, hostObservation) {
+  const coverage = hostObservation?.coverage;
+  if (hostObservation !== null) {
+    if (
+      hostObservation?.observed !== true ||
+      coverage?.complete !== true ||
+      !Number.isSafeInteger(coverage.pendingCount) ||
+      coverage.pendingCount < 0
+    ) {
+      return safeBlockerCode(
+        hostObservation?.code || coverage?.code || "HOST_WORK_UNKNOWN",
+      );
+    }
+    if (coverage.pendingCount > 0) return "ODC_WORK_PENDING";
+  }
+
+  try {
+    const history = manager.store.getEventSnapshot?.(run.id, 10_000);
+    if (
+      !history ||
+      !Array.isArray(history.events) ||
+      !Number.isSafeInteger(history.totalCount) ||
+      history.totalCount < 0 ||
+      history.events.length !== history.totalCount
+    ) {
+      return "OTM_EVENT_HISTORY_INCOMPLETE";
+    }
+    const providerSession = run.metadata?.providerSession;
+    if (!providerSession) return null;
+    if (
+      providerSession.provider !== "codex" ||
+      providerSession.nativeSessionId !== sessionId
+    )
+      return "OWNER_ACTIVITY_UNKNOWN";
+    const ownerEvents = history.events.filter(
+      (event) =>
+        event?.payload?.ownerSessionId === sessionId &&
+        event?.payload?.providerSessionKey ===
+          providerSession.providerSessionKey,
+    );
+    if (findPendingWork(ownerEvents).length > 0) return "HOST_WORK_PENDING";
+  } catch {
+    return "OTM_EVENT_HISTORY_UNAVAILABLE";
+  }
+  return null;
+}
+
+function safeBlockerCode(value) {
+  return typeof value === "string" && /^[A-Z][A-Z0-9_-]{1,79}$/.test(value)
+    ? value
+    : "HOST_WORK_UNKNOWN";
+}
+
 function isActiveStopHook(input) {
   const value = input.stop_hook_active ?? input.stopHookActive;
   return (
@@ -568,7 +1000,9 @@ function claimHookInvocation({
     input.invocation_id ||
     input.invocationId ||
     input.tool_use_id ||
-    input.toolUseId;
+    input.toolUseId ||
+    input.agent_id ||
+    input.agentId;
   // A turn may contain many tool calls. Without a host-issued tool identity,
   // distinguish them with the complete payload rather than collapsing the
   // entire turn into one claim. Non-tool events retain a stable turn fallback.

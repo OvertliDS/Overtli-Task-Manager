@@ -881,6 +881,143 @@ export class SqliteStore {
     });
   }
 
+  /** Atomically transfer one active route and both session bindings. */
+  transferRunOwnership({
+    runId,
+    fromSessionId,
+    toSessionId,
+    expectedRevision,
+    expectedOwnerActivityEventId,
+    fromProviderSessionKey,
+    event,
+    toProviderContext = null,
+    updatedAt = nowIso(),
+  }) {
+    return this.transaction(() => {
+      const run = this.getRun(runId);
+      if (!run) throw new OtmError("Run not found.", { code: "RUN_NOT_FOUND" });
+      if ((run.sessionId || null) !== fromSessionId) {
+        throw new OtmError("Route ownership changed before continuation.", {
+          code: "SESSION_SCOPE_MISMATCH",
+        });
+      }
+      if (Number(run.routeRevision || 1) !== Number(expectedRevision)) {
+        throw new OtmError("Route revision conflict.", {
+          code: "REVISION_CONFLICT",
+          details: { expectedRevision, currentRevision: run.routeRevision || 1, runId },
+        });
+      }
+        const latestOwnerActivity = this.db
+          .prepare(
+            `SELECT id FROM events WHERE run_id = ? AND event_type = 'provider_session_activity'
+            AND json_extract(payload_json, '$.ownerSessionId') = ?
+            AND json_extract(payload_json, '$.providerSessionKey') = ?
+            ORDER BY created_at DESC, id DESC LIMIT 1`,
+          )
+          .get(runId, fromSessionId, fromProviderSessionKey);
+        if (!expectedOwnerActivityEventId || latestOwnerActivity?.id !== expectedOwnerActivityEventId) {
+          throw new OtmError("The prior owner recorded fresh activity during continuation inspection; inspect again before retrying.", {
+            code: "OWNER_ACTIVITY_CHANGED",
+            details: { runId },
+          });
+        }
+      if (!["active", "ready_to_finalize", "blocked", "paused"].includes(run.status)) {
+        throw new OtmError("Only an active route can change owners.", {
+          code: "RUN_NOT_ACTIVE",
+          details: { runId, status: run.status },
+        });
+      }
+      const oldBinding = this.getCanonicalBinding(fromSessionId);
+      if (!oldBinding || oldBinding.currentRunId !== runId) {
+        throw new OtmError("The prior owner's canonical route binding is missing or changed.", {
+          code: "CANONICAL_BINDING_INVALID",
+          details: { runId },
+        });
+      }
+      const newBinding = this.getCanonicalBinding(toSessionId);
+      if (newBinding?.currentRunId && newBinding.currentRunId !== runId) {
+        const conflictingRun = this.getRun(newBinding.currentRunId);
+        if (conflictingRun && ["active", "ready_to_finalize", "blocked", "paused"].includes(conflictingRun.status)) {
+          throw new OtmError("The receiving provider session already owns an active route.", {
+            code: "PROVIDER_SESSION_ALREADY_OWNS_ROUTE",
+            details: { conflictingRunId: conflictingRun.id },
+          });
+        }
+      }
+
+      const at = updatedAt;
+      this.#writeCanonicalBinding({
+        ...oldBinding,
+        currentRunId: null,
+        status: "empty",
+        lastResolution: {
+          kind: "ownership_transferred",
+          canonicalTaskId: null,
+          previousRunId: runId,
+          modelReasoningRequired: false,
+          at,
+        },
+        updatedAt: at,
+      });
+      this.#writeCanonicalBinding({
+        ...newBinding,
+        rootSessionId: toSessionId,
+        currentRunId: runId,
+        primaryWorkspace: run.workspaceRoot,
+        workspaceAliases: [...(newBinding?.workspaceAliases || []), run.workspaceRoot],
+        status: "bound",
+        lastResolution: {
+          kind: "explicit_provider_continuation",
+          canonicalTaskId: runId,
+          primaryWorkspace: run.workspaceRoot,
+          modelReasoningRequired: true,
+          at,
+        },
+        updatedAt: at,
+      });
+      const result = this.db.prepare(
+        `UPDATE runs SET session_id=?, route_revision=?, updated_at=?, metadata_json=? WHERE id=? AND session_id=? AND route_revision=?`,
+      ).run(
+        toSessionId,
+        Number(run.routeRevision || 1) + 1,
+        at,
+        JSON.stringify(toProviderContext ? { ...(run.metadata || {}), providerSession: toProviderContext } : (run.metadata || {})),
+        runId,
+        fromSessionId,
+        Number(expectedRevision),
+      );
+      if (!result.changes) {
+        throw new OtmError("Route ownership changed before continuation.", {
+          code: "REVISION_CONFLICT",
+          details: { expectedRevision, runId },
+        });
+      }
+      if (event) this.recordEvent(event);
+      return this.getRun(runId);
+    }, { immediate: true });
+  }
+
+  /** Record a provider hook event only while its captured owner and revision remain current. */
+  recordOwnedEvent({ runId, sessionId, expectedRevision, event }) {
+    return this.transaction(() => {
+      const run = this.getRun(runId);
+      if (!run) throw new OtmError("Run not found.", { code: "RUN_NOT_FOUND" });
+      if ((run.sessionId || null) !== sessionId) {
+        throw new OtmError("Route ownership changed before the event was recorded.", {
+          code: "SESSION_SCOPE_MISMATCH",
+        });
+      }
+      if (Number(run.routeRevision || 1) !== Number(expectedRevision)) {
+        throw new OtmError("Route revision conflict.", {
+          code: "REVISION_CONFLICT",
+          details: { expectedRevision, currentRevision: run.routeRevision || 1, runId },
+        });
+      }
+      this.recordEvent(event);
+      return event;
+    }, { immediate: true });
+  }
+
   updateRun(id, patch) {
     const current = this.getRun(id);
     if (!current) return null;
@@ -1225,6 +1362,19 @@ export class SqliteStore {
       )
       .all(runId, limit)
       .map(fromEventRow);
+  }
+
+  getEventSnapshot(runId, limit = 10_000) {
+    const rows = this.db
+      .prepare(
+        `SELECT *, COUNT(*) OVER() AS total_count FROM events
+        WHERE run_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`,
+      )
+      .all(runId, limit);
+    return {
+      events: rows.map(fromEventRow).reverse(),
+      totalCount: Number(rows[0]?.total_count || 0),
+    };
   }
 
   upsertSummary(summary) {

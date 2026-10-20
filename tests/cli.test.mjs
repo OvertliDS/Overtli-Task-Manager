@@ -4,10 +4,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createTaskManager } from "../src/core/manager.mjs";
 import { currentJsonPath } from "../src/core/fs-utils.mjs";
 import { handleCli } from "../src/cli/commands.mjs";
+import { createProviderSession } from "../src/core/provider-session.mjs";
 
 function tempWorkspace(prefix = "otm-cli-test-") {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -76,6 +78,206 @@ test("CLI help and version are store-free and flags are strict", async () => {
       }),
     /--limit must be an integer/,
   );
+});
+
+test("Codex shared CLI reads the canonical Claude route and explicitly continues it", async () => {
+  const workspaceRoot = tempWorkspace("otm-shared-cli-workspace-");
+  const stateDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "otm-shared-cli-state-"),
+  );
+  const observerPath = path.join(stateDir, "trusted-host-inspector.mjs");
+  fs.writeFileSync(
+    observerPath,
+    `import crypto from "node:crypto";
+export function inspectOwnerWork(input) {
+  const observedAt = new Date().toISOString();
+  const ownerSessionId = input.ownerSession.nativeSessionId;
+  const sources = input.requiredSources.map((id) => ({
+    id, status: "complete", ownerSessionId, observedAt,
+    activeWorkCount: 0, unknownWorkCount: 0,
+    evidenceRefs: [{
+      recordId: id + ":current-owner",
+      ownerSessionId, observedAt,
+      path: "fixture://" + id,
+      sha256: crypto.createHash("sha256").update(id).digest("hex"),
+    }],
+  }));
+  return {
+    schemaVersion: "otm.host-continuation-evidence.v1",
+    complete: true, runId: input.runId, routeRevision: input.routeRevision,
+    owner: input.ownerSession, lastActivityAt: input.activityAt,
+    activityEventId: input.activityEventId, observedAt,
+    activeWorkCount: 0, unknownWorkCount: 0, blockers: [], sources,
+  };
+}
+`,
+  );
+  const receivingSessionId = "codex-shared-cli-recipient";
+  const env = {
+    ...process.env,
+    CODEX_THREAD_ID: receivingSessionId,
+    OTM_STORAGE: "json",
+    OTM_STATE_DIR: stateDir,
+    OTM_HOST_EVIDENCE_MODULE: observerPath,
+  };
+  const packageRoot = fileURLToPath(new URL("..", import.meta.url));
+  const ownerEnv = { ...env };
+  delete ownerEnv.CODEX_THREAD_ID;
+  const manager = createTaskManager({ cwd: workspaceRoot, env: ownerEnv });
+  const claude = createProviderSession({
+    provider: "claude",
+    nativeSessionId: "claude-shared-cli-owner",
+  });
+  const route = manager.start({
+    workspaceRoot,
+    sessionId: claude.sessionId,
+    providerContext: { ...claude, nativeSessionId: "claude-shared-cli-owner" },
+    goal: "Continue one canonical route across providers",
+    prompt: "Expose the route to another provider without copying its history.",
+    tasks: [
+      {
+        title: "Continue the shared route",
+        internalSteps: [
+          {
+            title: "Verify shared route ownership transfer",
+            source: "test_fixture",
+            atomic: true,
+            atomicRationale: "Exercise the Codex CLI continuation entry point.",
+          },
+        ],
+        metadata: {
+          decomposition: {
+            version: 2,
+            source: "test_fixture",
+            needsModelReview: false,
+          },
+        },
+      },
+    ],
+  });
+  const activityAt = new Date(Date.now() - 20 * 60_000).toISOString();
+  const activity = {
+    id: `activity-${crypto.randomUUID()}`,
+    runId: route.run.id,
+    turnId: null,
+    hookEventName: "SessionEnd",
+    eventType: "provider_session_activity",
+    idempotencyKey: `activity-${crypto.randomUUID()}`,
+    payload: {
+      ownerSessionId: claude.sessionId,
+      providerSessionKey: claude.providerSessionKey,
+      provider: "claude",
+      nativeSessionId: "claude-shared-cli-owner",
+      activityKind: "SessionEnd",
+    },
+    createdAt: activityAt,
+  };
+  manager.store.recordEvent(activity);
+  manager.close();
+
+  const sharedHistory = JSON.parse(
+    (
+      await capture(() =>
+        handleCli({
+          argv: ["shared-history", "--workspace", workspaceRoot, "--json"],
+          cwd: workspaceRoot,
+          stdin: "",
+          packageRoot,
+          env,
+        }),
+      )
+    ).at(-1),
+  );
+  assert.equal(sharedHistory.runs[0].id, route.run.id);
+  assert.equal(
+    sharedHistory.runs[0].metadata.providerSession.provider,
+    "claude",
+  );
+  assert.equal(
+    JSON.stringify(sharedHistory).includes("claude-shared-cli-owner"),
+    false,
+  );
+  assert.equal(
+    JSON.stringify(sharedHistory).includes("providerSessionKey"),
+    false,
+  );
+
+  const sharedTask = JSON.parse(
+    (
+      await capture(() =>
+        handleCli({
+          argv: [
+            "shared-task",
+            "--run-id",
+            route.run.id,
+            "--workspace",
+            workspaceRoot,
+            "--json",
+          ],
+          cwd: workspaceRoot,
+          stdin: "",
+          packageRoot,
+          env,
+        }),
+      )
+    ).at(-1),
+  );
+  assert.equal(sharedTask.run.id, route.run.id);
+  assert.equal(sharedTask.run.sessionId, undefined);
+
+  await assert.rejects(
+    () =>
+      handleCli({
+        argv: [
+          "continue-task",
+          "--run-id",
+          route.run.id,
+          "--expected-revision",
+          String(route.run.routeRevision),
+          "--session-id",
+          "claude-shared-cli-owner",
+          "--workspace",
+          workspaceRoot,
+        ],
+        cwd: workspaceRoot,
+        stdin: "",
+        packageRoot,
+        env,
+      }),
+    /does not accept --session-id/,
+  );
+
+  await capture(() =>
+    handleCli({
+      argv: [
+        "continue-task",
+        "--run-id",
+        route.run.id,
+        "--expected-revision",
+        String(route.run.routeRevision),
+        "--workspace",
+        workspaceRoot,
+        "--json",
+      ],
+      cwd: workspaceRoot,
+      stdin: "",
+      packageRoot,
+      env,
+    }),
+  );
+  const verify = createTaskManager({ cwd: workspaceRoot, env });
+  const transferred = verify.snapshot({
+    workspaceRoot,
+    sessionId: receivingSessionId,
+    write: false,
+  });
+  assert.equal(transferred.run.id, route.run.id);
+  assert.equal(transferred.run.metadata.providerSession.provider, "codex");
+  assert.equal(
+    transferred.run.metadata.providerSession.nativeSessionId,
+    receivingSessionId,
+  );
+  verify.close();
 });
 
 test("CLI doctor reports malformed state and raw consistency issues without mutation", async () => {

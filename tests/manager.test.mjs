@@ -2778,7 +2778,8 @@ test("synthesized progress history cannot replace explicit route completion proo
     message: "The manual documentation review is complete.",
     evidence: {
       kind: "manual_note",
-      summary: "Reviewed the relevant docs and confirmed the required behavior.",
+      summary:
+        "Reviewed the relevant docs and confirmed the required behavior.",
     },
     internalStepId: "step_docs",
     internalStepStatus: "done",
@@ -3203,8 +3204,12 @@ test("workspace installer is idempotent and preserves existing guidance", () => 
   const hooks = JSON.parse(
     fs.readFileSync(path.join(workspaceRoot, ".codex/hooks.json"), "utf8"),
   ).hooks;
-  assert.equal(hooks.PreToolUse.at(-1).matcher, "Bash|apply_patch");
-  assert.equal(hooks.PostToolUse.at(-1).matcher, "Bash|apply_patch");
+  assert.equal(hooks.PreToolUse.at(-1).matcher, "*");
+  assert.equal(hooks.PostToolUse.at(-1).matcher, "*");
+  assert.equal(
+    hooks.SessionStart.at(-1).matcher,
+    "startup|resume|clear|compact|fork",
+  );
   assert.equal(hooks.PreToolUse.at(-1).hooks[0].timeout, 8);
   assert.equal(hooks.Stop.at(-1).hooks[0].timeout, 45);
   const expectedCli = path.join(packageRoot, "bin", "otm.mjs");
@@ -3773,6 +3778,7 @@ test("session start creates and refreshes only the managed AGENTS.md block", asy
       env,
       stdin: JSON.stringify({
         cwd: emptyWorkspace,
+        session_id: "session-agents-workspace",
         hook_event_name: "SessionStart",
         invocation_id: "agents-create",
       }),
@@ -3801,6 +3807,7 @@ test("session start creates and refreshes only the managed AGENTS.md block", asy
       env,
       stdin: JSON.stringify({
         cwd: workspaceRoot,
+        session_id: "session-agents-workspace",
         hook_event_name: "SessionStart",
         invocation_id: "agents-first",
       }),
@@ -3828,6 +3835,7 @@ test("session start creates and refreshes only the managed AGENTS.md block", asy
       env,
       stdin: JSON.stringify({
         cwd: workspaceRoot,
+        session_id: "session-agents-workspace",
         hook_event_name: "SessionStart",
         invocation_id: "agents-second",
       }),
@@ -3859,6 +3867,7 @@ test("session start honors explicit AGENTS.md synchronization opt-out", async ()
       env,
       stdin: JSON.stringify({
         cwd: emptyWorkspace,
+        session_id: "session-agents-opt-out",
         hook_event_name: "SessionStart",
         invocation_id: "agents-default-empty",
       }),
@@ -4566,7 +4575,11 @@ test("identity-less hooks cannot read or mutate legacy route state", async () =>
     /Legacy private route|Do not expose this task/,
   );
   assert.equal(postTool.result.continue, true);
-  assert.equal(stop.result.continue, true);
+  assert.equal(stop.result.decision, "block");
+  assert.match(
+    stop.result.reason,
+    /official Codex hook payload must contain session_id/,
+  );
   assert.equal(manager.store.getEvents(legacy.run.id).length, before);
   assert.equal(manager.store.getRun(legacy.run.id).status, "active");
 });

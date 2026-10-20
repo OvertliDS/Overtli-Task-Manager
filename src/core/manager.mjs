@@ -73,6 +73,82 @@ export function createTaskManager(options = {}) {
     return event;
   }
 
+  function recordOwnedEvent(args = {}) {
+    const run = store.getRun(args.runId);
+    assertCondition(run, `Run not found: ${args.runId}`, "RUN_NOT_FOUND");
+    assertCondition(
+      run.sessionId === args.sessionId,
+      "Route belongs to a different provider session.",
+      "SESSION_SCOPE_MISMATCH",
+    );
+    const event = buildEvent(
+      run.id,
+      args.eventType,
+      args.payload || {},
+      args.context || {},
+    );
+    return store.recordOwnedEvent({
+      runId: run.id,
+      sessionId: args.sessionId,
+      expectedRevision: args.expectedRevision,
+      event,
+    });
+  }
+
+  function transferRunOwnership(args = {}) {
+    assertCondition(
+      typeof args.runId === "string" && args.runId.trim(),
+      "runId is required for continuation.",
+      "RUN_ID_REQUIRED",
+    );
+    assertCondition(
+      typeof args.fromSessionId === "string" && args.fromSessionId.trim(),
+      "The current route owner is required for continuation.",
+      "SESSION_SCOPE_MISMATCH",
+    );
+    assertCondition(
+      typeof args.toSessionId === "string" && args.toSessionId.trim() && args.fromSessionId !== args.toSessionId,
+      "A different receiving provider session is required for continuation.",
+      "INVALID_PROVIDER_CONTINUATION",
+    );
+    const run = store.getRun(args.runId);
+    assertCondition(run, `Run not found: ${args.runId}`, "RUN_NOT_FOUND");
+    const at = nowIso();
+    const event = buildEvent(
+      run.id,
+      "provider_run_ownership_transferred",
+      {
+        fromSessionId: args.fromSessionId,
+        toSessionId: args.toSessionId,
+        fromProviderSessionKey: args.fromProviderSessionKey || null,
+        toProviderSessionKey: args.toProviderSessionKey || null,
+        priorRouteRevision: Number(args.expectedRevision),
+        priorOwnerActivityEventId: args.expectedOwnerActivityEventId || null,
+        evidenceSource: args.evidenceSource,
+        evidenceObservedAt: args.evidenceObservedAt,
+        evidenceRefs: args.evidenceRefs || [],
+      },
+      { operationId: args.operationId },
+    );
+    const next = store.transferRunOwnership({
+      runId: run.id,
+      fromSessionId: args.fromSessionId,
+      toSessionId: args.toSessionId,
+      expectedRevision: args.expectedRevision,
+      expectedOwnerActivityEventId: args.expectedOwnerActivityEventId,
+      fromProviderSessionKey: args.fromProviderSessionKey,
+      event,
+      toProviderContext: args.toProviderContext,
+      updatedAt: at,
+    });
+    const snapshot = snapshotForRun(next, {
+        kind: "provider_continuation",
+        message: "This provider explicitly accepted exclusive ownership of the shared route.",
+        at,
+      }, { write: false });
+    return { run: next, snapshot, markdown: renderSnapshotMarkdown(snapshot) };
+  }
+
   function buildEvent(runId, eventType, payload = {}, context = {}) {
     return {
       id: newId("evt"),
@@ -1107,6 +1183,7 @@ export function createTaskManager(options = {}) {
       metadata: {
         gitBranch: args.gitBranch || null,
         source: args.source || "mcp",
+        providerSession: args.providerContext || undefined,
         promptPreview: plannerPrompt.slice(0, 500),
         sourceContext,
       },
@@ -2748,6 +2825,31 @@ ${cleared.markdown || ""}`,
     return { run, snapshot: snap, markdown: renderSnapshotMarkdown(snap) };
   }
 
+  function snapshotShared(args = {}) {
+    assertCondition(
+      args.write === false,
+      "Shared route access is read-only.",
+      "SHARED_ROUTE_READ_ONLY",
+    );
+    assertCondition(
+      typeof args.runId === "string" && args.runId.trim(),
+      "runId is required for shared route access.",
+      "RUN_ID_REQUIRED",
+    );
+    const workspaceRoot = resolveWorkspace(
+      args.workspaceRoot || findWorkspaceRoot(args.cwd),
+    );
+    const run = store.getRun(args.runId);
+    assertCondition(run, `Run not found: ${args.runId}`, "RUN_NOT_FOUND");
+    assertCondition(
+      sameWorkspace(run.workspaceRoot, workspaceRoot),
+      "Run belongs to a different workspace.",
+      "WORKSPACE_SCOPE_MISMATCH",
+    );
+    const snapshot = snapshotForRun(run, null, { write: false });
+    return { run, snapshot, markdown: renderSnapshotMarkdown(snapshot) };
+  }
+
   function upsertMemory(args = {}) {
     const workspaceRoot = resolveWorkspace(
       args.workspaceRoot || findWorkspaceRoot(args.cwd),
@@ -2959,6 +3061,9 @@ ${cleared.markdown || ""}`,
     cleanupWorkspace,
     pruneHistory,
     snapshot,
+    snapshotShared,
+    recordOwnedEvent,
+    transferRunOwnership,
     upsertMemory,
     searchMemory,
     deleteMemory,

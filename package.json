@@ -1,7 +1,7 @@
 {
   "name": "@overtli/task-manager",
   "version": "0.2.0",
-  "description": "Codex-first MCP task manager with route checklists, checkpoint summaries, project memory, hooks, skills, and AGENTS.md integration.",
+  "description": "Shared evidence-backed task manager for Codex and Claude Code with route checklists, checkpoint summaries, project memory, native hooks, and MCP integration.",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -14,6 +14,7 @@
   },
   "keywords": [
     "codex",
+    "claude-code",
     "mcp",
     "task-manager",
     "agent-skills",
@@ -30,12 +31,17 @@
   "bin": {
     "otm": "./bin/otm.mjs",
     "otm-mcp": "./bin/otm-mcp.mjs",
+    "otm-claude-mcp": "./bin/otm-claude-mcp.mjs",
     "overtli-task-manager": "./bin/otm.mjs"
   },
   "exports": {
     ".": "./src/index.mjs",
     "./mcp": "./src/mcp/server.mjs",
-    "./hooks": "./src/hooks/runner.mjs"
+    "./hooks": "./src/hooks/runner.mjs",
+    "./provider-adapter": "./src/core/provider-adapter.mjs",
+    "./claude-capability": "./src/core/claude-capability.mjs",
+    "./claude-mcp": "./src/claude/mcp-server.mjs",
+    "./claude-hooks": "./src/install/claude-settings.mjs"
   },
   "files": [
     "bin/",
@@ -56,7 +62,9 @@
   "scripts": {
     "postinstall": "node ./scripts/postinstall.mjs",
     "start:mcp": "node ./bin/otm-mcp.mjs",
+    "start:claude-mcp": "node ./bin/otm-claude-mcp.mjs",
     "install:workspace": "node ./bin/otm.mjs install",
+    "install:claude-hooks": "node ./scripts/install-claude-hooks.mjs",
     "doctor": "node ./bin/otm.mjs doctor",
     "snapshot": "node ./bin/otm.mjs snapshot",
     "test": "node --test",
