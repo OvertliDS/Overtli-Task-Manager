@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { createTaskManager } from "./manager.mjs";
 import { OtmError } from "./errors.mjs";
 import { sha256, shortHash } from "./ids.mjs";
@@ -348,6 +350,37 @@ export function createProviderAdapter({
         payload: { ...common, workId, settlementEvent: eventName },
       });
     }
+    // A tool call denied by another PreToolUse hook (or the permission system)
+    // never fires PostToolUse, so its start receipt would stay open forever.
+    // Claude's own transcript records the call's tool_result; treat that as
+    // the same settlement PostToolUse would have produced.
+    let transcriptSettledIds = [];
+    if (eventName === "Stop" || eventName === "SubagentStop") {
+      const history = manager.store.getEventSnapshot?.(current.run.id, 10_000);
+      const openToolIds = openToolWorkIds(
+        (history?.events || []).filter(
+          (event) =>
+            event?.payload?.ownerSessionId === session.sessionId &&
+            event?.payload?.providerSessionKey === session.providerSessionKey,
+        ),
+      );
+      if (openToolIds.size > 0) {
+        transcriptSettledIds = toolResultsInTranscripts(
+          claudeTranscriptPaths(payload, eventName),
+          openToolIds,
+        );
+        for (const settledId of transcriptSettledIds) {
+          observations.push({
+            eventType: "provider_host_work_settled",
+            payload: {
+              ...common,
+              workId: settledId,
+              settlementEvent: "transcript-tool-result",
+            },
+          });
+        }
+      }
+    }
     if (eventName === "Stop") {
       const inventory = claudeWorkInventory(payload);
       const eventHistory = manager.store.getEventSnapshot?.(
@@ -375,7 +408,13 @@ export function createProviderAdapter({
             event?.payload?.ownerSessionId === session.sessionId &&
             event?.payload?.providerSessionKey === session.providerSessionKey,
         );
-        const pendingWork = findPendingWork(ownerEvents);
+        const pendingWork = findPendingWork([
+          ...ownerEvents,
+          ...transcriptSettledIds.map((settledId) => ({
+            eventType: "provider_host_work_settled",
+            payload: { workId: settledId },
+          })),
+        ]);
         if (pendingWork.length > 0) {
           inventory.complete = false;
           inventory.unknownWorkCount += pendingWork.length;
@@ -782,6 +821,89 @@ function safeHostId(value) {
   return (
     typeof value === "string" && value.trim().length > 0 && value.length <= 256
   );
+}
+
+const MAX_TRANSCRIPT_SCAN_BYTES = 128 * 1024 * 1024;
+
+function openToolWorkIds(events) {
+  const open = new Set();
+  for (const event of events) {
+    const workId = event?.payload?.workId;
+    if (typeof workId !== "string" || !workId.startsWith("tool:")) continue;
+    if (event.eventType === "provider_host_work_started") open.add(workId);
+    else if (event.eventType === "provider_host_work_settled")
+      open.delete(workId);
+  }
+  return open;
+}
+
+/**
+ * Host-supplied transcript paths for this event: the session transcript plus
+ * its subagent transcripts on Stop, or the subagent's own transcript on
+ * SubagentStop. Only absolute regular .jsonl files are accepted.
+ */
+function claudeTranscriptPaths(payload, eventName) {
+  const candidates = [];
+  const main = payload.transcript_path;
+  if (eventName === "SubagentStop" && payload.agent_transcript_path)
+    candidates.push(payload.agent_transcript_path);
+  if (typeof main === "string" && main) {
+    candidates.push(main);
+    if (eventName === "Stop") {
+      const subagentDir = path.join(main.replace(/\.jsonl$/i, ""), "subagents");
+      try {
+        for (const name of fs.readdirSync(subagentDir))
+          if (/\.jsonl$/i.test(name))
+            candidates.push(path.join(subagentDir, name));
+      } catch {
+        /* no subagents */
+      }
+    }
+  }
+  return candidates.filter((file) => {
+    if (typeof file !== "string" || !path.isAbsolute(file)) return false;
+    if (!/\.jsonl$/i.test(file)) return false;
+    try {
+      const stat = fs.lstatSync(file);
+      return stat.isFile() && !stat.isSymbolicLink();
+    } catch {
+      return false;
+    }
+  });
+}
+
+function toolResultsInTranscripts(files, openToolIds) {
+  const wanted = new Map(
+    [...openToolIds].map((workId) => [workId.slice("tool:".length), workId]),
+  );
+  const settled = new Set();
+  for (const file of files) {
+    if (settled.size === wanted.size) break;
+    let text;
+    try {
+      if (fs.statSync(file).size > MAX_TRANSCRIPT_SCAN_BYTES) continue;
+      text = fs.readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    for (const line of text.split("\n")) {
+      if (!line.includes('"tool_result"')) continue;
+      let record;
+      try {
+        record = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const content = record?.message?.content;
+      if (!Array.isArray(content)) continue;
+      for (const block of content) {
+        if (block?.type !== "tool_result") continue;
+        const workId = wanted.get(block.tool_use_id);
+        if (workId) settled.add(workId);
+      }
+    }
+  }
+  return [...settled];
 }
 
 function claudeWorkInventory(payload) {

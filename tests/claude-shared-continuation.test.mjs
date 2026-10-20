@@ -902,6 +902,69 @@ test("Claude lifecycle hooks record observations and block unsafe Stop decisions
   assert.equal(unmatchedToolStop.decision, "block");
   assert.match(unmatchedToolStop.reason, /unclassified|unmatched/i);
 
+  // A PreToolUse denied by another hook never gets PostToolUse; Claude still
+  // writes its tool_result to the (sub)agent transcript, which settles it.
+  runClaudeHook(
+    hookPayload("PreToolUse", sessionId, {
+      cwd: workspaceRoot,
+      tool_name: "Bash",
+      tool_input: { command: "denied by guard" },
+      tool_use_id: "toolu-denied-by-guard",
+    }),
+    { env, cwd: workspaceRoot },
+  );
+  const transcriptPath = path.join(stateDir, "main-session.jsonl");
+  fs.writeFileSync(transcriptPath, '{"type":"user","message":{"content":"hi"}}\n');
+  fs.mkdirSync(path.join(stateDir, "main-session", "subagents"), {
+    recursive: true,
+  });
+  fs.writeFileSync(
+    path.join(stateDir, "main-session", "subagents", "agent-x.jsonl"),
+    [
+      "{not json \"tool_result\"",
+      JSON.stringify({
+        type: "user",
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              content: '{"nested":{"braces":"}"}} denied',
+              is_error: true,
+              tool_use_id: "toolu-denied-by-guard",
+            },
+          ],
+        },
+      }),
+    ].join("\n"),
+  );
+  const transcriptStop = runClaudeHook(
+    hookPayload("Stop", sessionId, {
+      cwd: workspaceRoot,
+      stop_hook_active: false,
+      transcript_path: transcriptPath,
+      background_tasks: [],
+      session_crons: [],
+    }),
+    { env, cwd: workspaceRoot },
+  );
+  assert.equal(
+    transcriptStop.decision,
+    "block",
+    "the cancelled tool without a transcript result stays unmatched",
+  );
+  assert.ok(
+    store
+      .getEvents(startedRoute.run.id)
+      .some(
+        (event) =>
+          event.eventType === "provider_host_work_settled" &&
+          event.payload.workId === "tool:toolu-denied-by-guard" &&
+          event.payload.settlementEvent === "transcript-tool-result",
+      ),
+    "guard-denied subagent tool settles from its transcript tool_result",
+  );
+
   const activeBackground = runClaudeHook(
     hookPayload("Stop", sessionId, {
       cwd: workspaceRoot,
