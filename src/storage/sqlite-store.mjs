@@ -362,6 +362,10 @@ export class SqliteStore {
     )
       this.#backupBeforeMigration(currentVersion);
     this.db.transaction(() => {
+      // Another process may have completed initialization after the first
+      // version read. Acquire the write reservation before inspecting schema.
+      const currentVersion = Number(this.db.pragma("user_version", { simple: true }) || 0);
+      const foreignKeysMissing = this.#foreignKeysMissing();
       if (currentVersion === 0) this.#createV1Schema();
       // Some early development builds marked a partial schema as v1/v2.
       // Preserve their existing rows while filling missing canonical tables
@@ -378,7 +382,7 @@ export class SqliteStore {
       if (currentVersion < 5) this.#migrateV4ToV5();
       else this.#createCanonicalSessionBindings();
       this.db.pragma(`user_version = ${SQLITE_SCHEMA_VERSION}`);
-    })();
+    }).immediate();
   }
 
   #foreignKeysMissing() {
@@ -774,6 +778,12 @@ export class SqliteStore {
             });
           }
           this.createRun(run);
+          const conflicting = tasks.find((task) => this.getTask(task.id));
+          if (conflicting)
+            throw new OtmError("A new task label belongs to another route.", {
+              code: "TASK_ID_CONFLICT",
+              details: { taskId: conflicting.id },
+            });
           const stmt = this.db
             .prepare(`INSERT INTO tasks (id, run_id, parent_id, stable_key, title, description, status, required, priority, sort_order, created_by, acceptance_criteria_json, evidence_json, created_at, updated_at, completed_at, metadata_json)
           VALUES (@id, @runId, @parentId, @stableKey, @title, @description, @status, @required, @priority, @sortOrder, @createdBy, @acceptanceCriteriaJson, @evidenceJson, @createdAt, @updatedAt, @completedAt, @metadataJson)`);
@@ -794,7 +804,9 @@ export class SqliteStore {
     } catch (error) {
       if (
         String(error?.message || "").includes("uq_runs_one_active_scope") ||
-        String(error?.message || "").includes("UNIQUE constraint failed")
+        String(error?.message || "").includes(
+          "UNIQUE constraint failed: runs.workspace_root",
+        )
       ) {
         throw new OtmError(
           "An active route already exists for this workspace and session.",
@@ -813,12 +825,22 @@ export class SqliteStore {
   commitRunMutation({
     run,
     expectedRevision,
+    expectedSessionBinding = null,
     tasks = [],
     newTasks = [],
     summaries = [],
     event = null,
   }) {
     return this.transaction(() => {
+      if (
+        expectedSessionBinding &&
+        this.getCanonicalBinding(expectedSessionBinding.rootSessionId)
+          ?.currentRunId !== expectedSessionBinding.currentRunId
+      )
+        throw new OtmError(
+          "Canonical owner binding changed before bootstrap.",
+          { code: "CANONICAL_ROUTE_CONFLICT" },
+        );
       const current = this.getRun(run.id);
       if (!current)
         throw new OtmError("Run not found.", { code: "RUN_NOT_FOUND" });
@@ -844,7 +866,12 @@ export class SqliteStore {
         this.updateTask(task.id, task);
       }
       for (const task of newTasks) {
-        if (task.runId !== run.id || this.getTask(task.id)) {
+        if (this.getTask(task.id))
+          throw new OtmError("A new task label belongs to another route.", {
+            code: "TASK_ID_CONFLICT",
+            details: { taskId: task.id },
+          });
+        if (task.runId !== run.id) {
           throw new OtmError("New task is invalid for this run.", {
             code: "TASK_NOT_FOUND",
             details: { taskId: task.id, runId: run.id },
@@ -999,23 +1026,34 @@ export class SqliteStore {
 
   /** Record a provider hook event only while its captured owner and revision remain current. */
   recordOwnedEvent({ runId, sessionId, expectedRevision, event }) {
-    return this.transaction(() => {
-      const run = this.getRun(runId);
-      if (!run) throw new OtmError("Run not found.", { code: "RUN_NOT_FOUND" });
-      if ((run.sessionId || null) !== sessionId) {
-        throw new OtmError("Route ownership changed before the event was recorded.", {
-          code: "SESSION_SCOPE_MISMATCH",
-        });
-      }
-      if (Number(run.routeRevision || 1) !== Number(expectedRevision)) {
-        throw new OtmError("Route revision conflict.", {
-          code: "REVISION_CONFLICT",
-          details: { expectedRevision, currentRevision: run.routeRevision || 1, runId },
-        });
-      }
-      this.recordEvent(event);
-      return event;
-    }, { immediate: true });
+    return this.transaction(
+      () => {
+        const run = this.getRun(runId);
+        if (!run)
+          throw new OtmError("Run not found.", { code: "RUN_NOT_FOUND" });
+        if ((run.sessionId || null) !== sessionId) {
+          throw new OtmError(
+            "Route ownership changed before the event was recorded.",
+            {
+              code: "SESSION_SCOPE_MISMATCH",
+            },
+          );
+        }
+        if (Number(run.routeRevision || 1) !== Number(expectedRevision)) {
+          throw new OtmError("Route revision conflict.", {
+            code: "REVISION_CONFLICT",
+            details: {
+              expectedRevision,
+              currentRevision: run.routeRevision || 1,
+              runId,
+            },
+          });
+        }
+        this.recordEvent(event);
+        return event;
+      },
+      { immediate: true },
+    );
   }
 
   updateRun(id, patch) {
@@ -1227,14 +1265,18 @@ export class SqliteStore {
     });
   }
 
-  listRuns(workspaceRoot, limit = 20) {
+  listRuns(workspaceRoot, limit = 20, offset = 0) {
     const stmt = workspaceRoot
       ? this.db.prepare(
-          "SELECT * FROM runs WHERE workspace_root = ? ORDER BY updated_at DESC LIMIT ?",
+          "SELECT * FROM runs WHERE workspace_root = ? ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?",
         )
-      : this.db.prepare("SELECT * FROM runs ORDER BY updated_at DESC LIMIT ?");
+      : this.db.prepare(
+          "SELECT * FROM runs ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?",
+        );
     return (
-      workspaceRoot ? stmt.all(workspaceRoot, limit) : stmt.all(limit)
+      workspaceRoot
+        ? stmt.all(workspaceRoot, limit, offset)
+        : stmt.all(limit, offset)
     ).map(fromRunRow);
   }
 
@@ -1388,21 +1430,32 @@ export class SqliteStore {
     return summary;
   }
 
-  listSummaries(workspaceRoot, limit = 20) {
-    return this.db
-      .prepare(
-        "SELECT * FROM summaries WHERE workspace_root = ? ORDER BY created_at DESC LIMIT ?",
-      )
-      .all(workspaceRoot, limit)
-      .map(fromSummaryRow);
+  listSummaries(workspaceRoot, limit = 20, offset = 0) {
+    const stmt = workspaceRoot
+      ? this.db.prepare(
+          "SELECT * FROM summaries WHERE workspace_root = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+        )
+      : this.db.prepare(
+          "SELECT * FROM summaries ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+        );
+    return (
+      workspaceRoot
+        ? stmt.all(workspaceRoot, limit, offset)
+        : stmt.all(limit, offset)
+    ).map(fromSummaryRow);
   }
 
-  listSummariesForRun(runId) {
+  getSummary(id) {
+    const row = this.db.prepare("SELECT * FROM summaries WHERE id = ?").get(id);
+    return row ? fromSummaryRow(row) : null;
+  }
+
+  listSummariesForRun(runId, limit = null, offset = 0) {
     return this.db
       .prepare(
-        "SELECT * FROM summaries WHERE run_id = ? ORDER BY created_at DESC",
+        "SELECT * FROM summaries WHERE run_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
       )
-      .all(runId)
+      .all(runId, limit ?? -1, offset)
       .map(fromSummaryRow);
   }
 

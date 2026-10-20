@@ -100,6 +100,20 @@ export async function runHookScript(
     const isOdcDispatch =
       eventName === "pre-tool-use" && isOdcBackgroundDispatch(input);
     try {
+      const current = manager.snapshot({
+        workspaceRoot,
+        sessionId,
+        write: false,
+      });
+      if (current.run && !current.run.metadata?.providerSession) {
+        manager.bindCodexOwner({
+          runId: current.run.id,
+          sessionId,
+          officialSessionId: sessionId,
+          expectedRevision: current.run.routeRevision,
+          hookEventName: actualEventName,
+        });
+      }
       // Record the route-scoped activity before dispatch. A concurrent owner
       // transfer then sees this newer event, and a stale owner cannot proceed
       // after the transfer CAS has changed the binding.

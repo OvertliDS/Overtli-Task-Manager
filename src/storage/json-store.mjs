@@ -294,6 +294,14 @@ export class JsonStore {
           abandonedReason: "Replaced by new route",
         };
       }
+      const conflicting = tasks.find((task) =>
+        data.tasks.some((item) => item.id === task.id),
+      );
+      if (conflicting)
+        throw new OtmError("A new task label belongs to another route.", {
+          code: "TASK_ID_CONFLICT",
+          details: { taskId: conflicting.id },
+        });
       data.runs.push(run);
       data.tasks.push(...tasks);
       if (
@@ -325,12 +333,24 @@ export class JsonStore {
   commitRunMutation({
     run,
     expectedRevision,
+    expectedSessionBinding = null,
     tasks = [],
     newTasks = [],
     summaries = [],
     event = null,
   }) {
     return this.transaction((data) => {
+      if (
+        expectedSessionBinding &&
+        data.sessionBindings.find(
+          (binding) =>
+            binding.rootSessionId === expectedSessionBinding.rootSessionId,
+        )?.currentRunId !== expectedSessionBinding.currentRunId
+      )
+        throw new OtmError(
+          "Canonical owner binding changed before bootstrap.",
+          { code: "CANONICAL_ROUTE_CONFLICT" },
+        );
       const runIndex = data.runs.findIndex((item) => item.id === run.id);
       if (runIndex < 0)
         throw new OtmError("Run not found.", { code: "RUN_NOT_FOUND" });
@@ -360,10 +380,12 @@ export class JsonStore {
         data.tasks[index] = { ...task, updatedAt: task.updatedAt || nowIso() };
       }
       for (const task of newTasks) {
-        if (
-          task.runId !== run.id ||
-          data.tasks.some((item) => item.id === task.id)
-        ) {
+        if (data.tasks.some((item) => item.id === task.id))
+          throw new OtmError("A new task label belongs to another route.", {
+            code: "TASK_ID_CONFLICT",
+            details: { taskId: task.id },
+          });
+        if (task.runId !== run.id) {
           throw new OtmError("New task is invalid for this run.", {
             code: "TASK_NOT_FOUND",
             details: { taskId: task.id, runId: run.id },
@@ -525,17 +547,28 @@ export class JsonStore {
       const run = data.runs.find((item) => item.id === runId);
       if (!run) throw new OtmError("Run not found.", { code: "RUN_NOT_FOUND" });
       if ((run.sessionId || null) !== sessionId) {
-        throw new OtmError("Route ownership changed before the event was recorded.", {
-          code: "SESSION_SCOPE_MISMATCH",
-        });
+        throw new OtmError(
+          "Route ownership changed before the event was recorded.",
+          {
+            code: "SESSION_SCOPE_MISMATCH",
+          },
+        );
       }
       if (Number(run.routeRevision || 1) !== Number(expectedRevision)) {
         throw new OtmError("Route revision conflict.", {
           code: "REVISION_CONFLICT",
-          details: { expectedRevision, currentRevision: run.routeRevision || 1, runId },
+          details: {
+            expectedRevision,
+            currentRevision: run.routeRevision || 1,
+            runId,
+          },
         });
       }
-      if (!data.events.some((item) => item.idempotencyKey === event.idempotencyKey))
+      if (
+        !data.events.some(
+          (item) => item.idempotencyKey === event.idempotencyKey,
+        )
+      )
         data.events.push(event);
       return event;
     });
@@ -686,13 +719,17 @@ export class JsonStore {
     });
   }
 
-  listRuns(workspaceRoot, limit = 20) {
+  listRuns(workspaceRoot, limit = 20, offset = 0) {
     return this.#read()
       .runs.filter(
         (run) => !workspaceRoot || run.workspaceRoot === workspaceRoot,
       )
-      .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
-      .slice(0, limit);
+      .sort(
+        (a, b) =>
+          String(b.updatedAt).localeCompare(String(a.updatedAt)) ||
+          b.id.localeCompare(a.id),
+      )
+      .slice(offset, offset + limit);
   }
 
   exportWorkspace(workspaceRoot) {
@@ -792,19 +829,32 @@ export class JsonStore {
     });
   }
 
-  listSummaries(workspaceRoot, limit = 20) {
+  listSummaries(workspaceRoot, limit = 20, offset = 0) {
     return this.#read()
       .summaries.filter(
         (summary) => !workspaceRoot || summary.workspaceRoot === workspaceRoot,
       )
-      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
-      .slice(0, limit);
+      .sort(
+        (a, b) =>
+          String(b.createdAt).localeCompare(String(a.createdAt)) ||
+          b.id.localeCompare(a.id),
+      )
+      .slice(offset, offset + limit);
   }
 
-  listSummariesForRun(runId) {
+  getSummary(id) {
+    return this.#read().summaries.find((summary) => summary.id === id) || null;
+  }
+
+  listSummariesForRun(runId, limit = null, offset = 0) {
     return this.#read()
       .summaries.filter((summary) => summary.runId === runId)
-      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+      .sort(
+        (a, b) =>
+          String(b.createdAt).localeCompare(String(a.createdAt)) ||
+          b.id.localeCompare(a.id),
+      )
+      .slice(offset, limit === null ? undefined : offset + limit);
   }
 
   upsertCache(entry) {

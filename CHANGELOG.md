@@ -2,6 +2,22 @@
 
 ## 0.2.0 - Unreleased
 
+### Shared-session routing and history fixes
+
+- Reused model task labels no longer collide with another session's stored
+  tasks or masquerade as an active-route conflict. The manager preserves local
+  labels, remaps dependencies and current-task references, and retries an
+  actual concurrent label collision once without touching the prior owner.
+- Shared history now returns compact paged headers across this user's provider
+  sessions and workspaces. Exact saved summaries are read in bounded chunks;
+  cross-workspace inspection and continuation resolve the saved run's canonical
+  workspace without asking the agent to relocate its work.
+- Native Codex starts and authentic resumed hooks now populate missing owner
+  provenance. Legacy upgrades compare both the canonical binding and route
+  revision atomically; unknown detached work is never treated as settled.
+- Concurrent SQLite initialization reserves the write transaction before
+  re-reading schema state, avoiding a read-to-write lock-upgrade failure.
+
 ### Model-guided route decomposition
 
 - Route tasks are completion gates for major outcomes, internal subtasks

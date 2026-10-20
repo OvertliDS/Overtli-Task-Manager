@@ -2,6 +2,7 @@ import { createTaskManager } from "./manager.mjs";
 import { OtmError } from "./errors.mjs";
 import { sha256, shortHash } from "./ids.mjs";
 import { redactSensitiveText } from "./validation.mjs";
+import { readSharedHistoryPage } from "./shared-history.mjs";
 import {
   assertContinuationEligible,
   evaluateContinuation,
@@ -419,21 +420,23 @@ export function createProviderAdapter({
 
   function readSharedTask(input = {}) {
     assertInputObject(input);
+    const run = manager.store.getRun(input.runId);
+    if (!run)
+      throw new OtmError("Saved run not found.", { code: "RUN_NOT_FOUND" });
     return manager.snapshotShared({
       ...input,
+      workspaceRoot: run.workspaceRoot,
       write: false,
     });
   }
 
   function readSharedHistory(input = {}) {
     assertInputObject(input);
-    const workspace = input.workspaceRoot || workspaceRoot;
-    const { runs } = manager.listRuns({
-      workspaceRoot: workspace,
-      limit: input.limit,
-    });
-    const summaries = manager.store.listSummaries(workspace, input.limit || 20);
-    return { runs, summaries };
+    return readSharedHistoryPage(
+      manager.store,
+      input,
+      input.workspaceRoot || workspaceRoot,
+    );
   }
 
   function continueTask(input = {}) {
@@ -444,11 +447,7 @@ export function createProviderAdapter({
         code: "RUN_ID_REQUIRED",
       });
     }
-    const previous = manager.snapshotShared({
-      runId,
-      workspaceRoot: input.workspaceRoot || workspaceRoot,
-      write: false,
-    });
+    const previous = readSharedTask({ runId });
     if (previous.run.sessionId === session.sessionId) {
       return { ...previous, continued: false, alreadyOwner: true };
     }

@@ -40,6 +40,7 @@ import {
   TASK_STATUSES,
 } from "./constants.mjs";
 import { resolveSessionId } from "./session-scope.mjs";
+import { createProviderSession } from "./provider-session.mjs";
 import { assertRunTransition, assertTaskTransition } from "./state-machine.mjs";
 import {
   LIMITS,
@@ -95,6 +96,80 @@ export function createTaskManager(options = {}) {
     });
   }
 
+  // Called only by the native host boundary, never exposed as an MCP tool.
+  // A legacy route can be identified by its authentic original session; reads
+  // and another provider's continuation request cannot make this attestation.
+  function bindCodexOwner(args = {}) {
+    const sessionId = resolveSessionId({ sessionId: args.sessionId }, env);
+    assertCondition(
+      sessionId &&
+        (args.officialSessionId === sessionId ||
+          env.CODEX_THREAD_ID === sessionId),
+      "Codex owner bootstrap requires the authentic original host session.",
+      "HOST_SESSION_REQUIRED",
+    );
+    const run = store.getRun(args.runId);
+    assertCondition(
+      run && run.sessionId === sessionId,
+      "Route belongs to another session.",
+      "SESSION_SCOPE_MISMATCH",
+    );
+    const context = {
+      ...createProviderSession({
+        provider: "codex",
+        nativeSessionId: sessionId,
+      }),
+      nativeSessionId: sessionId,
+    };
+    const owner = run.metadata?.providerSession;
+    if (owner) {
+      assertCondition(
+        owner.provider === "codex" &&
+          owner.nativeSessionId === sessionId &&
+          owner.providerSessionKey === context.providerSessionKey,
+        "Recorded route owner conflicts with the authentic Codex session.",
+        "PROVIDER_SESSION_MISMATCH",
+      );
+      return { run, alreadyBound: true };
+    }
+    assertExpectedRevision(run, args);
+    assertCondition(
+      args.expectedRevision === run.routeRevision,
+      "Owner bootstrap requires the exact observed route revision.",
+      "REVISION_CONFLICT",
+    );
+    const at = nowIso();
+    const next = store.commitRunMutation({
+      run: {
+        ...run,
+        routeRevision: run.routeRevision + 1,
+        updatedAt: at,
+        metadata: { ...run.metadata, providerSession: context },
+      },
+      expectedRevision: run.routeRevision,
+      expectedSessionBinding: {
+        rootSessionId: sessionId,
+        currentRunId: run.id,
+      },
+      event: buildEvent(
+        run.id,
+        "provider_session_activity",
+        {
+          provider: "codex",
+          providerSessionKey: context.providerSessionKey,
+          nativeSessionId: sessionId,
+          ownerSessionId: sessionId,
+          activityKind: args.hookEventName || "native-mcp-start",
+          ownerBoundByHost: true,
+        },
+        {
+          operationId: `codex-owner-bootstrap:${run.id}:${context.providerSessionKey}`,
+        },
+      ),
+    });
+    return { run: next, alreadyBound: false };
+  }
+
   function transferRunOwnership(args = {}) {
     assertCondition(
       typeof args.runId === "string" && args.runId.trim(),
@@ -145,7 +220,9 @@ export function createTaskManager(options = {}) {
         kind: "provider_continuation",
         message: "This provider explicitly accepted exclusive ownership of the shared route.",
         at,
-      }, { write: false });
+      },
+      { write: false },
+    );
     return { run: next, snapshot, markdown: renderSnapshotMarkdown(snapshot) };
   }
 
@@ -176,15 +253,46 @@ export function createTaskManager(options = {}) {
     summaries = [],
     newTasks = [],
   ) {
-    const next = store.commitRunMutation({
+    const mutation = {
       run,
       expectedRevision: Number(run.routeRevision || 1) - 1,
       tasks,
       newTasks,
       summaries,
       event: buildEvent(run.id, eventType, payload, context),
-    });
-    return next;
+    };
+    try {
+      return store.commitRunMutation(mutation);
+    } catch (error) {
+      if (error?.code !== "TASK_ID_CONFLICT" || !newTasks.length) throw error;
+      scopeNewTaskIds(newTasks, run, [...tasks, ...newTasks]);
+      return store.commitRunMutation(mutation);
+    }
+  }
+
+  // Model-authored IDs such as G1 are route-local labels. Existing rows keep
+  // their identity; a new route receives fresh IDs and preserves the labels.
+  function scopeNewTaskIds(newTasks, run, allTasks = newTasks) {
+    const renamed = new Map();
+    for (const task of newTasks) {
+      const existing = store.getTask(task.id);
+      if (!existing || existing.runId === run.id) continue;
+      const requestedId = task.id;
+      task.id = newId("task");
+      task.metadata = { ...task.metadata, requestedTaskId: requestedId };
+      renamed.set(requestedId, task.id);
+    }
+    if (!renamed.size) return;
+    for (const task of allTasks) {
+      task.parentId = renamed.get(task.parentId) || task.parentId;
+      task.metadata = {
+        ...task.metadata,
+        dependsOn: (task.metadata?.dependsOn || []).map(
+          (id) => renamed.get(id) || id,
+        ),
+      };
+    }
+    run.currentTaskId = renamed.get(run.currentTaskId) || run.currentTaskId;
   }
 
   function getCanonicalBinding(workspaceRoot, sessionId) {
@@ -1109,7 +1217,18 @@ export function createTaskManager(options = {}) {
     const currentBinding = sessionId
       ? getCanonicalBinding(workspaceRoot, sessionId)
       : null;
-    const active = getScopedActiveRun(workspaceRoot, sessionId);
+    let active = getScopedActiveRun(workspaceRoot, sessionId);
+    if (
+      active &&
+      !active.metadata?.providerSession &&
+      sessionId === env.CODEX_THREAD_ID
+    ) {
+      active = bindCodexOwner({
+        runId: active.id,
+        sessionId,
+        expectedRevision: active.routeRevision,
+      }).run;
+    }
     if (!sessionId) {
       const scopedActive = store
         .listActiveRuns(workspaceRoot)
@@ -1183,7 +1302,17 @@ export function createTaskManager(options = {}) {
       metadata: {
         gitBranch: args.gitBranch || null,
         source: args.source || "mcp",
-        providerSession: args.providerContext || undefined,
+        providerSession:
+          args.providerContext ||
+          (sessionId && sessionId === env.CODEX_THREAD_ID
+            ? {
+                ...createProviderSession({
+                  provider: "codex",
+                  nativeSessionId: sessionId,
+                }),
+                nativeSessionId: sessionId,
+              }
+            : undefined),
         promptPreview: plannerPrompt.slice(0, 500),
         sourceContext,
       },
@@ -1229,6 +1358,7 @@ export function createTaskManager(options = {}) {
     const tasks = taskInputs.map((task, index) =>
       normalizeTask(task, run.id, index + 1, task.createdBy || "prompt"),
     );
+    scopeNewTaskIds(tasks, run);
     run.metadata.routeIntent =
       fallbackPlan?.metadata?.routeIntent ||
       deriveRouteIntent(tasks, "model_tasks");
@@ -1280,14 +1410,23 @@ export function createTaskManager(options = {}) {
         }
       : null;
     try {
-      store.createRoute({
+      const creation = {
         run,
         tasks,
         event: startEvent,
         replaceRunId:
           active && args.replaceExisting === true ? active.id : null,
         sessionBinding,
-      });
+      };
+      try {
+        store.createRoute(creation);
+      } catch (error) {
+        // Another session may have committed the same local labels after our
+        // initial read. Retry once after its transaction has settled.
+        if (error?.code !== "TASK_ID_CONFLICT") throw error;
+        scopeNewTaskIds(tasks, run);
+        store.createRoute(creation);
+      }
     } catch (error) {
       if (
         !["ACTIVE_ROUTE_CONFLICT", "CANONICAL_ROUTE_CONFLICT"].includes(
@@ -1585,6 +1724,11 @@ export function createTaskManager(options = {}) {
       }
     }
 
+    scopeNewTaskIds(
+      workingTasks.filter((task) => !originalById.has(task.id)),
+      run,
+      workingTasks,
+    );
     assertValidDependencies(workingTasks);
     const current = chooseCurrentTask(workingTasks, preferredCurrentId, {
       forcePreferred: forcePreferredCurrent,
@@ -3063,6 +3207,7 @@ ${cleared.markdown || ""}`,
     snapshot,
     snapshotShared,
     recordOwnedEvent,
+    bindCodexOwner,
     transferRunOwnership,
     upsertMemory,
     searchMemory,
@@ -3288,9 +3433,9 @@ function buildSummaryJson({ run, tasks, outcome, nextSteps }) {
 }
 
 function completionEvidenceForTask(task = {}) {
-  const gateEvidence = (Array.isArray(task.evidence) ? task.evidence : []).filter(
-    isCompletionEvidence,
-  );
+  const gateEvidence = (
+    Array.isArray(task.evidence) ? task.evidence : []
+  ).filter(isCompletionEvidence);
   return gateEvidence.length
     ? gateEvidence
     : descendantEvidenceForTask(task).filter(isCompletionEvidence);

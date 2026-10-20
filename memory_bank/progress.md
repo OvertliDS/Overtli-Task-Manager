@@ -1,5 +1,28 @@
 # Progress
 
+## 2026-10-20 - Correct real session startup, shared inspection and native ownership
+
+- Confirmed actual Claude startup failures and an empty same-session snapshot:
+  `G1`-`G7` already existed in another workspace's Projector task. Corrected
+  task identity collision handling, dependency/current-task remapping, one
+  bounded concurrent retry, and precise storage error classification in both
+  backends. Older task records remain unchanged.
+- Replaced the401,703-character default history response with at most10 compact
+  run/summary headers per page. Saved summaries support bounded text chunks;
+  exact shared run reads and continuation use the saved primary workspace.
+  The Codex CLI and Claude frontend share this projection.
+- Corrected native Codex ownership creation and added authentic same-owner
+  legacy hook bootstrap with atomic revision/binding checks. The actual root
+  route gained its proper provider record and activity through normal hooks.
+  Unknown detached legacy work remains protected, while historical inspection
+  requires neither provider-specific summaries nor folder relocation.
+- Integration:69 distinct checks verified. The initial run exposed an inherited
+  test-session fixture conflict and a real concurrent SQLite initialization
+  lock upgrade; isolated the former and fixed the latter with an immediate
+  write transaction plus a fresh schema read. The affected19 checks then passed.
+  Source syntax/targeted lint passed; no paid Claude call or user-task transfer.
+  The existing Claude frontend must reconnect once to reload its cached source.
+
 ## 2026-10-20 - Shared provider routes and Claude native source
 
 - Implemented a provider-neutral shared route/history frontend and explicit

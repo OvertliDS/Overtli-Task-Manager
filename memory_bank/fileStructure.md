@@ -1,5 +1,13 @@
 # File Structure Knowledge Base
 
+- `src/core/shared-history.mjs` owns compact same-user history pages and exact
+  saved-summary text chunks for Claude tools and the Codex CLI. It reads the
+  canonical store without claiming routes or copying provider summaries.
+- `createTaskManager().bindCodexOwner` is an internal native-host boundary:
+  authentic original session, exact revision and canonical-binding CAS are
+  required before a legacy route receives provider provenance and activity.
+  It is not a model-facing MCP tool and does not settle host jobs.
+
 ## Concurrent route state
 
 | Path                                                  | Responsibility                                                                                                | Invariants                                                                                                                                                                                                                          |

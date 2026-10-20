@@ -215,7 +215,7 @@ export function dispatchClaudeTool({
     if (name === "otm_history") {
       return sanitizeResult(
         adapter.readSharedHistory({
-          limit: cleanArguments.limit,
+          ...cleanArguments,
           workspaceRoot: claims.workspaceRoot,
         }),
         sessionCapability,
@@ -280,12 +280,17 @@ function buildSnapshotTool() {
 function buildHistoryTool() {
   return {
     name: "otm_history",
-    description: `${CAPABILITY_CONTEXT_INSTRUCTION} Read canonical runs and saved summaries for this exact workspace across Codex and Claude. This is read-only and does not copy summaries into another provider's state.`,
+    description: `${CAPABILITY_CONTEXT_INSTRUCTION} Discover compact canonical history across Codex, Claude and older workspaces (scope=all by default). Results are paged, at most ten runs/summaries per page; use nextOffset to continue. Use runId and summaryId to read a saved summary in bounded text chunks with offset/maxChars. Inspect the exact run with otm_snapshot. Read-only discovery never takes ownership or requires a new summary or folder.`,
     inputSchema: {
       type: "object",
       properties: {
         sessionCapability: capabilitySchema(),
         limit: { type: "integer", minimum: 1, maximum: 50 },
+        scope: { type: "string", enum: ["all", "workspace"] },
+        offset: { type: "integer", minimum: 0, maximum: 10000000 },
+        runId: { type: "string", minLength: 1, maxLength: 128 },
+        summaryId: { type: "string", minLength: 1, maxLength: 128 },
+        maxChars: { type: "integer", minimum: 1, maximum: 12000 },
       },
       required: ["sessionCapability"],
       additionalProperties: false,

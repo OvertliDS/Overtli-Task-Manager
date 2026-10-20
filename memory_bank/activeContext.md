@@ -2,6 +2,21 @@
 
 ## Current objective
 
+2026-10-20 follow-up correction: real Claude `G1`-`G7` route creation collided
+with an unrelated Projector run's globally stored task IDs and was mislabeled
+`ACTIVE_ROUTE_CONFLICT`. New-route/reconciliation IDs now avoid those collisions
+without changing older tasks; default history is compact, paged and shared
+across workspaces, with exact summary chunks and canonical run reads. Native
+Codex MCP starts and authentic resumed hooks now bind owner provenance; this
+actual root route was upgraded by its normal hook without replacing its gates.
+Detached legacy jobs still require real host evidence before transfer.
+The finite integration frontier has69 distinct verified checks, including an
+affected19-check rerun after correcting SQLite initialization contention and
+isolating inherited test identities. Six separate Inventor runner safety cases
+passed. An already-running Claude MCP frontend needs one `/mcp` reconnect to
+load changed modules; hooks load fresh source automatically. Receipts are under
+`.codex/otm-routing-repair-20261020/`; Git history records publication.
+
 Implement shared canonical OTM history and safe, explicit exclusive
 continuation across Codex and Claude Code. The provider-neutral transfer,
 complete Claude hook source, signed Claude stdio tools, and supported user

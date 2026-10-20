@@ -27,6 +27,7 @@ import { reviewProjectContext } from "../context/project-review.mjs";
 import { runHookScript } from "../hooks/runner.mjs";
 import { resolveSessionId } from "../core/session-scope.mjs";
 import { createProviderAdapter } from "../core/provider-adapter.mjs";
+import { readSharedHistoryPage } from "../core/shared-history.mjs";
 import {
   loadHostEvidenceModule,
   resolveHostEvidenceModulePath,
@@ -338,24 +339,22 @@ export async function handleCli({ argv, cwd, stdin, packageRoot, env }) {
   }
 
   if (command === "shared-history") {
-    const limit = flags.limit ?? 20;
-    if (limit > 100) {
-      throw new Error("shared-history --limit must be between 1 and 100.");
-    }
-    const listed = manager.listRuns({ workspaceRoot, limit });
-    const result = {
-      workspaceRoot,
-      runs: listed.runs.map(sharedRunView),
-      summaries: manager.store.listSummaries(workspaceRoot, limit),
-    };
+    const result = readSharedHistoryPage(manager.store, flags, workspaceRoot);
     const markdown = [
       "## Shared OTM history",
       "",
-      ...result.runs.map(
+      ...(result.runs || []).map(
         (run) =>
-          `- ${run.id} — ${run.status} — ${run.metadata?.providerSession?.provider || "legacy owner"} — ${run.goal}`,
+          `- ${run.id} — ${run.status} — ${run.owner?.provider || "unattributed"} — ${run.goal}`,
       ),
-      `${result.summaries.length} shared summary record(s)`,
+      result.summary?.text ||
+        `${result.summaries?.length || 0} shared summary record(s)`,
+      result.nextOffset != null
+        ? `Next page: --offset ${result.nextOffset}`
+        : "",
+      result.summary?.nextOffset != null
+        ? `Next summary chunk: --offset ${result.summary.nextOffset}`
+        : "",
       "",
     ].join("\n");
     printCli(flags, result, markdown);
@@ -365,9 +364,11 @@ export async function handleCli({ argv, cwd, stdin, packageRoot, env }) {
 
   if (command === "shared-task") {
     if (!flags.runId) throw new Error("shared-task requires --run-id.");
+    const savedRun = manager.store.getRun(flags.runId);
+    if (!savedRun) throw new Error("Saved run not found.");
     const result = manager.snapshotShared({
       runId: flags.runId,
-      workspaceRoot,
+      workspaceRoot: savedRun.workspaceRoot,
       write: false,
     });
     const output = { ...result, run: sharedRunView(result.run) };
@@ -657,6 +658,16 @@ function booleanFlagsFor(command) {
 }
 
 function validateNumericFlags(flags) {
+  for (const [key, minimum, maximum] of [
+    ["offset", 0, 10_000_000],
+    ["maxChars", 1, 12_000],
+  ]) {
+    if (flags[key] === undefined) continue;
+    const value = Number(flags[key]);
+    if (!Number.isSafeInteger(value) || value < minimum || value > maximum)
+      throw new Error(`--${key} must be an integer in range.`);
+    flags[key] = value;
+  }
   const positiveIntegers = ["limit", "maxFiles"];
   for (const key of positiveIntegers) {
     if (flags[key] === undefined) continue;
@@ -712,7 +723,14 @@ function allowedFlagsFor(command) {
     archive: ["runId", "reason", "confirm"],
     abandon: ["runId", "reason", "confirm", "deleteFiles"],
     snapshot: [],
-    "shared-history": ["limit"],
+    "shared-history": [
+      "limit",
+      "scope",
+      "offset",
+      "runId",
+      "summaryId",
+      "maxChars",
+    ],
     "shared-task": ["runId"],
     "continue-task": ["runId", "expectedRevision"],
     status: [],
@@ -937,7 +955,8 @@ Commands:
   otm backup [--output PATH] [--dry-run] [--json]
   otm restore --input PATH --confirm [--dry-run] [--json]
   otm snapshot [--workspace PATH] [--session-id ID]
-  otm shared-history [--workspace PATH] [--limit N] [--json]
+  otm shared-history [--scope all|workspace] [--limit N] [--offset N] [--json]
+  otm shared-history --run-id ID --summary-id ID [--offset N] [--max-chars N] [--json]
   otm shared-task --run-id ID [--workspace PATH] [--json]
   otm continue-task --run-id ID --expected-revision N [--workspace PATH] [--json]
   otm status [--workspace PATH] [--session-id ID] [--json]

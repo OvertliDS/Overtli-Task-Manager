@@ -15,6 +15,7 @@ Overtli Task Manager (OTM) structures AI coding sessions into evidence-backed ro
 - **Route Checklists:** Deconstruct complex goals into discrete segments (`pending` ➔ `active` ➔ `done` / `blocked`).
 - **Evidence Enforcement:** Tasks can only be marked complete once concrete proof (changed files, test results, command outputs) is provided.
 - **Chat Integration:** Renders progress in Codex and exposes the same canonical routes, summaries, and history to Claude Code through its native hooks and stdio MCP server.
+- **Independent Shared-Workspace Routes:** Codex and Claude sessions may work in the same folder. Reused planning labels such as `G1` receive collision-free canonical IDs without changing earlier tasks. Shared history is compact and paged, with exact run and saved-summary inspection across folders.
 - **Persistent Task List:** Keeps a full checked-off task list in chat Markdown and the current chat's session-scoped `current.json.checklist`.
 - **Canonical Chat Identity:** Binds one current route to the root `CODEX_THREAD_ID` across home, project, and nested paths. The route's starting workspace remains its primary evidence location; later paths are persisted aliases. Different Codex sessions remain isolated.
 - **Durable State Cache:** Persists root-session bindings in the JSON or SQLite store. Route snapshots and summaries remain under the primary workspace; top-level `current.json` and `current.md` provide a workspace-local session index.
@@ -479,14 +480,14 @@ override allows it.
 
 ### Internal Step Gates
 
-| Rule                                                                                                                                    | Effect                                                                          |
-| --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| Internal subtasks and mini-steps normalize to durable records with stable IDs, provenance, criteria, dependencies, evidence, and status | Handoffs resume at the exact descendant                                         |
-| Non-atomic internal subtasks require one or more outcome-specific mini-steps                                                            | A subtask cannot hide unfinished concrete work                                  |
-| Atomic subtasks require an explicit rationale                                                                                           | “Atomic” cannot become a silent shortcut                                        |
-| `otm_progress` updates descendants by exact id; one call can batch ordered updates within one named gate | One evidence payload is applied across the batch and the whole update commits once |
-| Required descendants must be `done` or intentionally `skipped` with required evidence                                                   | Pending, active, blocked, or unreviewed descendants keep the parent gate closed |
-| `otm_complete_task` reuses gate proof or complete required-descendant proof when available                                           | Missing descendant proof or a gate with no accepted evidence still blocks       |
+| Rule                                                                                                                                    | Effect                                                                             |
+| --------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| Internal subtasks and mini-steps normalize to durable records with stable IDs, provenance, criteria, dependencies, evidence, and status | Handoffs resume at the exact descendant                                            |
+| Non-atomic internal subtasks require one or more outcome-specific mini-steps                                                            | A subtask cannot hide unfinished concrete work                                     |
+| Atomic subtasks require an explicit rationale                                                                                           | “Atomic” cannot become a silent shortcut                                           |
+| `otm_progress` updates descendants by exact id; one call can batch ordered updates within one named gate                                | One evidence payload is applied across the batch and the whole update commits once |
+| Required descendants must be `done` or intentionally `skipped` with required evidence                                                   | Pending, active, blocked, or unreviewed descendants keep the parent gate closed    |
+| `otm_complete_task` reuses gate proof or complete required-descendant proof when available                                              | Missing descendant proof or a gate with no accepted evidence still blocks          |
 
 ### Hooks And Completion
 

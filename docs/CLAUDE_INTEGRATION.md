@@ -96,20 +96,20 @@ Use the existing task and evidence schemas in
 descriptions in [`src/mcp/tools.mjs`](../src/mcp/tools.mjs). The Claude stdio
 frontend's model-facing tool names and adapter mapping are:
 
-| Claude-facing OTM action | Adapter call             | Argument contract                                                                                                      |
-| ------------------------ | ------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
-| `otm_start`              | `startTask`              | `goal`, optional bounded source context and model-authored `tasks`; Claude workspace comes from the signed capability. |
-| `otm_reconcile`          | `reconcileTask`          | Exact `runId`, mode, source context, and `changes` or reviewed `tasks`.                                                |
-| `otm_snapshot`           | `snapshot` / shared read | Optional exact `runId`; otherwise reads this Claude session's current route.                                           |
-| `otm_start_task`         | `markTaskActive`         | Required exact `taskId`, optional `runId` and `note`.                                                                  |
-| `otm_progress`           | `recordProgress`         | Existing gate evidence and nested internal/mini-step fields or ordered updates.                                        |
-| `otm_complete_task`      | `completeTask`           | Required exact `taskId`, optional `runId` and accepted evidence.                                                       |
-| `otm_block_task`         | `blockTask`              | Required exact gate and actionable blocker reason.                                                                     |
-| `otm_audit_stop`         | `auditStop`              | Optional exact `runId`; forces `write:false` and does not finalize.                                                    |
-| `otm_resume`             | `resumeRun`              | Exact blocked/paused unfinished `runId`, optional task and reason.                                                     |
-| `otm_checkpoint`         | `checkpoint`             | Exact `runId` and optional `checkpointKey`; records shared continuation state without finalizing.                      |
-| `otm_history`            | `readSharedHistory`      | Optional bounded `limit`; reads canonical workspace runs and summaries without claiming them.                          |
-| `otm_continue`           | `continueTask`           | Exact `runId` and required `expectedRevision`; transfers only after full host evidence and recency checks.             |
+| Claude-facing OTM action | Adapter call             | Argument contract                                                                                                                                           |
+| ------------------------ | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `otm_start`              | `startTask`              | `goal`, optional bounded source context and model-authored `tasks`; Claude workspace comes from the signed capability.                                      |
+| `otm_reconcile`          | `reconcileTask`          | Exact `runId`, mode, source context, and `changes` or reviewed `tasks`.                                                                                     |
+| `otm_snapshot`           | `snapshot` / shared read | Optional exact `runId`; otherwise reads this Claude session's current route.                                                                                |
+| `otm_start_task`         | `markTaskActive`         | Required exact `taskId`, optional `runId` and `note`.                                                                                                       |
+| `otm_progress`           | `recordProgress`         | Existing gate evidence and nested internal/mini-step fields or ordered updates.                                                                             |
+| `otm_complete_task`      | `completeTask`           | Required exact `taskId`, optional `runId` and accepted evidence.                                                                                            |
+| `otm_block_task`         | `blockTask`              | Required exact gate and actionable blocker reason.                                                                                                          |
+| `otm_audit_stop`         | `auditStop`              | Optional exact `runId`; forces `write:false` and does not finalize.                                                                                         |
+| `otm_resume`             | `resumeRun`              | Exact blocked/paused unfinished `runId`, optional task and reason.                                                                                          |
+| `otm_checkpoint`         | `checkpoint`             | Exact `runId` and optional `checkpointKey`; records shared continuation state without finalizing.                                                           |
+| `otm_history`            | `readSharedHistory`      | Compact cross-workspace history; `scope`, `offset`, `limit`, exact `runId`/`summaryId`, and bounded `maxChars` summary chunks. Reads never claim ownership. |
+| `otm_continue`           | `continueTask`           | Exact `runId` and required `expectedRevision`; transfers only after full host evidence and recency checks.                                                  |
 
 Do not expose `sessionId`, `session_id`, `threadId`, `thread_id`,
 `conversationId`, `conversation_id`, or `provider` in the user-facing Claude
@@ -275,8 +275,11 @@ tool against the expected canonical run before relying on shared history.
 
 The Claude frontend exposes start, reconcile, gate activation, progress,
 completion, blocking, audit, resume, checkpoint, exact snapshot, shared history,
-and explicit continuation tools. Read tools are scoped to the signed token's
-canonical workspace; mutation tools remain bound to the exact Claude session.
+and explicit continuation tools. Read tools discover this user's canonical OTM
+history across provider sessions and workspaces; mutation tools remain bound
+to the exact Claude session. An exact saved run is read from its recorded
+primary workspace, regardless of the reader's current folder. This does not
+grant arbitrary filesystem access or silently transfer route ownership.
 The schemas do not accept provider/session/native IDs. Instead, the official
 SessionStart and UserPromptSubmit hooks inject a short-lived capability into
 Claude's context. The token contains encrypted claims plus an HMAC signature,
@@ -289,6 +292,23 @@ fields or artifacts. The key is kept under `OTM_STATE_DIR`; Windows ACL
 verification requires only the current user to have full access, while POSIX
 uses mode `0600`. The token is a tool capability, not a transcript or
 session-history export.
+
+Independent Codex and Claude sessions can start routes in the same folder.
+Model-supplied task IDs such as `G1` are local planning labels: if an older
+route already owns that stored ID, OTM returns a fresh canonical task ID and
+retains the requested label in task metadata. Dependencies and current-task
+references follow the canonical IDs. Use the IDs from the returned snapshot.
+An unrelated task's ID collision never requires moving folders, replacing a
+route, or abandoning the older task.
+
+`otm_history` defaults to `scope: "all"` and returns at most ten compact run
+and summary headers per page. `nextOffset` selects the next page; `scope:
+"workspace"` restricts discovery to the capability's current workspace. Large
+source contracts and full summaries are excluded from this index. Read an exact
+saved summary with `runId`, `summaryId`, `offset`, and `maxChars` (default 4,000,
+maximum 12,000 characters); its `nextOffset` selects the next text chunk.
+`otm_snapshot({runId})` reads the selected canonical route without claiming it.
+Claude and Codex use the same saved summary; neither needs to recreate one.
 
 Shared reads do not claim a route. A user must request `/otm continue <runId>`
 or call `otm_continue` explicitly. Continuation is denied unless all checks
@@ -305,6 +325,19 @@ Missing history, inspector, source, or receipt fails closed with a host
 recovery instruction. The same provider-neutral rule applies in both transfer
 directions.
 
+Native Codex MCP starts now derive provider ownership from the matching trusted
+`CODEX_THREAD_ID`. When the authentic original Codex session emits a hook for an
+older route, OTM atomically attaches the same owner identity and records fresh
+activity, guarded by the exact route revision and canonical session binding.
+It preserves the route, gates and evidence. Shared reads do not perform this
+upgrade. A detached legacy route without verified activity or outstanding-job
+coverage remains readable, but cannot be taken over from its timestamp alone;
+resume its original host once or recover its exact outstanding work first.
+
+After updating OTM source, reconnect an already-running Claude OTM MCP server
+once through `/mcp` so its cached Node modules reload. Hook commands load fresh
+source on their next event. This is an update step, not a per-task requirement.
+
 Codex reads the same canonical store through `otm shared-history` and
 `otm shared-task --run-id <id>`. For a user-requested Codex continuation, pass
 the exact route revision from that snapshot to
@@ -314,6 +347,13 @@ for continuation. It calls the same provider-neutral adapter, trusted host
 inspector, and store-level owner/revision/activity compare-and-swap as Claude's
 `otm_continue` tool. These reads and continuation do not import native provider
 transcripts or copy summaries.
+
+The Codex history CLI uses the same compact projection and paging:
+
+```powershell
+otm shared-history --scope all --limit 10 --offset 0 --json
+otm shared-history --run-id RUN --summary-id SUMMARY --offset 0 --max-chars 4000 --json
+```
 
 Codex hooks bind only the official hook payload's `session_id`. They reject a
 missing or conflicting session alias and never substitute the `CODEX_THREAD_ID`
