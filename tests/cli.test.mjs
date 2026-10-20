@@ -189,10 +189,7 @@ export function inspectOwnerWork(input) {
     ).at(-1),
   );
   assert.equal(sharedHistory.runs[0].id, route.run.id);
-  assert.equal(
-    sharedHistory.runs[0].metadata.providerSession.provider,
-    "claude",
-  );
+  assert.equal(sharedHistory.runs[0].owner.provider, "claude");
   assert.equal(
     JSON.stringify(sharedHistory).includes("claude-shared-cli-owner"),
     false,

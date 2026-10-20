@@ -25,7 +25,10 @@ export function historyRun(run) {
     owner: owner
       ? {
           provider: owner.provider,
-          nativeSessionId: owner.nativeSessionId,
+          // Claude's native session UUID stays private (capabilities encrypt
+          // it); Codex's thread id is already the public route sessionId.
+          nativeSessionId:
+            owner.provider === "claude" ? null : owner.nativeSessionId,
           verifiedProviderRecord: true,
         }
       : {

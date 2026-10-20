@@ -155,6 +155,50 @@ export function combinePromptContext(prompt, options = {}) {
   );
 }
 
+// Client-generated frames that reach UserPromptSubmit but are not user
+// requests: subagent hand-backs, background-task notifications, system
+// reminders, cross-session/side-session events and local slash-command echoes.
+const HARNESS_FRAME_TAGS = [
+  "agent-message",
+  "task-notification",
+  "system-reminder",
+  "cross-session-message",
+  "side-sessions-event",
+  "ci-monitor-event",
+  "local-command-caveat",
+  "local-command-stdout",
+  "local-command-stderr",
+  "command-name",
+  "command-message",
+  "command-args",
+];
+const HARNESS_FRAME_PATTERN = new RegExp(
+  `<(${HARNESS_FRAME_TAGS.join("|")})(\\s[^>]*)?>[\\s\\S]*?</\\1(\\s[^>]*)?>`,
+  "g",
+);
+
+/**
+ * Remove client-generated frames from a prompt so they never become route
+ * goals or source context. Returns the remaining user-authored text (trimmed);
+ * an empty string means the prompt was harness-only.
+ */
+export function stripHarnessFrames(prompt) {
+  const frameStart = `(?=<(?:${HARNESS_FRAME_TAGS.join("|")})[\\s>]|$)`;
+  return (
+    String(prompt || "")
+      // The notification preamble precedes its frame; drop it up to that frame.
+      .replace(
+        new RegExp(
+          `\\[SYSTEM NOTIFICATION - NOT USER INPUT\\][\\s\\S]*?${frameStart}`,
+          "g",
+        ),
+        "",
+      )
+      .replace(HARNESS_FRAME_PATTERN, "")
+      .trim()
+  );
+}
+
 export function classifyPrompt(prompt, hasActiveRun = false) {
   const text = String(prompt || "")
     .trim()

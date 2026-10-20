@@ -5488,3 +5488,39 @@ test("persistent checklist order stays planned and completion delta names the ch
   assert.match(completed.markdown, /Completed: First/);
   assert.doesNotMatch(completed.markdown, /Completed: Second/);
 });
+
+test("reconcile contractReviewed acknowledges context without inventing task changes", () => {
+  const workspaceRoot = tempWorkspace("otm-contract-ack-");
+  const env = testEnv("otm-contract-ack");
+  env.CODEX_THREAD_ID = "contract-ack-session";
+  const manager = createTaskManager({ cwd: workspaceRoot, env });
+  manager.start({
+    workspaceRoot,
+    replaceExisting: true,
+    goal: "Acknowledge reviewed context",
+    prompt: "Phase 1 establishes the route.",
+  });
+  const steered = manager.reconcile({
+    workspaceRoot,
+    prompt: "Status note that changes no requirement.",
+  });
+  assert.equal(steered.snapshot.contractReview.status, "needs_model_review");
+  const unreviewed = manager.reconcile({ workspaceRoot, mode: "continue" });
+  assert.equal(unreviewed.changed, 0);
+  assert.equal(unreviewed.snapshot.contractReview.status, "needs_model_review");
+  assert.match(
+    unreviewed.snapshot.lastUpdate.message,
+    /contractReviewed: true/,
+  );
+  const acknowledged = manager.reconcile({
+    workspaceRoot,
+    mode: "continue",
+    contractReviewed: true,
+  });
+  assert.equal(acknowledged.changed, 0);
+  assert.equal(acknowledged.snapshot.contractReview.status, "reviewed");
+  assert.equal(
+    acknowledged.snapshot.contractReview.sourceContextDigest,
+    steered.snapshot.sourceContext.digest,
+  );
+});

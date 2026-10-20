@@ -9,8 +9,12 @@ const MAX_VISIBLE_MINI_STEPS = 12;
 const MAX_VISIBLE_WORKSPACE_ALIASES = 8;
 const MAX_VISIBLE_WORKSPACE_ALIAS_BYTES = 2_048;
 
+const MAX_DETAIL_SOURCE_ENTRY_CHARS = 4_000;
+
 export function toMcpResult(result, { detail = false } = {}) {
-  const visibleResult = detail ? result : compactRouteResult(result);
+  const visibleResult = detail
+    ? boundDetailResult(result)
+    : compactRouteResult(result);
   return {
     content: [
       {
@@ -26,6 +30,60 @@ export function toMcpResult(result, { detail = false } = {}) {
       ok: true,
       result: sanitizeStructuredResult(visibleResult),
     },
+  };
+}
+
+/**
+ * Detail stays a full route dump, but accumulated prompt sources can reach
+ * hundreds of KB and appear twice (run metadata and snapshot). Keep one copy
+ * and cap each entry's text so a detail read fits a client tool result.
+ */
+function boundDetailResult(result) {
+  if (!result || typeof result !== "object") return result;
+  const bounded = { ...result };
+  const snapshotDigest = result.snapshot?.sourceContext?.digest;
+  if (bounded.snapshot?.sourceContext)
+    bounded.snapshot = {
+      ...bounded.snapshot,
+      sourceContext: boundSourceContext(bounded.snapshot.sourceContext),
+    };
+  const runContext = result.run?.metadata?.sourceContext;
+  if (runContext)
+    bounded.run = {
+      ...result.run,
+      metadata: {
+        ...result.run.metadata,
+        sourceContext:
+          snapshotDigest && runContext.digest === snapshotDigest
+            ? {
+                digest: runContext.digest,
+                entryCount: runContext.entryCount,
+                totalBytes: runContext.totalBytes,
+                sameAs: "snapshot.sourceContext",
+              }
+            : boundSourceContext(runContext),
+      },
+    };
+  return bounded;
+}
+
+function boundSourceContext(context) {
+  if (!Array.isArray(context?.entries)) return context;
+  return {
+    ...context,
+    entries: context.entries.map((entry) => {
+      if (
+        !entry ||
+        typeof entry.text !== "string" ||
+        entry.text.length <= MAX_DETAIL_SOURCE_ENTRY_CHARS
+      )
+        return entry;
+      return {
+        ...entry,
+        text: `${entry.text.slice(0, MAX_DETAIL_SOURCE_ENTRY_CHARS)}… [${entry.text.length - MAX_DETAIL_SOURCE_ENTRY_CHARS} more characters stored in OTM]`,
+        textTruncated: true,
+      };
+    }),
   };
 }
 

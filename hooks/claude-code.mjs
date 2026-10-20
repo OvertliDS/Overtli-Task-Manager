@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
-import { classifyPrompt } from "../src/core/planner.mjs";
+import { classifyPrompt, stripHarnessFrames } from "../src/core/planner.mjs";
 import { compactOneLine } from "../src/core/text-utils.mjs";
 import { createProviderAdapter } from "../src/core/provider-adapter.mjs";
 import { mapClaudeHookPayload } from "../src/core/provider-session.mjs";
@@ -389,7 +389,10 @@ function claudeStopHostBlocker({
   return coverage.pendingCount > 0 ? "ODC_WORK_PENDING" : null;
 }
 
-function handlePrompt(adapter, payload, workspaceRoot, prompt) {
+function handlePrompt(adapter, payload, workspaceRoot, rawPrompt) {
+  // Subagent hand-backs, task notifications and reminders arrive through
+  // UserPromptSubmit too; they must not start routes or reopen contract review.
+  const prompt = stripHarnessFrames(rawPrompt);
   if (!prompt) return { continue: true, suppressOutput: true };
   adapter.observeHostHook({
     eventName: "UserPromptSubmit",

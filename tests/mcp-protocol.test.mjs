@@ -171,10 +171,7 @@ test("route MCP results are compact by default with explicit full-detail access"
     ) <= 2_048,
     true,
   );
-  assert.equal(
-    compactResult.canonicalIdentity.workspaceAliasesOmittedCount,
-    4,
-  );
+  assert.equal(compactResult.canonicalIdentity.workspaceAliasesOmittedCount, 4);
   assert.equal(
     compactResult.canonicalIdentity.workspaceAliases.includes(
       workspaceAliases[1],
@@ -536,4 +533,32 @@ test("MCP stdio protocol rejects malformed arguments and returns scoped structur
   } finally {
     await client.close();
   }
+});
+
+test("detail results cap long source entries and keep one source-context copy", () => {
+  const longText = "x".repeat(10_000);
+  const sourceContext = {
+    digest: "d1",
+    entryCount: 2,
+    totalBytes: 10_005,
+    entries: [{ text: longText }, { text: "short" }],
+  };
+  const detailed = toMcpResult(
+    {
+      run: { id: "run_1", metadata: { sourceContext } },
+      snapshot: { sourceContext },
+      markdown: "dump",
+    },
+    { detail: true },
+  ).structuredContent.result;
+  const [first, second] = detailed.snapshot.sourceContext.entries;
+  assert.equal(first.textTruncated, true);
+  assert.ok(first.text.length < 4_100);
+  assert.match(first.text, /6000 more characters stored in OTM/);
+  assert.equal(second.text, "short");
+  assert.equal(
+    detailed.run.metadata.sourceContext.sameAs,
+    "snapshot.sourceContext",
+  );
+  assert.equal(detailed.run.metadata.sourceContext.entries, undefined);
 });

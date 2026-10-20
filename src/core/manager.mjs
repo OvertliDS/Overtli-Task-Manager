@@ -182,7 +182,9 @@ export function createTaskManager(options = {}) {
       "SESSION_SCOPE_MISMATCH",
     );
     assertCondition(
-      typeof args.toSessionId === "string" && args.toSessionId.trim() && args.fromSessionId !== args.toSessionId,
+      typeof args.toSessionId === "string" &&
+        args.toSessionId.trim() &&
+        args.fromSessionId !== args.toSessionId,
       "A different receiving provider session is required for continuation.",
       "INVALID_PROVIDER_CONTINUATION",
     );
@@ -216,9 +218,12 @@ export function createTaskManager(options = {}) {
       toProviderContext: args.toProviderContext,
       updatedAt: at,
     });
-    const snapshot = snapshotForRun(next, {
+    const snapshot = snapshotForRun(
+      next,
+      {
         kind: "provider_continuation",
-        message: "This provider explicitly accepted exclusive ownership of the shared route.",
+        message:
+          "This provider explicitly accepted exclusive ownership of the shared route.",
         at,
       },
       { write: false },
@@ -1586,9 +1591,12 @@ export function createTaskManager(options = {}) {
       : previousSourceContext;
     const sourceContextChanged =
       sourceContext.digest !== previousSourceContext.digest;
+    // A model call may also acknowledge the context explicitly when the
+    // existing gates already cover it; hooks never pass contractReviewed.
     const includesModelReview =
       (Array.isArray(args.tasks) && args.tasks.length > 0) ||
-      (Array.isArray(args.changes) && args.changes.length > 0);
+      (Array.isArray(args.changes) && args.changes.length > 0) ||
+      args.contractReviewed === true;
     const tasks = store.getTasks(run.id);
     const originalById = new Map(tasks.map((task) => [task.id, task]));
     let workingTasks = tasks.map((task) => ({
@@ -1791,7 +1799,9 @@ export function createTaskManager(options = {}) {
       kind: "run_reconciled",
       message: changed
         ? `Route updated with ${changed} change${changed === 1 ? "" : "s"}.`
-        : "Route checked. No changes were needed.",
+        : run.metadata?.contractReview?.status === "needs_model_review"
+          ? "Route unchanged; the accumulated source context still needs model review. After re-reading it, call otm_reconcile with contractReviewed: true (or with tasks/changes) before completing gates."
+          : "Route checked. No changes were needed.",
       at: now,
     });
     return {
@@ -3315,8 +3325,7 @@ function evidenceFromArgs(input = {}) {
 function hasMeaningfulEvidenceInput(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) return false;
   const summary = String(input.summary || input.message || "").trim();
-  const hasText =
-    summary.length > 0 && summary !== DEFAULT_EVIDENCE_SUMMARY;
+  const hasText = summary.length > 0 && summary !== DEFAULT_EVIDENCE_SUMMARY;
   const hasCommand =
     input.command !== undefined &&
     input.command !== null &&
@@ -3525,7 +3534,7 @@ function buildContractReview({
 function assertContractReviewed(run) {
   assertCondition(
     run.metadata?.contractReview?.status !== "needs_model_review",
-    "Reconcile the complete accumulated source context before completing route gates.",
+    "Reconcile the complete accumulated source context before completing route gates: re-read it, then call otm_reconcile with tasks/changes for any new requirement, or with contractReviewed: true when the current gates already cover it.",
     "CONTRACT_REVIEW_REQUIRED",
     { contractReview: run.metadata?.contractReview },
   );

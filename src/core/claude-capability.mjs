@@ -253,16 +253,26 @@ function readCapabilityKey(env) {
   }
 }
 
+// Resolve Windows tools from System32 so a GNU whoami/icacls earlier on PATH
+// (Git Bash, MSYS) cannot break or spoof key protection.
+function windowsSystemTool(name) {
+  return path.join(
+    process.env.SystemRoot || process.env.windir || "C:\\Windows",
+    "System32",
+    name,
+  );
+}
+
 function protectKeyFile(keyPath) {
   if (process.platform !== "win32") {
     fs.chmodSync(keyPath, 0o600);
     return;
   }
-  const who = spawnSync("whoami.exe", ["/user", "/fo", "csv", "/nh"], {
-    encoding: "utf8",
-    windowsHide: true,
-    timeout: 5000,
-  });
+  const who = spawnSync(
+    windowsSystemTool("whoami.exe"),
+    ["/user", "/fo", "csv", "/nh"],
+    { encoding: "utf8", windowsHide: true, timeout: 5000 },
+  );
   if (who.status !== 0)
     throw new Error("unable to resolve current Windows account");
   const identity = /^\s*"([^"]+)"\s*,\s*"(S-1-\d+(?:-\d+)+)"\s*$/m.exec(
@@ -273,13 +283,13 @@ function protectKeyFile(keyPath) {
   if (!account || !sid)
     throw new Error("unable to resolve current Windows account SID");
   const acl = spawnSync(
-    "icacls.exe",
+    windowsSystemTool("icacls.exe"),
     [keyPath, "/inheritance:r", "/grant:r", `*${sid}:(F)`],
     { encoding: "utf8", windowsHide: true, timeout: 5000 },
   );
   if (acl.status !== 0)
     throw new Error("unable to restrict Windows capability key ACL");
-  const verified = spawnSync("icacls.exe", [keyPath], {
+  const verified = spawnSync(windowsSystemTool("icacls.exe"), [keyPath], {
     encoding: "utf8",
     windowsHide: true,
     timeout: 5000,

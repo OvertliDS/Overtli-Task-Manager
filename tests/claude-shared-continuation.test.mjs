@@ -798,6 +798,26 @@ test("Claude lifecycle hooks record observations and block unsafe Stop decisions
     "a simple status prompt does not create an OTM route",
   );
 
+  const handBack = runClaudeHook(
+    hookPayload("UserPromptSubmit", sessionId, {
+      cwd: workspaceRoot,
+      prompt:
+        '<agent-message from="a1">\n[Subagent hand-back] The text below is the final report of a subagent. Implement and fix the config file, update docs; then add tests.\n</agent-message>',
+    }),
+    { env, cwd: workspaceRoot },
+  );
+  assert.ok(
+    capabilityFromHookResult(handBack),
+    "harness-only prompts still refresh the capability",
+  );
+  assert.equal(
+    store
+      .listRuns(null, 10)
+      .find((run) => run.sessionId?.startsWith("otm-provider:claude:v1:")),
+    undefined,
+    "a subagent hand-back is not a user request and does not create a route",
+  );
+
   const routeStarter = adapter({
     provider: "claude",
     nativeSessionId: sessionId,

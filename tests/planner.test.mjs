@@ -3,6 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   classifyPrompt,
+  stripHarnessFrames,
   deriveFallbackTasks,
   planFallbackRoute,
 } from "../src/core/planner.mjs";
@@ -276,5 +277,29 @@ Phase 3: Publish the release notes.
   assert.doesNotMatch(
     JSON.stringify(requested),
     /storage contract|release notes/i,
+  );
+});
+
+test("stripHarnessFrames removes client frames but keeps user text", () => {
+  const handBack =
+    '<agent-message from="a1">\n[Subagent hand-back] report\n  (1) done\n</agent-message>';
+  assert.equal(stripHarnessFrames(handBack), "");
+  const notification =
+    "[SYSTEM NOTIFICATION - NOT USER INPUT]\nThis is an automated background-task event.\n<task-notification>\n<task-id>x</task-id>\n<status>completed</status>\n</task-notification>";
+  assert.equal(stripHarnessFrames(notification), "");
+  assert.equal(
+    stripHarnessFrames(
+      "<system-reminder>ctx</system-reminder>\nPlease also fix the docs.",
+    ),
+    "Please also fix the docs.",
+  );
+  assert.equal(
+    stripHarnessFrames("Fix the <agent-message> parser docs"),
+    "Fix the <agent-message> parser docs",
+    "an unclosed tag mention in user text is preserved",
+  );
+  assert.equal(
+    stripHarnessFrames('<pasted_content id="1">user paste</pasted_content>'),
+    '<pasted_content id="1">user paste</pasted_content>',
   );
 });

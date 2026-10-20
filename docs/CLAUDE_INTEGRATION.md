@@ -273,6 +273,17 @@ pass each needed `KEY=value` before `--` with the CLI's `--env` option. Verify
 the actual registration using `claude mcp get otm` and the signed `otm_history`
 tool against the expected canonical run before relying on shared history.
 
+Claude delivers subagent hand-backs, background-task notifications, system
+reminders and slash-command echoes through `UserPromptSubmit`. The Claude hook
+strips these client frames (`stripHarnessFrames` in `src/core/planner.mjs`)
+before classification, so they never start a route, become its goal, or reopen
+contract review; a prompt that is only frames still refreshes the capability.
+When new source context does arrive and the existing gates already cover it,
+call `otm_reconcile` with `contractReviewed: true` after re-reading it; hooks
+never set that flag. `otm_snapshot` with `detail: true` keeps one copy of the
+source context and caps each entry at 4,000 characters, and shared history no
+longer exposes Claude's native session UUID.
+
 The Claude frontend exposes start, reconcile, gate activation, progress,
 completion, blocking, audit, resume, checkpoint, exact snapshot, shared history,
 and explicit continuation tools. Read tools discover this user's canonical OTM

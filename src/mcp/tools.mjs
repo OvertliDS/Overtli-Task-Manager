@@ -101,6 +101,11 @@ export const tools = [
           items: reconciliationChangeSchema,
         },
         tasks: taskListSchema,
+        contractReviewed: {
+          type: "boolean",
+          description:
+            "Set true after re-reading the complete accumulated source context when the current gates already cover it and no task changes are needed. Clears CONTRACT_REVIEW_REQUIRED without inventing a change.",
+        },
       },
     },
   },
