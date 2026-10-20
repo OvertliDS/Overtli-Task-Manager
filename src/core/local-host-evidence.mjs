@@ -604,6 +604,19 @@ function observeNativeSubagent({ config, base, owner, current, now }) {
     ];
   } else {
     if (!existing || existing.status !== "active") {
+      // A stop never represents running work. An untyped, transcript-less helper
+      // stop has no identity to match, so it is ignored rather than invalidating.
+      if (
+        isAbsentText(payload.agent_type) &&
+        isAbsentText(payload.agent_transcript_path)
+      ) {
+        return hookResult({
+          observed: true,
+          coverage: current,
+          dispatchAllowed: true,
+          code: null,
+        });
+      }
       const coverage = invalidateOwnerCoverage({
         receiptRoot: config.receiptRoot,
         owner,
@@ -636,6 +649,15 @@ function observeNativeSubagent({ config, base, owner, current, now }) {
     coverage: saved.coverage,
     code: saved.code || null,
   });
+}
+
+/** True when an optional hook field is missing, null, or blank. Non-string values count as present. */
+function isAbsentText(value) {
+  return (
+    value === undefined ||
+    value === null ||
+    (typeof value === "string" && value.trim() === "")
+  );
 }
 
 function observeNativeContractCreate({

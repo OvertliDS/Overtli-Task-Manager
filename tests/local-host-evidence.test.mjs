@@ -681,6 +681,68 @@ test("Claude native contract links transport owner to its exact task and active 
   );
 });
 
+test("untyped transcript-less unmatched Claude helper stop leaves owner coverage complete", () => {
+  const fixture = createFixture();
+  const input = claudeInspectionInput(fixture);
+  const helperId = "claude-helper-agent-01";
+  const untypedPayloads = [
+    {},
+    { agent_type: null, agent_transcript_path: null },
+    { agent_type: "", agent_transcript_path: "" },
+  ];
+  for (const payloadExtras of untypedPayloads) {
+    const hook = createClaudeHook(input, {
+      eventName: "SubagentStop",
+      agentId: helperId,
+      payloadExtras,
+    });
+    const result = observeHostHook(hook);
+    assert.equal(result.observed, true, JSON.stringify(result));
+    assert.equal(result.dispatchAllowed, true);
+    assert.equal(result.code, null);
+    assert.equal(result.coverage.complete, true);
+  }
+  const coverage = JSON.parse(
+    fs.readFileSync(
+      ownerCoveragePath(
+        fixture,
+        "claude",
+        input.ownerSession.nativeSessionId,
+      ),
+      "utf8",
+    ),
+  );
+  assert.equal(coverage.complete, true);
+  assert.equal(
+    coverage.subagents.some((row) => row.agentId === helperId),
+    false,
+  );
+});
+
+test("typed or transcript-backed unmatched Claude stop still invalidates owner coverage", () => {
+  const typedPayloads = [
+    { agent_type: "Explore" },
+    {
+      agent_type: "Explore",
+      agent_transcript_path: "C:\\private\\subagent.jsonl",
+    },
+    { agent_transcript_path: "C:\\private\\subagent.jsonl" },
+  ];
+  for (const payloadExtras of typedPayloads) {
+    const fixture = createFixture();
+    const input = claudeInspectionInput(fixture);
+    const hook = createClaudeHook(input, {
+      eventName: "SubagentStop",
+      agentId: "claude-helper-agent-02",
+      payloadExtras,
+    });
+    const result = observeHostHook(hook);
+    assert.equal(result.observed, false, JSON.stringify(result));
+    assert.equal(result.code, "NATIVE_SUBAGENT_STOP_UNMATCHED");
+    assert.equal(result.coverage.complete, false);
+  }
+});
+
 test("native completion status without exact physical receipt or after material drift stays unknown", () => {
   const fixture = createFixture();
   writeNativeTask(fixture, {
@@ -1099,6 +1161,7 @@ function createClaudeHook(
     toolUseId = "tool-use-claude-ci14-01",
     agentId,
     run = input.run,
+    payloadExtras = {},
   },
 ) {
   const providerSession = input.run.metadata.providerSession;
@@ -1120,6 +1183,7 @@ function createClaudeHook(
       tool_input: toolInput,
       tool_response: response,
       ...(agentId ? { agent_id: agentId } : {}),
+      ...payloadExtras,
     },
   };
 }
