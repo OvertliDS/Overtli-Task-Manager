@@ -257,13 +257,53 @@ export function renderDeltaMarkdown(snapshot, options = {}) {
   lines.push(`### ${title}`);
   if (snapshot.lastUpdate?.message)
     lines.push(markdownEscapeText(snapshot.lastUpdate.message));
-  const completed = lastCompletedTask(snapshot);
+  const completed =
+    snapshot.lastUpdate?.kind === "task_completed"
+      ? lastCompletedTask(snapshot)
+      : null;
   if (completed)
     lines.push(`✅ Completed: ${markdownEscapeText(completed.title)}`);
   if (snapshot.currentTaskTitle && !snapshot.stopAllowed)
-    lines.push(`▶ Now: ${markdownEscapeText(snapshot.currentTaskTitle)}`);
+    lines.push(
+      `${snapshot.lastUpdate?.kind === "task_completed" ? "▶ Next gate" : "▶ Active gate"}: ${markdownEscapeText(snapshot.currentTaskTitle)}`,
+    );
+  else if (
+    snapshot.lastUpdate?.kind === "task_completed" &&
+    snapshot.stopAllowed
+  )
+    lines.push("✅ All required gates are complete.");
+  lines.push(
+    `Progress: ${snapshot.progress.requiredDone}/${snapshot.progress.requiredTotal} required gates complete`,
+  );
   lines.push(
     `Gate: ${snapshot.stopAllowed ? "Stop allowed" : snapshot.stopReason}`,
+  );
+  return `${lines.join("\n")}\n`;
+}
+
+export function renderCompactSnapshotMarkdown(snapshot, options = {}) {
+  const lines = [`## ${options.title || "OTM Status"}`, ""];
+  if (snapshot.goal)
+    lines.push(`**Goal:** ${markdownEscapeText(snapshot.goal)}`);
+  if (snapshot.progress)
+    lines.push(
+      `**Progress:** ${snapshot.progress.requiredDone}/${snapshot.progress.requiredTotal} required gates complete (${snapshot.progress.percentRequired}%)`,
+    );
+  if (snapshot.currentTaskTitle)
+    lines.push(
+      `**Current gate:** ${markdownEscapeText(snapshot.currentTaskTitle)}`,
+    );
+  else lines.push("**Current gate:** none");
+  if (snapshot.currentInternalStep)
+    lines.push(
+      `**Current subtask:** ${snapshot.currentInternalStep.done}/${snapshot.currentInternalStep.total} done; ${markdownEscapeText(snapshot.currentInternalStep.title)}`,
+    );
+  if (snapshot.lastUpdate?.message)
+    lines.push(
+      `**Latest:** ${markdownEscapeText(snapshot.lastUpdate.message)}`,
+    );
+  lines.push(
+    `**Gate:** ${snapshot.stopAllowed ? "Stop allowed" : `Stop blocked — ${snapshot.stopReason || "required work remains"}`}`,
   );
   return `${lines.join("\n")}\n`;
 }

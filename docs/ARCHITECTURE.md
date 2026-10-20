@@ -123,7 +123,8 @@ preserve valid evidence and timestamps; new required descendants reopen a
 previously completed parent. A task cannot move to `done` while contract review
 is pending, a fallback scaffold remains, a required dependency/mini-step/
 internal subtask is non-terminal, required descendant evidence is absent, or
-gate evidence is missing.
+neither direct gate evidence nor complete required-descendant evidence is
+available to reuse as gate proof.
 
 `routeIntent` is derived from the active gates and persisted in run metadata,
 snapshots, and summaries. It is `mixed` whenever gate labels differ or a gate

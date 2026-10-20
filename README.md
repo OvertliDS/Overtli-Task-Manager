@@ -21,7 +21,7 @@ Overtli Task Manager (OTM) structures AI coding sessions into evidence-backed ro
 - **Optimized Rendering:** Shows a full checklist at route start and finalization, then compact progress cards during routine work.
 - **Task Normalization:** Keeps one active route segment where possible, blocks manual jumps until the active task is handled, and lets reconciliation intentionally add, merge, reopen, or reorder work.
 - **Model-Guided Three-Tier Routes:** Represents major outcomes as route gates, substantive explicit/inferred work as internal subtasks, and concrete actions as nested mini-steps without prescribing generic domain content.
-- **Recursive Evidence Gates:** Prevents a route gate from closing until model review is current, every required internal subtask and mini-step is terminal with required evidence, and the gate itself has completion evidence.
+- **Recursive Evidence Gates:** Prevents a route gate from closing until model review is current and every required internal subtask and mini-step is terminal with required evidence; the gate may reuse that validated descendant proof when no separate gate receipt is needed.
 - **Accumulated Source Contract:** Normalizes bounded inline/pasted text, structured prompt context, attachment/OCR text, and visual descriptions with provenance and revision digests across steering, restart, summaries, and export/import.
 - **Lifecycle Hooks:** Intercepts sessions, prompts, tools, and stops to enforce task completion and audit progress.
 - **Workspace Memory:** Keeps a lightweight, high-signal index of project guides (`AGENTS.md`), memory banks, and schemas.
@@ -166,6 +166,7 @@ node ~/.codex/plugins/overtli-task-manager/bin/otm.mjs install-global
 ```
 
 This idempotently merges OTM lifecycle hooks into `~/.codex/hooks.json` without removing unrelated hooks and copies the packaged skills into `~/.codex/skills`. Use `--codex-home PATH` for a non-default Codex home.
+An unchanged install creates no recovery directory; when targets change, the transaction backs up only those hook or skill files before applying them.
 
 `otm install` patches root `AGENTS.md` by default. If a repository has `AGENTS.override.md`, the installer reports a warning and leaves it untouched unless you explicitly run:
 
@@ -379,21 +380,28 @@ override allows it.
 | Internal subtasks and mini-steps normalize to durable records with stable IDs, provenance, criteria, dependencies, evidence, and status | Handoffs resume at the exact descendant                                         |
 | Non-atomic internal subtasks require one or more outcome-specific mini-steps                                                            | A subtask cannot hide unfinished concrete work                                  |
 | Atomic subtasks require an explicit rationale                                                                                           | “Atomic” cannot become a silent shortcut                                        |
-| `otm_progress` updates either tier by exact id, title, index, or object                                                                 | Evidence and timestamps stay attached to the work they prove                    |
+| `otm_progress` updates descendants by exact id; one call can batch ordered updates within one named gate | One evidence payload is applied across the batch and the whole update commits once |
 | Required descendants must be `done` or intentionally `skipped` with required evidence                                                   | Pending, active, blocked, or unreviewed descendants keep the parent gate closed |
-| `otm_complete_task` still requires gate evidence                                                                                        | Descendant completion never substitutes for segment acceptance                  |
+| `otm_complete_task` reuses gate proof or complete required-descendant proof when available                                           | Missing descendant proof or a gate with no accepted evidence still blocks       |
 
 ### Hooks And Completion
 
 | Area               | Behavior                                                                                                                                                          |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| MCP results        | Markdown/plain-text first; full JSON remains available through `otm://current`                                                                                    |
+| MCP results        | Compact gate milestones and ID/action summaries by default; `detail: true` on `otm_snapshot` or `otm_audit_stop` requests full route detail |
 | Passive hooks      | Touch route state only when the current Codex session is identifiable                                                                                             |
 | Duplicate installs | Cross-process invocation claims suppress duplicate global/workspace hook output                                                                                   |
 | Evidence tracking  | Defaults to file edits, validation/build commands, failures, and explicit OTM checkpoints                                                                         |
 | Opt-ins            | `OTM_RECORD_PRE_TOOL=1`, `OTM_TRACK_MCP_EVIDENCE=1`, `OTM_CLAIM_LEGACY_ROUTE=1`; set `OTM_AUTO_SYNC_AGENTS=0` only to opt out of root instruction synchronization |
 | Finalization       | Stop-hook finalization is enabled by default; set `OTM_STOP_AUTO_FINALIZE=0` only to require manual finalization and clearing                                     |
 | Hook timeouts      | SessionStart 15s, UserPromptSubmit 12s, PreToolUse 8s, PostToolUse 12s, Pre/PostCompact 15s, Stop 45s                                                             |
+
+The normal MCP response shows concise gate completion, the next active gate,
+reconciliation, or Stop status. Use `detail: true` on `otm_snapshot` or
+`otm_audit_stop` only when the full descendant tree, evidence, or source context
+is needed; canonical files and the `otm://current` resource retain full state.
+Stop-hook bookkeeping suppresses routine summary output after finalization, so
+it does not echo a second full summary into chat.
 
 Normal closeout is automatic. Run `otm_audit_stop`; if required work remains,
 continue the active route. Once the audit passes, the Stop hook writes the
@@ -403,8 +411,9 @@ reuses the validated summary without requesting hierarchy reconciliation. This
 also allows Stop after the model has already sent that summary; the hook returns
 only its compact id and does not ask the model to send it again. The host-marked
 repeated Stop is also released. Set `OTM_STOP_AUTO_FINALIZE=0` only
-when a client must manually call `otm_finalize_turn`, present its summary, and
-then call `otm_clear_current`. Stop-hook execution failures fail open with a
+when a client must manually call `otm_finalize_turn`, present its concise
+completion receipt, and then call `otm_clear_current`. The full hierarchy-aware
+summary remains persisted for later review. Stop-hook execution failures fail open with a
 warning, while explicit `otm_audit_stop` remains the authoritative completion
 check.
 
@@ -415,8 +424,9 @@ complete accumulated source contract and replace the non-completable fallback
 with a three-tier route. Later prompt/attachment/visual steering is appended to
 the canonical contract and marks review pending until a model reconciliation
 updates the hierarchy. Completing a gate requires terminal evidence-backed
-descendants plus gate evidence, then atomically activates the next eligible
-gate. OTM preserves the hierarchy and context across pauses and reloads. Hooks
+descendants; their validated proof may satisfy gate evidence without a duplicate
+receipt. Completion then atomically activates the next eligible gate. OTM
+preserves the hierarchy and context across pauses and reloads. Hooks
 and MCP cannot invoke Codex's private goal API themselves, but
 their managed instructions and prompt context direct Codex to create one native
 goal when that control is available, keep it active through all OTM segments,

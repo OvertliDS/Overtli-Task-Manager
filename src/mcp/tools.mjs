@@ -3,6 +3,7 @@ import {
   evidenceSchema,
   internalStepInputSchema,
   miniStepInputSchema,
+  progressUpdateSchema,
   reconciliationChangeSchema,
   taskListSchema,
 } from "./schemas.mjs";
@@ -106,13 +107,14 @@ export const tools = [
   {
     name: "otm_snapshot",
     description:
-      "Return the current route snapshot as Markdown and structured JSON. Use for chat-visible status updates.",
+      "Return a compact current-route status with actionable gate and descendant IDs. Set detail=true only when the complete route, evidence, or source context is needed; durable full state remains in otm://current.",
     inputSchema: {
       type: "object",
       properties: {
         workspaceRoot: { type: "string" },
         sessionId: { type: "string" },
         runId: { type: "string" },
+        detail: { type: "boolean" },
       },
     },
   },
@@ -135,7 +137,7 @@ export const tools = [
   {
     name: "otm_progress",
     description:
-      "Record evidence-backed progress for a route gate, one internal subtask, or one nested mini-step. Use exact ids from the latest canonical snapshot. A non-atomic internal subtask cannot complete until required mini-steps are terminal; the route gate still requires every required descendant plus segment evidence.",
+      "Record evidence-backed progress for one route gate or descendants. Use updates to batch up to 256 exact descendant IDs in one named taskId and one atomic operation; all updates share the top-level evidence. Updates apply in array order, and one invalid update commits none. Existing one-internal/one-mini fields remain available. Required descendants still need terminal, evidence-backed completion before their parent gate can close.",
     inputSchema: {
       type: "object",
       properties: {
@@ -187,14 +189,20 @@ export const tools = [
           ],
         },
         advanceMiniStep: { type: "boolean" },
+        updates: {
+          type: "array",
+          maxItems: 256,
+          items: progressUpdateSchema,
+          description:
+            "Ordered exact-ID descendant updates for one taskId, sharing this call's evidence.",
+        },
       },
-      required: ["message"],
     },
   },
   {
     name: "otm_complete_task",
     description:
-      "Close a route gate using an exact taskId from the latest canonical snapshot. Requires concrete segment evidence, model-reviewed decomposition, and every required internal subtask and nested mini-step terminal.",
+      "Close a route gate using an exact taskId from the latest canonical snapshot. Requires model-reviewed decomposition and every required descendant terminal with its required evidence. Supply evidence only when valid gate or descendant evidence has not already been recorded; OTM reuses existing proof and still rejects a gate with no accepted evidence.",
     inputSchema: {
       type: "object",
       properties: {
@@ -204,7 +212,7 @@ export const tools = [
         taskId: { type: "string" },
         evidence: evidenceSchema,
       },
-      required: ["taskId", "evidence"],
+      required: ["taskId"],
     },
   },
   {
@@ -245,20 +253,21 @@ export const tools = [
   {
     name: "otm_audit_stop",
     description:
-      "Read-only audit of whether Codex may stop. If required segments remain, continue working. When it passes, the Stop hook finalizes and clears automatically by default.",
+      "Read-only compact audit of whether Codex may stop. Set detail=true only when full route details are needed. If required segments remain, continue working. When it passes, the Stop hook finalizes and clears automatically by default.",
     inputSchema: {
       type: "object",
       properties: {
         workspaceRoot: { type: "string" },
         sessionId: { type: "string" },
         runId: { type: "string" },
+        detail: { type: "boolean" },
       },
     },
   },
   {
     name: "otm_finalize_turn",
     description:
-      "Manually write a turn summary and checkpoint memory. Normal Stop-hook completion does this automatically; use this tool when OTM_STOP_AUTO_FINALIZE=0 or when an explicit manual checkpoint is required, then call otm_clear_current.",
+      "Persist the full turn summary and checkpoint memory, returning a concise completion receipt. Normal Stop-hook completion does this automatically; use this tool when OTM_STOP_AUTO_FINALIZE=0 or when an explicit manual checkpoint is required, then call otm_clear_current.",
     inputSchema: {
       type: "object",
       properties: {

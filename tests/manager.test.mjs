@@ -2591,31 +2591,70 @@ test("three-tier gates require every mini-step before an internal subtask and ro
     (error) => error.code === "MINI_STEPS_INCOMPLETE",
   );
 
-  for (const miniStepId of ["mini_download", "mini_directory"]) {
-    manager.progress({
-      workspaceRoot,
-      taskId,
-      message: `Completed ${miniStepId}.`,
-      internalStepId: "step_3_1",
-      miniStepId,
-      miniStepStatus: "done",
-      evidence: {
-        kind: "test_result",
-        summary: `${miniStepId} verified.`,
-      },
-    });
-  }
+  const beforeInvalidBatch = manager.snapshot({
+    workspaceRoot,
+    write: false,
+  }).run.routeRevision;
+  assert.throws(
+    () =>
+      manager.progress({
+        workspaceRoot,
+        taskId,
+        message: "Reject the whole batch when one exact id is invalid.",
+        evidence: {
+          kind: "test_result",
+          summary: "Batch preflight proof.",
+        },
+        updates: [
+          {
+            internalStepId: "step_3_1",
+            miniStepId: "mini_download",
+            miniStepStatus: "done",
+          },
+          {
+            internalStepId: "step_3_1",
+            miniStepId: "missing_mini",
+            miniStepStatus: "done",
+          },
+        ],
+      }),
+    (error) => error.code === "MINI_STEP_NOT_FOUND",
+  );
+  assert.equal(
+    manager.snapshot({ workspaceRoot, write: false }).run.routeRevision,
+    beforeInvalidBatch,
+  );
+
+  const revisionBeforeBatch = manager.snapshot({
+    workspaceRoot,
+    write: false,
+  }).run.routeRevision;
   const parentDone = manager.progress({
     workspaceRoot,
     taskId,
-    message: "Model installation subtask complete.",
-    internalStepId: "step_3_1",
-    internalStepStatus: "done",
+    message: "All installation descendants verified in one batch.",
     evidence: {
       kind: "test_result",
-      summary: "All installation mini-steps verified.",
+      summary: "All installation descendants verified.",
     },
+    updates: [
+      {
+        internalStepId: "step_3_1",
+        miniStepId: "mini_download",
+        miniStepStatus: "done",
+      },
+      {
+        internalStepId: "step_3_1",
+        miniStepId: "mini_directory",
+        miniStepStatus: "done",
+      },
+      {
+        internalStepId: "step_3_1",
+        internalStepStatus: "done",
+      },
+    ],
   });
+  assert.equal(parentDone.run.routeRevision, revisionBeforeBatch + 1);
   const hierarchy = parentDone.snapshot.tasks[0].internalSteps[0];
   assert.equal(hierarchy.status, "done");
   assert.deepEqual(
@@ -2625,14 +2664,126 @@ test("three-tier gates require every mini-step before an internal subtask and ro
   assert.ok(hierarchy.evidence.length > 0);
   assert.ok(hierarchy.miniSteps.every((step) => step.evidence.length > 0));
 
+  // Simulate a valid imported route whose descendants hold the proof but whose
+  // parent gate has no duplicate evidence record.
+  manager.store.updateTask(taskId, { evidence: [] });
   const completed = manager.completeTask({
     workspaceRoot,
     taskId,
-    evidence: {
-      kind: "test_result",
-      summary: "Phase 3 recursive gate passed.",
+  });
+  assert.equal(completed.snapshot.stopAllowed, true);
+});
+
+test("synthesized progress history cannot replace explicit route completion proof", () => {
+  const workspaceRoot = tempWorkspace("otm-progress-proof-eligibility-");
+  const manager = createTaskManager({
+    cwd: workspaceRoot,
+    env: testEnv("otm-progress-proof-eligibility"),
+  });
+  const started = manager.start({
+    workspaceRoot,
+    replaceExisting: true,
+    goal: "Require explicit completion proof",
+    tasks: [
+      {
+        title: "Review the documentation",
+        internalSteps: [
+          {
+            id: "step_docs",
+            title: "Review the relevant documentation",
+            atomic: true,
+            atomicRationale: "This is one bounded manual documentation review.",
+            source: "explicit_prompt",
+          },
+        ],
+        metadata: {
+          decomposition: {
+            version: 2,
+            source: "model",
+            needsModelReview: false,
+          },
+        },
+      },
+    ],
+  });
+  const taskId = started.snapshot.tasks[0].id;
+
+  manager.progress({
+    workspaceRoot,
+    taskId,
+    message: "Reviewed the relevant documentation.",
+    internalStepId: "step_docs",
+    internalStepStatus: "done",
+  });
+  const generated = manager.store.getTask(taskId);
+  assert.equal(generated.evidence[0].completionProof, "progress_only");
+  assert.equal(
+    generated.metadata.internalSteps[0].evidence[0].completionProof,
+    "progress_only",
+  );
+  assert.throws(
+    () => manager.completeTask({ workspaceRoot, taskId }),
+    (error) => error.code === "EVIDENCE_REQUIRED",
+  );
+  assert.throws(
+    () => manager.completeTask({ workspaceRoot, taskId, evidence: {} }),
+    (error) => error.code === "EVIDENCE_REQUIRED",
+  );
+  for (const evidence of [
+    {},
+    { kind: "manual_note" },
+    { kind: "test_result", summary: "Evidence captured" },
+    { files: [], notes: {} },
+  ]) {
+    manager.progress({
+      workspaceRoot,
+      taskId,
+      message: "Continue recording progress only.",
+      evidence,
+      internalStepId: "step_docs",
+      internalStepStatus: "done",
+    });
+    assert.equal(
+      manager.store.getTask(taskId).evidence.at(-1).completionProof,
+      "progress_only",
+    );
+    assert.throws(
+      () => manager.completeTask({ workspaceRoot, taskId, evidence: {} }),
+      (error) => error.code === "EVIDENCE_REQUIRED",
+    );
+  }
+
+  const legacyFallback = {
+    kind: "manual_note",
+    summary: "Progress recorded",
+  };
+  manager.store.updateTask(taskId, {
+    evidence: [legacyFallback],
+    metadata: {
+      ...generated.metadata,
+      internalSteps: generated.metadata.internalSteps.map((step) => ({
+        ...step,
+        evidence: [legacyFallback],
+      })),
     },
   });
+  assert.throws(
+    () => manager.completeTask({ workspaceRoot, taskId }),
+    (error) => error.code === "EVIDENCE_REQUIRED",
+  );
+
+  manager.progress({
+    workspaceRoot,
+    taskId,
+    message: "The manual documentation review is complete.",
+    evidence: {
+      kind: "manual_note",
+      summary: "Reviewed the relevant docs and confirmed the required behavior.",
+    },
+    internalStepId: "step_docs",
+    internalStepStatus: "done",
+  });
+  const completed = manager.completeTask({ workspaceRoot, taskId });
   assert.equal(completed.snapshot.stopAllowed, true);
 });
 
@@ -3362,6 +3513,43 @@ test("global installer preserves unrelated hooks and installs discoverable skill
   assert.equal(
     second.results.find((item) => item.step === "skills").action,
     "unchanged",
+  );
+  const backupRoot = path.join(codexHome, "overtli-task-manager-backups");
+  assert.equal(second.noOp, true);
+  assert.equal(second.transactionBackupPath, null);
+  assert.equal(second.backupPath, null);
+  assert.equal(fs.readdirSync(backupRoot).length, 1);
+
+  const installedSkillPath = path.join(
+    codexHome,
+    "skills",
+    "overtli-task-manager",
+    "SKILL.md",
+  );
+  fs.appendFileSync(
+    installedSkillPath,
+    "\nLocal edit to exercise targeted recovery.\n",
+    "utf8",
+  );
+  const third = installGlobal({ codexHome, packageRoot });
+  assert.equal(third.ok, true);
+  const changedManifest = JSON.parse(
+    fs.readFileSync(
+      path.join(third.transactionBackupPath, "manifest.json"),
+      "utf8",
+    ),
+  );
+  assert.deepEqual(
+    changedManifest.files.map((item) => item.filePath),
+    [installedSkillPath],
+  );
+  assert.equal(fs.readdirSync(backupRoot).length, 2);
+  assert.equal(
+    fs.readFileSync(installedSkillPath, "utf8"),
+    fs.readFileSync(
+      path.join(packageRoot, "skills", "overtli-task-manager", "SKILL.md"),
+      "utf8",
+    ),
   );
 
   const hooks = JSON.parse(

@@ -42,10 +42,24 @@ export function installGlobal(options = {}) {
       ],
     };
   }
-  const originals = snapshotFiles([
-    hooksFile,
-    ...skillsPreview.installed.flatMap((item) => item.files || [item.path]),
-  ]);
+  const changedTargets = [
+    ...(hooksPreview.changed ? [hooksFile] : []),
+    ...skillsPreview.installed.flatMap((item) => item.changedFiles || []),
+  ];
+  if (changedTargets.length === 0)
+    return {
+      ok: true,
+      codexHome: root,
+      dryRun: false,
+      noOp: true,
+      backupPath: null,
+      transactionBackupPath: null,
+      results: [
+        { step: "hooks", ...hooksPreview, dryRun: false },
+        { step: "skills", ...skillsPreview, dryRun: false },
+      ],
+    };
+  const originals = snapshotFiles([...new Set(changedTargets)]);
   const transactionId = `global-install-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const transactionBackupPath = path.join(
     root,

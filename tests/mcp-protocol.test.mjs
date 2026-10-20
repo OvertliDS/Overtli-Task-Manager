@@ -9,7 +9,11 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { toMcpResult } from "../src/mcp/result.mjs";
 import { tools as mcpTools } from "../src/mcp/tools.mjs";
-import { parseScopedResourceUri, validateMcpArgs } from "../src/mcp/server.mjs";
+import {
+  MCP_SERVER_INSTRUCTIONS,
+  parseScopedResourceUri,
+  validateMcpArgs,
+} from "../src/mcp/server.mjs";
 import { currentJsonPath } from "../src/core/fs-utils.mjs";
 import { createTaskManager } from "../src/core/manager.mjs";
 
@@ -18,6 +22,27 @@ function tempWorkspace(prefix = "otm-mcp-test-") {
   fs.mkdirSync(path.join(root, ".git"), { recursive: true });
   return root;
 }
+
+test("MCP discovery repeats only a concise shared route instruction", (t) => {
+  const toolDescriptionBytes = mcpTools.reduce(
+    (total, tool) => total + Buffer.byteLength(tool.description || "", "utf8"),
+    0,
+  );
+  // Measured from the previous shared server instruction in the pre-change
+  // source, which the host repeats alongside every discovered tool.
+  const previousPrefixBytes = 1_644;
+  const currentPrefixBytes = Buffer.byteLength(MCP_SERVER_INSTRUCTIONS, "utf8");
+  const discoveredToolCount = mcpTools.length;
+  const beforeBytes =
+    toolDescriptionBytes + previousPrefixBytes * discoveredToolCount;
+  const afterBytes =
+    toolDescriptionBytes + currentPrefixBytes * discoveredToolCount;
+  assert.ok(currentPrefixBytes < 256);
+  assert.ok(afterBytes < beforeBytes / 2);
+  t.diagnostic(
+    `Effective discovered-description bytes: ${beforeBytes} -> ${afterBytes} across ${discoveredToolCount} tools (${beforeBytes - afterBytes} fewer).`,
+  );
+});
 
 test("MCP results provide Markdown and a redacted structured envelope", () => {
   const result = toMcpResult({
@@ -38,6 +63,140 @@ test("MCP results provide Markdown and a redacted structured envelope", () => {
   assert.deepEqual(fallback.structuredContent.result.remainingRequired, [
     { title: "Finish tests" },
   ]);
+});
+
+test("route MCP results are compact by default with explicit full-detail access", () => {
+  const workspaceAliases = [
+    "A".repeat(1_500),
+    "B".repeat(700),
+    ...Array.from({ length: 10 }, (_, index) => `alias-${index}`),
+  ];
+  const route = {
+    run: {
+      id: "run-compact",
+      status: "active",
+      goal: "Compact visible route milestones",
+      routeRevision: 4,
+      metadata: { sourceContext: { digest: "private-digest" } },
+    },
+    snapshot: {
+      schemaVersion: "otm.current.v2",
+      manager: "Overtli Task Manager",
+      status: "active",
+      runId: "run-compact",
+      goal: "Compact visible route milestones",
+      routeRevision: 4,
+      stopAllowed: false,
+      stopReason: "1 required route segment remains open.",
+      progress: {
+        requiredDone: 0,
+        requiredTotal: 1,
+        percentRequired: 0,
+      },
+      currentTaskId: "gate-1",
+      currentTaskTitle: "Implement the compact result projection",
+      currentInternalStep: {
+        id: "step-1",
+        title: "Update the renderer",
+        status: "active",
+        done: 0,
+        total: 1,
+      },
+      sourceContext: {
+        digest: "private-digest",
+        entries: [{ text: "private" }],
+      },
+      paths: { currentJson: "secret\current.json" },
+      tasks: [
+        {
+          id: "gate-1",
+          title: "Implement the compact result projection",
+          status: "active",
+          required: true,
+          metadata: { sourceContext: { digest: "private-digest" } },
+          internalSteps: [
+            {
+              id: "step-1",
+              title: "Update the renderer",
+              status: "active",
+              miniSteps: [{ id: "mini-1", title: "Add a compact renderer" }],
+            },
+          ],
+        },
+      ],
+      lastUpdate: {
+        kind: "stop_audit",
+        message: "Audit blocked. Keep working on the current gate.",
+      },
+    },
+    remainingRequired: [
+      {
+        id: "gate-1",
+        title: "Implement the compact result projection",
+        status: "active",
+        required: true,
+        metadata: { secret: "not model-facing" },
+      },
+    ],
+    canonicalIdentity: {
+      resolution: "canonical",
+      canonicalTaskId: "gate-1",
+      primaryWorkspace: "C:\\ExactPrimaryWorkspace",
+      workspaceAliases,
+    },
+    summaryJson: { sourceContext: { entries: ["large private detail"] } },
+    summaryMd: "A full persisted summary that should not be repeated to chat.",
+    markdown: "Full route dump",
+  };
+  const compact = toMcpResult(route);
+  const compactResult = compact.structuredContent.result;
+  assert.match(compact.content[0].text, /OTM Stop audit/);
+  assert.match(compact.content[0].text, /Current gate/);
+  assert.equal(compactResult.snapshot.currentTaskId, "gate-1");
+  assert.equal(compactResult.snapshot.tasks[0].internalSteps[0].id, "step-1");
+  assert.equal(compactResult.snapshot.sourceContext, undefined);
+  assert.equal(compactResult.snapshot.paths, undefined);
+  assert.equal(compactResult.run.metadata, undefined);
+  assert.equal(compactResult.summaryJson, undefined);
+  assert.equal(compactResult.summaryMd, undefined);
+  assert.equal(
+    compactResult.canonicalIdentity.primaryWorkspace,
+    "C:\\ExactPrimaryWorkspace",
+  );
+  assert.equal(compactResult.canonicalIdentity.workspaceAliases.length, 8);
+  assert.equal(
+    Buffer.byteLength(
+      compactResult.canonicalIdentity.workspaceAliases.join(""),
+      "utf8",
+    ) <= 2_048,
+    true,
+  );
+  assert.equal(
+    compactResult.canonicalIdentity.workspaceAliasesOmittedCount,
+    4,
+  );
+  assert.equal(
+    compactResult.canonicalIdentity.workspaceAliases.includes(
+      workspaceAliases[1],
+    ),
+    false,
+  );
+  assert.doesNotMatch(JSON.stringify(compactResult), /private-digest|secret/);
+
+  const detailed = toMcpResult(route, { detail: true });
+  assert.equal(
+    detailed.structuredContent.result.snapshot.sourceContext.digest,
+    "private-digest",
+  );
+  assert.equal(
+    detailed.structuredContent.result.summaryJson.sourceContext.entries[0],
+    "large private detail",
+  );
+  assert.deepEqual(
+    detailed.structuredContent.result.canonicalIdentity.workspaceAliases,
+    workspaceAliases,
+  );
+  assert.equal(detailed.content[0].text, "Full route dump");
 });
 
 test("MCP schemas close input/output objects and reject nested unsafe arguments", () => {
@@ -124,6 +283,27 @@ test("MCP schemas close input/output objects and reject nested unsafe arguments"
         },
       ],
     }),
+  );
+  assert.doesNotThrow(() => validateMcpArgs("otm_snapshot", { detail: true }));
+  assert.doesNotThrow(() =>
+    validateMcpArgs("otm_audit_stop", { detail: true }),
+  );
+  assert.doesNotThrow(() =>
+    validateMcpArgs("otm_progress", {
+      taskId: "gate-1",
+      evidence: { kind: "test_result", summary: "Descendant result proof." },
+      updates: [
+        {
+          internalStepId: "step-1",
+          miniStepId: "mini-1",
+          miniStepStatus: "done",
+        },
+        { internalStepId: "step-1", internalStepStatus: "done" },
+      ],
+    }),
+  );
+  assert.doesNotThrow(() =>
+    validateMcpArgs("otm_complete_task", { taskId: "gate-1" }),
   );
   assert.throws(
     () =>
@@ -259,6 +439,8 @@ test("MCP stdio protocol rejects malformed arguments and returns scoped structur
     const projectRoute = projectManager.start({
       workspaceRoot: projectRoot,
       goal: "Project route remains canonical in the home-workspace MCP",
+      context:
+        "Route-only detail is available on explicit full snapshot requests.",
       tasks: [{ title: "Project MCP task" }],
     });
     const started = await client.callTool({
@@ -278,6 +460,45 @@ test("MCP stdio protocol rejects malformed arguments and returns scoped structur
     assert.ok(
       started.structuredContent.result.canonicalIdentity.workspaceAliases.includes(
         workspaceRoot,
+      ),
+    );
+    const progressWithoutProof = await client.callTool({
+      name: "otm_progress",
+      arguments: {
+        workspaceRoot,
+        taskId: started.structuredContent.result.snapshot.currentTaskId,
+        evidence: {},
+      },
+    });
+    assert.equal(progressWithoutProof.structuredContent.ok, true);
+    const completionWithoutProof = await client.callTool({
+      name: "otm_complete_task",
+      arguments: {
+        workspaceRoot,
+        taskId: started.structuredContent.result.snapshot.currentTaskId,
+        evidence: {},
+      },
+    });
+    assert.equal(completionWithoutProof.isError, true);
+    assert.equal(
+      completionWithoutProof.structuredContent.code,
+      "EVIDENCE_REQUIRED",
+    );
+    const compactSnapshot = await client.callTool({
+      name: "otm_snapshot",
+      arguments: { workspaceRoot },
+    });
+    assert.equal(
+      compactSnapshot.structuredContent.result.snapshot.sourceContext,
+      undefined,
+    );
+    const detailedSnapshot = await client.callTool({
+      name: "otm_snapshot",
+      arguments: { workspaceRoot, detail: true },
+    });
+    assert.ok(
+      detailedSnapshot.structuredContent.result.snapshot.sourceContext.entries.some(
+        (entry) => entry.text.includes("Route-only detail"),
       ),
     );
     const sessionCurrentPath = currentJsonPath(

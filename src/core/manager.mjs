@@ -55,6 +55,7 @@ import {
 import { tokenize } from "./text-utils.mjs";
 
 const DEFAULT_HISTORY_RETENTION_DAYS = 7;
+const DEFAULT_EVIDENCE_SUMMARY = "Evidence captured";
 
 export function createTaskManager(options = {}) {
   const env = options.env || process.env;
@@ -309,7 +310,7 @@ export function createTaskManager(options = {}) {
         JSON.stringify(summary.summaryJson?.evidence || []) ===
           JSON.stringify(
             tasks.flatMap((task) =>
-              (task.evidence || []).map(
+              allEvidenceForTask(task).map(
                 (item) => `${task.title}: ${item.summary || item.kind}`,
               ),
             ),
@@ -445,8 +446,7 @@ export function createTaskManager(options = {}) {
         if (
           task.status !== "done" ||
           !task.completedAt ||
-          !Array.isArray(task.evidence) ||
-          task.evidence.length === 0 ||
+          completionEvidenceForTask(task).length === 0 ||
           task.metadata?.decomposition?.needsModelReview === true
         )
           return false;
@@ -1673,8 +1673,24 @@ export function createTaskManager(options = {}) {
     const sessionId = resolveSessionId(args, env);
     let run = getRunOrActive({ runId: args.runId, workspaceRoot, sessionId });
     assertExpectedRevision(run, args);
+    const batchUpdates =
+      args.updates === undefined
+        ? null
+        : normalizeProgressUpdates(args.updates);
+    assertCondition(
+      !batchUpdates || !hasInternalStepUpdate(args),
+      "Use either ordered updates or the single descendant fields in one progress call.",
+      "INVALID_PROGRESS_BATCH",
+    );
+    if (batchUpdates)
+      assertCondition(
+        Boolean(args.taskId),
+        "Batched descendant progress requires an explicit taskId for one route gate.",
+        "TASK_ID_REQUIRED",
+      );
     const targetTaskId =
-      args.taskId || (hasInternalStepUpdate(args) ? run.currentTaskId : null);
+      args.taskId ||
+      (batchUpdates || hasInternalStepUpdate(args) ? run.currentTaskId : null);
     if (targetTaskId) {
       const task = store.getTask(targetTaskId);
       assertCondition(
@@ -1695,12 +1711,19 @@ export function createTaskManager(options = {}) {
           summary: args.message || "Progress recorded",
         },
       );
+      if (!hasMeaningfulEvidenceInput(args.evidence))
+        progressEvidence.completionProof = "progress_only";
       const evidence = [...(task.evidence || []), progressEvidence];
       const status = task.status === "pending" ? "active" : task.status;
-      const metadata = updateInternalStepProgress(task.metadata, args, {
-        taskStatus: status,
-        evidence: progressEvidence,
-      });
+      const nextMetadata = batchUpdates
+        ? applyProgressUpdates(task.metadata, batchUpdates, {
+            taskStatus: status,
+            evidence: progressEvidence,
+          })
+        : updateInternalStepProgress(task.metadata, args, {
+            taskStatus: status,
+            evidence: progressEvidence,
+          });
       assertRunTransition(run.status, "active", { runId: run.id });
       run = commitRunMutation(
         {
@@ -1709,9 +1732,15 @@ export function createTaskManager(options = {}) {
           status: "active",
           routeRevision: (run.routeRevision || 1) + 1,
         },
-        [{ ...task, evidence, status, metadata }],
+        [{ ...task, evidence, status, metadata: nextMetadata }],
         "progress",
-        { message: args.message || null, taskId: args.taskId || null },
+        {
+          message: args.message || null,
+          taskId: args.taskId || null,
+          ...(batchUpdates
+            ? { descendantUpdateCount: batchUpdates.length }
+            : {}),
+        },
         args,
       );
     } else
@@ -1764,12 +1793,22 @@ export function createTaskManager(options = {}) {
           },
     );
     assertTaskTransition(task.status, "done", { taskId: task.id });
-    const evidence = args.evidence ? evidenceFromArgs(args.evidence) : null;
+    const normalizedEvidence = args.evidence
+      ? evidenceFromArgs(args.evidence)
+      : null;
+    const evidence = hasMeaningfulEvidenceInput(args.evidence)
+      ? normalizedEvidence
+      : null;
+    const existingEvidence = completionEvidenceForTask(task);
+    const mayReuseExistingEvidence =
+      !evidence &&
+      existingEvidence.length > 0 &&
+      requiredDescendantsComplete(task.metadata);
     const nextEvidence = evidence
       ? [...(task.evidence || []), evidence]
       : task.evidence || [];
     assertCondition(
-      evidence,
+      evidence || mayReuseExistingEvidence,
       "A task can only be completed after completion evidence is attached.",
       "EVIDENCE_REQUIRED",
     );
@@ -2971,7 +3010,12 @@ function normalizeTaskEvidence(value) {
     "Task evidence exceeds the maximum item count.",
     "INPUT_TOO_LARGE",
   );
-  return value.map((item) => evidenceFromArgs(item));
+  return value.map((item) => {
+    const evidence = evidenceFromArgs(item);
+    return item?.completionProof === "progress_only"
+      ? { ...evidence, completionProof: "progress_only" }
+      : evidence;
+  });
 }
 
 function evidenceFromArgs(input = {}) {
@@ -2981,7 +3025,7 @@ function evidenceFromArgs(input = {}) {
     "INVALID_INPUT",
   );
   const summary = assertNonEmptyString(
-    String(input.summary || input.message || "Evidence captured"),
+    String(input.summary || input.message || DEFAULT_EVIDENCE_SUMMARY),
     "evidence summary",
     LIMITS.text,
   );
@@ -3016,6 +3060,31 @@ function evidenceFromArgs(input = {}) {
     notes: input.notes ? redactEvidenceValue(input.notes) : undefined,
     at: nowIso(),
   });
+}
+
+function hasMeaningfulEvidenceInput(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return false;
+  const summary = String(input.summary || input.message || "").trim();
+  const hasText =
+    summary.length > 0 && summary !== DEFAULT_EVIDENCE_SUMMARY;
+  const hasCommand =
+    input.command !== undefined &&
+    input.command !== null &&
+    String(input.command).trim().length > 0;
+  const hasFiles =
+    Array.isArray(input.files) &&
+    input.files.some((file) => String(file).trim().length > 0);
+  const hasExitCode = input.exitCode !== undefined && input.exitCode !== null;
+  const hasNotes = hasMeaningfulEvidenceValue(input.notes);
+  return hasText || hasCommand || hasFiles || hasExitCode || hasNotes;
+}
+
+function hasMeaningfulEvidenceValue(value) {
+  if (typeof value === "string") return value.trim().length > 0;
+  if (Array.isArray(value)) return value.some(hasMeaningfulEvidenceValue);
+  if (value && typeof value === "object")
+    return Object.values(value).some(hasMeaningfulEvidenceValue);
+  return false;
 }
 
 function normalizeEvidenceFiles(value) {
@@ -3075,7 +3144,7 @@ function buildSummaryJson({ run, tasks, outcome, nextSteps }) {
     .filter((task) => ["dropped", "superseded"].includes(task.status))
     .map((task) => task.title);
   const evidence = tasks.flatMap((task) =>
-    (task.evidence || []).map(
+    allEvidenceForTask(task).map(
       (item) => `${task.title}: ${item.summary || item.kind}`,
     ),
   );
@@ -3111,6 +3180,59 @@ function buildSummaryJson({ run, tasks, outcome, nextSteps }) {
     })),
     createdAt: nowIso(),
   });
+}
+
+function completionEvidenceForTask(task = {}) {
+  const gateEvidence = (Array.isArray(task.evidence) ? task.evidence : []).filter(
+    isCompletionEvidence,
+  );
+  return gateEvidence.length
+    ? gateEvidence
+    : descendantEvidenceForTask(task).filter(isCompletionEvidence);
+}
+
+function allEvidenceForTask(task = {}) {
+  const gateEvidence = Array.isArray(task.evidence) ? task.evidence : [];
+  if (gateEvidence.length) return gateEvidence;
+  return descendantEvidenceForTask(task);
+}
+
+function descendantEvidenceForTask(task = {}) {
+  const evidence = [];
+  const add = (items) => {
+    for (const item of Array.isArray(items) ? items : []) {
+      const key = JSON.stringify(item);
+      if (!evidence.some((existing) => JSON.stringify(existing) === key))
+        evidence.push(item);
+    }
+  };
+  for (const step of Array.isArray(task.metadata?.internalSteps)
+    ? task.metadata.internalSteps
+    : []) {
+    if (step.required === false) continue;
+    add(step.evidence);
+    for (const mini of Array.isArray(step.miniSteps) ? step.miniSteps : [])
+      if (mini.required !== false) add(mini.evidence);
+  }
+  return evidence;
+}
+
+function isCompletionEvidence(item = {}) {
+  if (!item || typeof item !== "object") return false;
+  if (item.completionProof === "progress_only") return false;
+  // Older routes did not identify synthesized progress notes. Exclude only
+  // the exact canonical fallback record; substantive caller-provided manual
+  // review and documentation notes remain eligible.
+  if (
+    item.kind === "manual_note" &&
+    item.summary === "Progress recorded" &&
+    item.command === undefined &&
+    item.exitCode === undefined &&
+    item.files === undefined &&
+    item.notes === undefined
+  )
+    return false;
+  return true;
 }
 
 function buildContractReview({
@@ -3842,6 +3964,7 @@ function mergeEvidence(existing = [], incoming = []) {
       item.command,
       item.exitCode,
       item.files,
+      item.completionProof || null,
     ]);
     if (seen.has(key)) return false;
     seen.add(key);
@@ -3983,6 +4106,148 @@ function hasInternalStepUpdate(args = {}) {
     args.internalStepStatus !== undefined ||
     hasMiniStepUpdate(args)
   );
+}
+
+function normalizeProgressUpdates(updates) {
+  assertCondition(
+    Array.isArray(updates) && updates.length > 0 && updates.length <= 256,
+    "Batched progress requires between 1 and 256 descendant updates.",
+    "INVALID_PROGRESS_BATCH",
+  );
+  const allowed = new Set([
+    "internalStepId",
+    "internalStepStatus",
+    "advanceInternalStep",
+    "miniStepId",
+    "miniStepStatus",
+    "advanceMiniStep",
+  ]);
+  const targets = new Set();
+  return updates.map((item, index) => {
+    assertCondition(
+      item && typeof item === "object" && !Array.isArray(item),
+      `Progress update ${index + 1} must be an object.`,
+      "INVALID_PROGRESS_BATCH",
+    );
+    assertCondition(
+      Object.keys(item).every((key) => allowed.has(key)),
+      `Progress update ${index + 1} contains an unsupported field.`,
+      "INVALID_PROGRESS_BATCH",
+    );
+    const internalStepId = assertNonEmptyString(
+      String(item.internalStepId || ""),
+      `progress update ${index + 1} internalStepId`,
+      LIMITS.id,
+    );
+    const hasMiniStep = item.miniStepId !== undefined;
+    assertCondition(
+      hasMiniStep
+        ? item.internalStepStatus === undefined &&
+            item.advanceInternalStep === undefined
+        : item.internalStepStatus !== undefined &&
+            item.miniStepStatus === undefined &&
+            item.advanceMiniStep === undefined,
+      `Progress update ${index + 1} must change exactly one internal or mini-step status.`,
+      "INVALID_PROGRESS_BATCH",
+    );
+    const status = hasMiniStep ? item.miniStepStatus : item.internalStepStatus;
+    if (status !== undefined)
+      assertKnownEnum(
+        status,
+        new Set([
+          "pending",
+          "active",
+          "done",
+          "blocked",
+          "skipped",
+          "complete",
+          "completed",
+        ]),
+        `progress update ${index + 1} status`,
+      );
+    const advance = hasMiniStep
+      ? item.advanceMiniStep
+      : item.advanceInternalStep;
+    assertCondition(
+      advance === undefined || typeof advance === "boolean",
+      `Progress update ${index + 1} advance flag must be boolean.`,
+      "INVALID_PROGRESS_BATCH",
+    );
+    const normalizedStatus = normalizeInternalStepStatus(
+      status || (hasMiniStep ? "done" : "pending"),
+    );
+    const miniStepId = hasMiniStep
+      ? assertNonEmptyString(
+          String(item.miniStepId || ""),
+          `progress update ${index + 1} miniStepId`,
+          LIMITS.id,
+        )
+      : null;
+    const target = miniStepId
+      ? `mini:${internalStepId}:${miniStepId}`
+      : `internal:${internalStepId}`;
+    assertCondition(
+      !targets.has(target),
+      `Progress batch updates ${target} more than once.`,
+      "INVALID_PROGRESS_BATCH",
+    );
+    targets.add(target);
+    return {
+      internalStepId,
+      ...(miniStepId ? { miniStepId } : {}),
+      ...(hasMiniStep
+        ? {
+            miniStepStatus: normalizedStatus,
+            ...(advance !== undefined ? { advanceMiniStep: advance } : {}),
+          }
+        : {
+            internalStepStatus: normalizedStatus,
+            ...(advance !== undefined ? { advanceInternalStep: advance } : {}),
+          }),
+    };
+  });
+}
+
+function assertProgressUpdateTargets(metadata = {}, updates = []) {
+  const steps = normalizeInternalStepList(metadata.internalSteps || []);
+  const byId = new Map(steps.map((step) => [step.id, step]));
+  for (const update of updates) {
+    const step = byId.get(update.internalStepId);
+    assertCondition(
+      step,
+      `Internal subtask ${update.internalStepId} is not part of this route gate.`,
+      "INTERNAL_STEP_NOT_FOUND",
+    );
+    if (update.miniStepId) {
+      const miniExists = normalizeMiniStepList(step.miniSteps || [], {
+        parentSeed: step.id,
+      }).some((mini) => mini.id === update.miniStepId);
+      assertCondition(
+        miniExists,
+        `Mini-step ${update.miniStepId} is not part of internal subtask ${update.internalStepId}.`,
+        "MINI_STEP_NOT_FOUND",
+      );
+    }
+  }
+}
+
+function applyProgressUpdates(metadata = {}, updates = [], options = {}) {
+  assertProgressUpdateTargets(metadata, updates);
+  return updates.reduce((currentMetadata, update) => {
+    const args = update.miniStepId
+      ? {
+          internalStepId: update.internalStepId,
+          miniStepId: update.miniStepId,
+          miniStepStatus: update.miniStepStatus,
+          advanceMiniStep: update.advanceMiniStep,
+        }
+      : {
+          internalStepId: update.internalStepId,
+          internalStepStatus: update.internalStepStatus,
+          advanceInternalStep: update.advanceInternalStep,
+        };
+    return updateInternalStepProgress(currentMetadata, args, options);
+  }, metadata);
 }
 
 function updateInternalStepProgress(metadata = {}, args = {}, options = {}) {
@@ -4370,6 +4635,15 @@ function assertInternalStepsComplete(metadata = {}) {
     "INTERNAL_STEPS_INCOMPLETE",
     { incompleteInternalSteps: incomplete },
   );
+}
+
+function requiredDescendantsComplete(metadata = {}) {
+  try {
+    assertInternalStepsComplete(metadata);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function findRelatedOpenTask(tasks, candidate) {

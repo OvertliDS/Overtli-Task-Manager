@@ -23,6 +23,7 @@ export function installRepoSkills(options = {}) {
     const files = listSkillFiles(path.join(source, skillName));
     let changed = false;
     const targetFiles = [];
+    const changedFiles = [];
     for (const relative of files) {
       const sourceFile = path.join(source, skillName, relative);
       const targetFile = path.join(targetSkillDir, relative);
@@ -30,6 +31,7 @@ export function installRepoSkills(options = {}) {
       const existing = readText(targetFile, null);
       if (existing !== content) {
         changed = true;
+        changedFiles.push(targetFile);
         if (!dryRun) {
           fs.mkdirSync(path.dirname(targetFile), { recursive: true });
           atomicWriteText(targetFile, content);
@@ -42,6 +44,7 @@ export function installRepoSkills(options = {}) {
       path: targetSkill,
       directory: targetSkillDir,
       files: targetFiles,
+      changedFiles,
       changed,
     });
   }

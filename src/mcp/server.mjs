@@ -26,6 +26,9 @@ import { VERSION } from "../core/constants.mjs";
 import { canonicalizeWorkspaceRoot } from "../core/validation.mjs";
 import { inspectDoctor, renderDoctor } from "../cli/doctor.mjs";
 
+export const MCP_SERVER_INSTRUCTIONS =
+  "OTM routes are scoped to CODEX_THREAD_ID. Use exact route IDs from the latest otm_snapshot; see the overtli-task-manager skill for full lifecycle guidance.";
+
 export async function runMcpServer({ env = process.env } = {}) {
   const packageRoot = resolve(
     dirname(fileURLToPath(import.meta.url)),
@@ -38,8 +41,7 @@ export async function runMcpServer({ env = process.env } = {}) {
     { name: "overtli_task_manager", version: VERSION },
     {
       capabilities: { tools: {}, resources: {} },
-      instructions:
-        "Overtli Task Manager keeps one canonical route for each root CODEX_THREAD_ID across home, project, and nested workspace paths. The primary workspace recorded when the route starts remains the evidence authority; later paths are persisted aliases. Conflicting payload/environment identities are rejected; a hook without session identity remains silent and safe. Before otm_start/otm_reconcile, thoroughly analyze the full user request and pass specific route segments with internalSteps. Before task-scoped OTM calls, use exact task ids from the latest canonical snapshot or its primary-workspace session current.json; never copy ids from another chat, the workspace index, memory, or prior route state. A new substantive request after finalization starts a new route; steering during active work reconciles that route. If legacy authority is ambiguous, read-only inspection leaves it unresolved; use otm_reconcile with an explicit same-session runId, its exact workspaceRoot, and a non-empty prompt explaining the choice. Then satisfy ordinary source-review and descendant gates. Use otm_progress to mark internal steps complete as work happens and otm_complete_task only after internal steps are terminal and segment-level evidence exists. Call otm_audit_stop before final answers. A completed canonical Stop with valid saved evidence allows Stop without duplicate hierarchy reconciliation. By default the Stop hook finalizes, saves the summary and checkpoint memory, clears the route, then allows Stop after deterministic bookkeeping; set OTM_STOP_AUTO_FINALIZE=0 only when manual otm_finalize_turn and otm_clear_current behavior is required.",
+      instructions: MCP_SERVER_INSTRUCTIONS,
     },
   );
 
@@ -59,7 +61,11 @@ export async function runMcpServer({ env = process.env } = {}) {
         packageRoot,
         env,
       });
-      return toMcpResult(result);
+      return toMcpResult(result, {
+        detail:
+          (name === "otm_snapshot" || name === "otm_audit_stop") &&
+          args.detail === true,
+      });
     } catch (error) {
       const code = error?.code || "OTM_INTERNAL_ERROR";
       return {

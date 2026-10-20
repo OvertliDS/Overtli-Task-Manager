@@ -8,6 +8,7 @@ import {
   buildSnapshot,
   renderSnapshotMarkdown,
   renderDeltaMarkdown,
+  renderCompactSnapshotMarkdown,
   renderSummaryMarkdown,
   writeCurrentFiles,
 } from "../src/core/renderer.mjs";
@@ -85,6 +86,7 @@ test("renderer preserves planned order and escapes all untrusted Markdown surfac
   );
   const full = renderSnapshotMarkdown(snapshot);
   const delta = renderDeltaMarkdown(snapshot);
+  const compact = renderCompactSnapshotMarkdown(snapshot);
   const summary = renderSummaryMarkdown({
     goal: "# Goal",
     outcome: "[done](unsafe)",
@@ -101,6 +103,35 @@ test("renderer preserves planned order and escapes all untrusted Markdown surfac
   assert.ok(full.includes("Use \\`safe\\` output"));
   assert.ok(delta.includes("Completed \\*one\\* safely"));
   assert.ok(delta.includes("Completed: \\*First\\*"));
+  assert.ok(delta.includes("Next gate: Second \\_active\\_"));
+  assert.doesNotMatch(
+    renderDeltaMarkdown(
+      sampleSnapshot(tempWorkspace(), {
+        kind: "progress",
+        message: "Progress only",
+      }),
+    ),
+    /Completed: \\*First\\*/,
+  );
+  const allDone = renderDeltaMarkdown({
+    ...snapshot,
+    status: "ready_to_finalize",
+    currentTaskId: null,
+    currentTaskTitle: null,
+    stopAllowed: true,
+    stopReason: "All required route segments are complete.",
+    progress: { requiredDone: 2, requiredTotal: 2, percentRequired: 100 },
+    tasks: snapshot.tasks.map((task) => ({ ...task, status: "done" })),
+    lastUpdate: {
+      kind: "task_completed",
+      taskId: "two",
+      message: "Completed: Second _active_",
+    },
+  });
+  assert.ok(allDone.includes("All required gates are complete."));
+  assert.ok(allDone.includes("Gate: Stop allowed"));
+  assert.ok(compact.includes("**Current gate:** Second \\_active\\_"));
+  assert.ok(compact.includes("**Gate:** Stop blocked"));
   assert.ok(summary.includes("\\# Goal"));
   assert.ok(summary.includes("\\[done\\]\\(unsafe\\)"));
   assert.ok(summary.includes("\\*First\\*"));

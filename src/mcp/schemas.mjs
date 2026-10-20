@@ -119,6 +119,42 @@ export const internalStepInputSchema = {
   oneOf: [{ type: "string", minLength: 1, maxLength: 500 }, internalStepSchema],
 };
 
+export const progressUpdateSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    internalStepId: id(),
+    internalStepStatus: {
+      type: "string",
+      enum: [
+        "pending",
+        "active",
+        "done",
+        "blocked",
+        "skipped",
+        "complete",
+        "completed",
+      ],
+    },
+    advanceInternalStep: { type: "boolean" },
+    miniStepId: id(),
+    miniStepStatus: {
+      type: "string",
+      enum: [
+        "pending",
+        "active",
+        "done",
+        "blocked",
+        "skipped",
+        "complete",
+        "completed",
+      ],
+    },
+    advanceMiniStep: { type: "boolean" },
+  },
+  required: ["internalStepId"],
+};
+
 export const taskSchema = {
   type: "object",
   additionalProperties: false,
