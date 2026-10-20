@@ -17,10 +17,18 @@ function workspace() {
 }
 
 function env(name) {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), `${name}-state-`));
   return {
     ...process.env,
     OTM_STORAGE: "json",
-    OTM_STATE_DIR: fs.mkdtempSync(path.join(os.tmpdir(), `${name}-state-`)),
+    OTM_STATE_DIR: stateDir,
+    // Keep hook tests hermetic. A developer's host-evidence config (for example
+    // ~/.claude/overtli-task-manager/host-evidence.json) engages the live ODC
+    // owner-coverage gate, which these tests never bootstrap via SessionStart.
+    // An empty module override falls through to the config path, so point the
+    // config at a file that does not exist to disable the observer.
+    OTM_HOST_EVIDENCE_MODULE: "",
+    OTM_HOST_EVIDENCE_CONFIG: path.join(stateDir, "host-evidence.json"),
   };
 }
 

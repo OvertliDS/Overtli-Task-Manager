@@ -23,6 +23,7 @@ for (const kind of ["json", "sqlite"]) {
       OTM_SESSION_ID: "",
       CODEX_THREAD_ID: identity,
       OTM_HOST_EVIDENCE_MODULE: "",
+      OTM_HOST_EVIDENCE_CONFIG: path.join(root, "host-evidence.json"),
       OTM_AUTO_SYNC_AGENTS: "0",
       OTM_DEDUPE_HOOKS: "0",
       OTM_TRACK_MCP_EVIDENCE: "0",
