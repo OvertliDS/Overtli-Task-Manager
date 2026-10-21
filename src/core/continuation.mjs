@@ -310,6 +310,11 @@ function nonnegativeCount(value) {
 }
 
 export function findPendingWork(events) {
+  return findPendingWorkEntries(events).map(([, label]) => label);
+}
+
+/** Open host work receipts as [workId, label] pairs, in start order. */
+export function findPendingWorkEntries(events) {
   const open = new Map();
   for (const event of events) {
     const payload = event.payload || {};
@@ -323,7 +328,7 @@ export function findPendingWork(events) {
       if (typeof payload.workId === "string") open.delete(payload.workId);
     }
   }
-  return [...open.values()];
+  return [...open.entries()];
 }
 
 /**

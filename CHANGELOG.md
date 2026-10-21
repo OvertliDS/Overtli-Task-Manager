@@ -16,6 +16,10 @@
   background tasks or session crons; Claude re-invokes the session when they
   finish. The turn ends without finalizing the route. Unclassified or missing
   inventory still blocks.
+- A running background subagent's open `SubagentStart` receipt is counted once
+  as active work (up to the reported active background count) instead of also
+  as an unmatched receipt, which had blocked Stop. Open tool receipts and
+  subagent receipts with no reported background work still block.
 - `manager.test.mjs` points `OTM_HOST_EVIDENCE_CONFIG` at a nonexistent file,
   so the developer's live host observer no longer fails the Codex Stop tests.
 

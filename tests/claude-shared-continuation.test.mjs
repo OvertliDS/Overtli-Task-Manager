@@ -882,6 +882,55 @@ test("Claude lifecycle hooks record observations and block unsafe Stop decisions
   assert.equal(loopGuard.decision, undefined);
 
   runClaudeHook(
+    hookPayload("SubagentStart", sessionId, {
+      cwd: workspaceRoot,
+      agent_id: "agent-background-1",
+      agent_type: "overtli-reviewer",
+    }),
+    { env, cwd: workspaceRoot },
+  );
+  const backgroundSubagentStop = runClaudeHook(
+    hookPayload("Stop", sessionId, {
+      cwd: workspaceRoot,
+      stop_hook_active: false,
+      background_tasks: [{ id: "agent-background-1", status: "running" }],
+      session_crons: [],
+    }),
+    { env, cwd: workspaceRoot },
+  );
+  assert.equal(
+    backgroundSubagentStop.decision,
+    undefined,
+    "a running background subagent is active work, not an unmatched receipt",
+  );
+  assert.equal(backgroundSubagentStop.continue, true);
+  const subagentWithoutInventory = runClaudeHook(
+    hookPayload("Stop", sessionId, {
+      cwd: workspaceRoot,
+      stop_hook_active: false,
+      background_tasks: [],
+      session_crons: [],
+    }),
+    { env, cwd: workspaceRoot },
+  );
+  assert.equal(
+    subagentWithoutInventory.decision,
+    "block",
+    "an open subagent receipt with no reported background work stays unknown",
+  );
+  runClaudeHook(
+    hookPayload("SubagentStop", sessionId, {
+      cwd: workspaceRoot,
+      agent_id: "agent-background-1",
+      agent_type: "overtli-reviewer",
+      stop_hook_active: false,
+      background_tasks: [],
+      session_crons: [],
+    }),
+    { env, cwd: workspaceRoot },
+  );
+
+  runClaudeHook(
     hookPayload("PreToolUse", sessionId, {
       cwd: workspaceRoot,
       tool_name: "Bash",

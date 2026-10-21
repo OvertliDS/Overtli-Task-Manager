@@ -9,6 +9,7 @@ import {
   assertContinuationEligible,
   evaluateContinuation,
   findPendingWork,
+  findPendingWorkEntries,
   HOST_CONTINUATION_EVIDENCE_SCHEMA,
   HOST_CONTINUATION_REQUIRED_SOURCES,
   validateHostContinuationEvidence,
@@ -408,13 +409,26 @@ export function createProviderAdapter({
             event?.payload?.ownerSessionId === session.sessionId &&
             event?.payload?.providerSessionKey === session.providerSessionKey,
         );
-        const pendingWork = findPendingWork([
+        // A background subagent's start receipt stays open until its
+        // SubagentStop, while Claude also lists it as an active background
+        // task. Count it once, as active work, not again as unknown work.
+        let coveredSubagents = 0;
+        const pendingWork = findPendingWorkEntries([
           ...ownerEvents,
           ...transcriptSettledIds.map((settledId) => ({
             eventType: "provider_host_work_settled",
             payload: { workId: settledId },
           })),
-        ]);
+        ]).filter(([workId]) => {
+          if (
+            workId.startsWith("subagent:") &&
+            coveredSubagents < inventory.activeWorkCount
+          ) {
+            coveredSubagents += 1;
+            return false;
+          }
+          return true;
+        });
         if (pendingWork.length > 0) {
           inventory.complete = false;
           inventory.unknownWorkCount += pendingWork.length;
