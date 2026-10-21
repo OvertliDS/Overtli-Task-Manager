@@ -482,6 +482,15 @@ function hookResult({
 
 function observeOwnerSessionStart({ config, base, owner, now }) {
   const current = readOwnerCoverage(config.receiptRoot, owner);
+  const reopened = reopenOrphanStopCoverage({ config, owner, current, now });
+  if (reopened) {
+    return hookResult({
+      observed: reopened.ok,
+      coverage: reopened.coverage,
+      dispatchAllowed: reopened.coverage.complete,
+      code: reopened.coverage.code || null,
+    });
+  }
   if (current.record || current.code !== "ODC_OWNER_COVERAGE_MISSING") {
     return hookResult({
       observed: current.complete,
@@ -617,6 +626,13 @@ function observeNativeSubagent({ config, base, owner, current, now }) {
           code: null,
         });
       }
+      // Claude emits typed SubagentStop without a SubagentStart for internal
+      // agents (e.g. the auto-compaction summarizer). Running Claude agents are
+      // reported by the Stop hook's background_tasks, so an orphan stop is
+      // counted rather than invalidating the session for its remaining lifetime.
+      if (owner.provider === "claude") {
+        return recordOrphanClaudeStop({ config, owner, current, now });
+      }
       const coverage = invalidateOwnerCoverage({
         receiptRoot: config.receiptRoot,
         owner,
@@ -648,6 +664,59 @@ function observeNativeSubagent({ config, base, owner, current, now }) {
     observed: saved.ok,
     coverage: saved.coverage,
     code: saved.code || null,
+  });
+}
+
+function recordOrphanClaudeStop({ config, owner, current, now }) {
+  const prior = Number.isSafeInteger(current.record.orphanSubagentStops)
+    ? current.record.orphanSubagentStops
+    : 0;
+  const saved = writeOwnerCoverage({
+    receiptRoot: config.receiptRoot,
+    owner,
+    current,
+    record: {
+      ...current.record,
+      sequence: current.record.sequence + 1,
+      lastObservedAt: now,
+      orphanSubagentStops: Math.min(prior + 1, MAX_OWNER_COVERAGE_ENTRIES),
+    },
+  });
+  return hookResult({
+    observed: saved.ok,
+    coverage: saved.coverage,
+    code: saved.code || null,
+  });
+}
+
+/**
+ * Claude sessions invalidated only by an orphan SubagentStop (before orphan
+ * stops were tolerated) are reopened at the next SessionStart when the record
+ * holds no active subagent or pending intent. ODC dispatch was denied while the
+ * record was incomplete, so no owner work can have started unrecorded.
+ */
+function reopenOrphanStopCoverage({ config, owner, current, now }) {
+  const record = current.record;
+  if (
+    owner.provider !== "claude" ||
+    !record ||
+    record.invalidatedCode !== "NATIVE_SUBAGENT_STOP_UNMATCHED" ||
+    record.subagents.some((row) => row.status !== "stopped") ||
+    record.intents.some((row) => row.status !== "settled")
+  ) {
+    return null;
+  }
+  return writeOwnerCoverage({
+    receiptRoot: config.receiptRoot,
+    owner,
+    current,
+    record: {
+      ...record,
+      sequence: record.sequence + 1,
+      complete: true,
+      invalidatedCode: null,
+      lastObservedAt: now,
+    },
   });
 }
 

@@ -260,16 +260,18 @@ async function handleClaudeHook(
       (event) => event.eventType === "provider_work_inventory",
     );
     const status = inventory?.payload;
-    if (
-      !status?.complete ||
-      status.activeWorkCount > 0 ||
-      status.unknownWorkCount > 0
-    ) {
+    if (!status?.complete || status.unknownWorkCount > 0) {
       return {
         decision: "block",
         reason:
-          "OTM cannot close this turn while Claude reports active or unclassified background tasks/session crons. Wait for them or cancel them through Claude, then retry. A chat stop does not settle detached work.",
+          "OTM cannot close this turn while Claude reports unclassified background tasks/session crons. Wait for them or cancel them through Claude, then retry. A chat stop does not settle detached work.",
       };
+    }
+    if (status.activeWorkCount > 0) {
+      // Claude re-invokes the session when its own background tasks finish, so
+      // blocking here only forces idle turns. End the turn without finalizing:
+      // the route stays open until a later Stop sees no running work.
+      return { continue: true, suppressOutput: true };
     }
     const current = adapter.snapshot({ write: false });
     if (!current.run) return { continue: true, suppressOutput: true };

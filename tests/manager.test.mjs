@@ -41,7 +41,13 @@ function tempWorkspace(prefix = "otm-test-") {
 
 function testEnv(name) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), `${name}-state-`));
-  const env = { ...process.env, OTM_STORAGE: "json", OTM_STATE_DIR: stateDir };
+  const env = {
+    ...process.env,
+    OTM_STORAGE: "json",
+    OTM_STATE_DIR: stateDir,
+    // A nonexistent config keeps the developer's live host observer out of tests.
+    OTM_HOST_EVIDENCE_CONFIG: path.join(stateDir, "host-evidence.json"),
+  };
   delete env.CODEX_THREAD_ID;
   delete env.OTM_SESSION_ID;
   delete env.OTM_AUTO_SYNC_AGENTS;
@@ -57,6 +63,7 @@ function sqliteTestEnv(name) {
     ...process.env,
     OTM_STORAGE: "sqlite",
     OTM_STATE_DIR: stateDir,
+    OTM_HOST_EVIDENCE_CONFIG: path.join(stateDir, "host-evidence.json"),
   };
   delete env.CODEX_THREAD_ID;
   delete env.OTM_SESSION_ID;

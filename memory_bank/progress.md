@@ -1,5 +1,24 @@
 # Progress
 
+## 2026-10-21 - Claude hook friction from a long real session
+
+Observed in a 9-hour Claude session (APEX project): auto-compaction emitted a
+typed `SubagentStop` with no start at 02:12:32Z, invalidating owner coverage
+with `NATIVE_SUBAGENT_STOP_UNMATCHED` for the rest of the session (every Stop
+blocked; Task Manager restarts could not clear the on-disk record), and each
+turn that waited on a Claude background shell was blocked about eight times.
+Fixed Claude-only in `local-host-evidence.mjs` (orphan stops counted, legacy
+invalidation reopened at SessionStart) and `hooks/claude-code.mjs` (running
+Claude background work ends the turn without finalizing). Codex pairing and
+Stop behaviour unchanged. `manager.test.mjs` now isolates the host-evidence
+config; its five Stop/legacy tests had failed on HEAD only because they read
+the live config. Full suite 252/252 under PowerShell; Git Bash puts GNU
+`whoami` on PATH, which fails the capability ACL test there (environmental).
+Verified live: replaying SessionStart(resume) through the installed hook
+reopened the affected session's coverage record. Uncommitted shared-broker
+work (`src/mcp/server.mjs`, broker files) belongs to another session and was
+left untouched.
+
 ## 2026-10-20 - Correct real session startup, shared inspection and native ownership
 
 - Confirmed actual Claude startup failures and an empty same-session snapshot:

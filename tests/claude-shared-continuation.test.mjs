@@ -914,14 +914,17 @@ test("Claude lifecycle hooks record observations and block unsafe Stop decisions
     { env, cwd: workspaceRoot },
   );
   const transcriptPath = path.join(stateDir, "main-session.jsonl");
-  fs.writeFileSync(transcriptPath, '{"type":"user","message":{"content":"hi"}}\n');
+  fs.writeFileSync(
+    transcriptPath,
+    '{"type":"user","message":{"content":"hi"}}\n',
+  );
   fs.mkdirSync(path.join(stateDir, "main-session", "subagents"), {
     recursive: true,
   });
   fs.writeFileSync(
     path.join(stateDir, "main-session", "subagents", "agent-x.jsonl"),
     [
-      "{not json \"tool_result\"",
+      '{not json "tool_result"',
       JSON.stringify({
         type: "user",
         message: {
@@ -974,11 +977,9 @@ test("Claude lifecycle hooks record observations and block unsafe Stop decisions
     }),
     { env, cwd: workspaceRoot },
   );
+  // The cancelled tool above is still an unmatched receipt, so this stays blocked.
   assert.equal(activeBackground.decision, "block");
-  assert.match(
-    activeBackground.reason,
-    /active or unclassified background tasks/i,
-  );
+  assert.match(activeBackground.reason, /unclassified background tasks/i);
   const missingInventory = runClaudeHook(
     hookPayload("Stop", sessionId, {
       cwd: workspaceRoot,
@@ -1308,6 +1309,31 @@ test("Claude Stop finalizes settled owner work through the local host inspector"
       summary: "The canonical route is complete before the host inspection.",
     },
   });
+
+  // Claude re-invokes the session when its own background task finishes: the
+  // turn may end, but the route is not finalized while that work is running.
+  const waiting = runClaudeHook(
+    hookPayload("Stop", sessionId, {
+      cwd: workspaceRoot,
+      stop_hook_active: false,
+      background_tasks: [{ id: "bg-1", status: "running" }],
+      session_crons: [],
+    }),
+    { env, cwd: workspaceRoot, args },
+  );
+  assert.equal(waiting.decision, undefined, JSON.stringify(waiting));
+  assert.notEqual(store.getRun(route.run.id).status, "cleared");
+
+  // Auto-compaction's summarizer stops without a SubagentStart.
+  runClaudeHook(
+    hookPayload("SubagentStop", sessionId, {
+      cwd: workspaceRoot,
+      agent_id: "compact-summarizer-1",
+      agent_type: "compact",
+      stop_hook_active: false,
+    }),
+    { env, cwd: workspaceRoot, args },
+  );
 
   const stop = runClaudeHook(
     hookPayload("Stop", sessionId, {

@@ -2,6 +2,23 @@
 
 ## 0.2.0 - Unreleased
 
+### Claude hook friction fixes
+
+- A typed or transcript-backed Claude `SubagentStop` with no matching start
+  (Claude's auto-compaction summarizer emits one) is counted in
+  `orphanSubagentStops` instead of invalidating owner coverage with
+  `NATIVE_SUBAGENT_STOP_UNMATCHED` for the rest of the session. Codex keeps
+  the strict start/stop pairing.
+- Claude coverage already invalidated only by that orphan stop reopens at the
+  next `SessionStart` when it holds no active subagent and no unsettled intent
+  (ODC dispatch was denied while it was incomplete). The startup epoch is kept.
+- Claude `Stop` no longer blocks while Claude itself reports running
+  background tasks or session crons; Claude re-invokes the session when they
+  finish. The turn ends without finalizing the route. Unclassified or missing
+  inventory still blocks.
+- `manager.test.mjs` points `OTM_HOST_EVIDENCE_CONFIG` at a nonexistent file,
+  so the developer's live host observer no longer fails the Codex Stop tests.
+
 ### Shared-session routing and history fixes
 
 - Reused model task labels no longer collide with another session's stored

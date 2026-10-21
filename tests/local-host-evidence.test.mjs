@@ -704,11 +704,7 @@ test("untyped transcript-less unmatched Claude helper stop leaves owner coverage
   }
   const coverage = JSON.parse(
     fs.readFileSync(
-      ownerCoveragePath(
-        fixture,
-        "claude",
-        input.ownerSession.nativeSessionId,
-      ),
+      ownerCoveragePath(fixture, "claude", input.ownerSession.nativeSessionId),
       "utf8",
     ),
   );
@@ -719,7 +715,9 @@ test("untyped transcript-less unmatched Claude helper stop leaves owner coverage
   );
 });
 
-test("typed or transcript-backed unmatched Claude stop still invalidates owner coverage", () => {
+test("typed or transcript-backed orphan Claude stop is counted without invalidating coverage", () => {
+  // Claude's auto-compaction summarizer emits a typed SubagentStop with no
+  // SubagentStart; that used to disable owner coverage for the whole session.
   const typedPayloads = [
     { agent_type: "Explore" },
     {
@@ -737,10 +735,85 @@ test("typed or transcript-backed unmatched Claude stop still invalidates owner c
       payloadExtras,
     });
     const result = observeHostHook(hook);
-    assert.equal(result.observed, false, JSON.stringify(result));
-    assert.equal(result.code, "NATIVE_SUBAGENT_STOP_UNMATCHED");
-    assert.equal(result.coverage.complete, false);
+    assert.equal(result.observed, true, JSON.stringify(result));
+    assert.equal(result.code, null);
+    assert.equal(result.coverage.complete, true);
+    const coverage = JSON.parse(
+      fs.readFileSync(
+        ownerCoveragePath(
+          fixture,
+          "claude",
+          input.ownerSession.nativeSessionId,
+        ),
+        "utf8",
+      ),
+    );
+    assert.equal(coverage.orphanSubagentStops, 1);
+    assert.equal(coverage.subagents.length, 0);
   }
+});
+
+test("unmatched Codex stop still invalidates owner coverage", () => {
+  const fixture = createFixture();
+  const input = inspectionInput(fixture);
+  const hook = createHook(input, {
+    eventName: "SubagentStop",
+    agentId: "codex-child-agent-unmatched",
+  });
+  hook.payload.agent_type = "worker";
+  const result = observeHostHook(hook);
+  assert.equal(result.observed, false, JSON.stringify(result));
+  assert.equal(result.code, "NATIVE_SUBAGENT_STOP_UNMATCHED");
+  assert.equal(result.coverage.complete, false);
+});
+
+test("Claude coverage invalidated only by an orphan stop reopens at the next SessionStart", () => {
+  const fixture = createFixture();
+  const input = claudeInspectionInput(fixture);
+  const nativeSessionId = input.ownerSession.nativeSessionId;
+  const file = ownerCoveragePath(fixture, "claude", nativeSessionId);
+  const invalidate = (extra = {}) => {
+    const record = JSON.parse(fs.readFileSync(file, "utf8"));
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        ...record,
+        ...extra,
+        complete: false,
+        invalidatedCode: "NATIVE_SUBAGENT_STOP_UNMATCHED",
+      }) + "\n",
+    );
+  };
+  const resume = createSessionStartHook(fixture, {
+    provider: "claude",
+    nativeSessionId,
+    source: "resume",
+  });
+
+  invalidate({
+    subagents: [
+      {
+        agentId: "claude-still-running-01",
+        status: "active",
+        startedAt: new Date().toISOString(),
+        startHash: "a".repeat(64),
+        stoppedAt: null,
+        stopHash: null,
+      },
+    ],
+  });
+  const kept = observeHostHook(resume);
+  assert.equal(kept.coverage.complete, false, "active subagent blocks reopen");
+  assert.equal(kept.code, "NATIVE_SUBAGENT_STOP_UNMATCHED");
+
+  invalidate({ subagents: [] });
+  const reopened = observeHostHook(resume);
+  assert.equal(reopened.observed, true, JSON.stringify(reopened));
+  assert.equal(reopened.coverage.complete, true);
+  assert.equal(reopened.code, null);
+  const record = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(record.invalidatedCode, null);
+  assert.equal(record.epoch.source, "startup", "the startup epoch is kept");
 });
 
 test("native completion status without exact physical receipt or after material drift stays unknown", () => {
