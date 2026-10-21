@@ -64,6 +64,29 @@ not create or close an adapter for every individual tool call. A host may keep
 one adapter per trusted provider session or create request-scoped adapters that
 share its store.
 
+## Claude-only bounded phase evidence batching (2026-10-21)
+
+A production Opus/Haiku smoke verified correct worker routing but identified six separate root model-tool turns for three gate progress/complete pairs. The Claude MCP frontend now exposes a thirteenth tool, **`otm_phase`**. Codex's original tools and routing are unchanged.
+
+One signed `sessionCapability` protects the entire ordered batch (maximum 16 operations), which may contain only `otm_start_task`, `otm_progress`, `otm_complete_task` and `otm_audit_stop`. Entire nested schemas, user session identity and workspace scope are verified **before** any transition. Every applied operation goes through the existing canonical OTM adapter and retains decomposition review, pending-to-active, evidence, ownership, Stop and descendant gates.
+
+Example of the allowed shape (IDs and evidence must come from the actual current route):
+
+```json
+{
+  "sessionCapability": "<short-lived capability from the Claude OTM hook>",
+  "operations": [
+    {"name":"otm_start_task","arguments":{"taskId":"task_alpha"}},
+    {"name":"otm_progress","arguments":{"taskId":"task_alpha","internalStepIndex":0,"internalStepStatus":"done","message":"Focused check passed"}},
+    {"name":"otm_complete_task","arguments":{"taskId":"task_alpha","evidence":{"kind":"test_result","summary":"Verified focused check"}}}
+  ]
+}
+```
+
+The operation is **sequential and fail-fast, not globally atomic**. If a later valid operation fails, it returns `ok:false`, the exact applied indices, the failure code and a requirement to inspect `otm_snapshot` before any retry. Earlier accepted state is preserved, never silently rolled back or replayed. Invalid nested arguments/actions are rejected up front and apply nothing. Do not use this interface for structural reconciliation, cross-provider continuation or untrusted task-ownership changes.
+
+This tool is intended for **post-worker accepted phases**. Use one structural `otm_reconcile` to review/decompose the original request, then native Claude Agents do the work and `otm_phase` settles several independently verified gates. It reduces redundant root tool turns; it does not eliminate the required final Stop audit or permit fabricated evidence.
+
 ## Adapter API
 
 `createProviderAdapter` returns API version

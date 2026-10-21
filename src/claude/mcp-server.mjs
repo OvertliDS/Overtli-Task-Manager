@@ -14,6 +14,9 @@ import { toMcpResult } from "../mcp/result.mjs";
 import { VERSION } from "../core/constants.mjs";
 import { assertAcyclicContext } from "../core/validation.mjs";
 
+const CLAUDE_PHASE_ACTIONS = Object.freeze(["otm_start_task", "otm_progress", "otm_complete_task", "otm_audit_stop"]);
+const MAX_CLAUDE_PHASE_OPS = 16;
+
 const MANAGED_TOOL_METHODS = Object.freeze({
   otm_start: "startTask",
   otm_reconcile: "reconcileTask",
@@ -56,13 +59,14 @@ const CAPABILITY_CONTEXT_INSTRUCTION =
   "Use the exact short-lived sessionCapability supplied by the latest OTM Claude hook context when calling OTM tools. Never copy it into task prompts, evidence, or summaries.";
 
 export const CLAUDE_MCP_SERVER_INSTRUCTIONS =
-  "Claude OTM tools use the shared canonical route, history, and summaries. Read shared history/status first; explicit cross-provider continuation is allowed only after fresh verified host evidence and an idle interval. Every tool call requires the short-lived sessionCapability supplied by OTM's official Claude hooks. Never use a native provider session ID as tool authority.";
+  "Claude OTM tools use the shared canonical route, history, and summaries. Read shared history/status first; explicit cross-provider continuation is allowed only after fresh verified host evidence and an idle interval. Every tool call requires the short-lived sessionCapability supplied by OTM's official Claude hooks. Never use a native provider session ID as tool authority. For several already-reviewed independent gates use otm_phase to batch ordered start/progress/complete/audit operations with one model tool request. It is sequential, not globally atomic: if an operation fails, inspect exact canonical state before resuming; never replay an entire partially applied batch.";
 
 export const CLAUDE_OTM_TOOLS = Object.freeze([
   ...Object.entries(MANAGED_TOOL_METHODS).map(([name]) =>
     buildManagedTool(name),
   ),
   buildSnapshotTool(),
+  buildPhaseTool(),
   buildHistoryTool(),
   buildContinueTool(),
   buildCheckpointTool(),
@@ -197,6 +201,9 @@ export function dispatchClaudeTool({
         sessionCapability,
       );
     }
+    if (name === "otm_phase") {
+      return sanitizeResult(executeClaudePhase(adapter, cleanArguments, claims.workspaceRoot), sessionCapability);
+    }
     if (name === "otm_snapshot") {
       if (cleanArguments.runId) {
         return sanitizeResult(
@@ -261,6 +268,114 @@ function buildManagedTool(name) {
     name,
     description: `${CAPABILITY_CONTEXT_INSTRUCTION} ${CLAUDE_TOOL_PURPOSE[name]}`,
     inputSchema: schema,
+  };
+}
+
+/**
+ * One Claude-native phase request may settle several already-verified gates.
+ * Every constituent operation keeps its original canonical manager validation,
+ * authorization, evidence requirements and stop/review semantics. Deliberately
+ * not an atomic multi-gate transaction: failure reports an exact applied prefix
+ * and never retries side effects or hides a partial settlement.
+ */
+function executeClaudePhase(adapter, args, workspaceRoot) {
+  const operations = args.operations;
+  if (!Array.isArray(operations) || !operations.length ||
+      operations.length > MAX_CLAUDE_PHASE_OPS) {
+    throw new OtmError("A phase requires 1..16 explicitly scoped operations.", {
+      code: "CLAUDE_PHASE_INVALID_SIZE",
+    });
+  }
+  // Validate the COMPLETE request, including every nested identity and schema,
+  // before the first mutation. A late malformed item can never cause a partial
+  // application of an earlier otherwise-valid item.
+  const prepared = operations.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item) ||
+        !CLAUDE_PHASE_ACTIONS.includes(item.name)) {
+      throw new OtmError("Phase operation is not an authorized task/evidence action.", {
+        code: "CLAUDE_PHASE_ACTION_FORBIDDEN",
+      });
+    }
+    const payload = item.arguments || {};
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new OtmError("Phase operation arguments must be an object.", {
+        code: "CLAUDE_PHASE_INVALID_ARGUMENTS",
+      });
+    }
+    const forbidden = Object.keys(payload).filter(
+      (key) => key === "workspaceRoot" || key === "provider" ||
+        key === "sessionCapability" || SHARED_IDENTITY_KEYS.has(key),
+    );
+    if (forbidden.length) {
+      throw new OtmError("Nested phase operations cannot override signed session or workspace identity.", {
+        code: "CLAUDE_PHASE_SCOPE_OVERRIDE",
+      });
+    }
+    const base = codexTools.find((tool) => tool.name === item.name);
+    const scoped = { ...payload, workspaceRoot };
+    const safeSchema = withoutSessionScopes(base.inputSchema);
+    safeSchema.additionalProperties = false;
+    validateJsonSchema(payload, safeSchema, "operations[" + index + "].arguments");
+    validateJsonSchema(scoped, base.inputSchema, "operations[" + index + "].arguments");
+    return { name: item.name, arguments: scoped };
+  });
+  const applied = [];
+  for (const [index, item] of prepared.entries()) {
+    try {
+      const response = adapter[MANAGED_TOOL_METHODS[item.name]](item.arguments);
+      applied.push({
+        index, name: item.name,
+        runId: response?.run?.id || item.arguments.runId || null,
+        taskId: item.arguments.taskId || null,
+        routeRevision: Number.isInteger(response?.run?.routeRevision)
+          ? response.run.routeRevision : null,
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        partial: applied.length > 0,
+        applied,
+        failed: {
+          index, name: item.name,
+          code: error?.code || "OTM_PHASE_OPERATION_FAILED",
+          message: String(error?.message || "Operation failed").slice(0, 350),
+        },
+        retryPolicy: "Do not replay this batch. Inspect otm_snapshot for exact canonical gate states and send only still-required operations.",
+      };
+    }
+  }
+  return {
+    ok: true, partial: false, applied,
+    completed: applied.length,
+    authority: "Each transition was validated by the canonical OTM adapter; phase action never releases live jobs or bypasses OTM Stop.",
+  };
+}
+
+function buildPhaseTool() {
+  return {
+    name: "otm_phase",
+    description: CAPABILITY_CONTEXT_INSTRUCTION +
+      " Settle a bounded accepted-work phase in one model tool turn: ordered start_task/progress/complete_task/audit_stop operations. Validate every nested schema BEFORE mutating; the underlying OTM transitions keep their own evidence and state checks. A partial failure preserves successful earlier operations and returns their exact indices; NEVER blindly replay the entire batch. This is NOT a generic scheduler or a replacement for the canonical OTM task database.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionCapability: capabilitySchema(),
+        operations: {
+          type: "array", maxItems: MAX_CLAUDE_PHASE_OPS,
+          items: {
+            type: "object",
+            properties: {
+              name: { type: "string", enum: CLAUDE_PHASE_ACTIONS },
+              arguments: { type: "object" },
+            },
+            required: ["name", "arguments"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["sessionCapability", "operations"],
+      additionalProperties: false,
+    },
   };
 }
 

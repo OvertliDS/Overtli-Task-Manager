@@ -1,5 +1,9 @@
 # Progress
 
+## 2026-10-21 - Claude phase evidence batching to reduce expensive Opus root turns
+
+Added the Claude-only `otm_phase` MCP frontend operation: up to 16 ordered, canonical `otm_start_task`, `otm_progress`, `otm_complete_task` or `otm_audit_stop` actions under one freshly verified short-lived Claude capability. It validates **every** nested action/schema and rejects workspace/provider/session overrides before modifying state. All transitions use existing provider adapter/OTM gates; there is no additional task store, Codex tool change or implicit cross-provider continuation. Runtime failure returns exact prefix receipts and instructs snapshot-based targeted recovery, never replaying a partial batch. This saves Opus multiple root tool turns in phases with several accepted independent gates. Focused isolated JSON-store tests verify prevalidation, signed scope, two-gate success, partial failure/recovery, and action/size restrictions; full OTM suite acceptance must be recorded after test execution.
+
 ## 2026-10-21 - Live Claude root/Haiku qualification and scoped OTM startup
 
 Ran two official first-party Claude Code Pro sessions in isolated, disposable Python repositories (Opus 5.5 Medium root with two Haiku 5.5 native implementers each). First session's two workers repaired independent modules and external verification passed 9/9; however the root attempted OTM structural reconciliation after implementation, repeatedly used unsupported `changes[].status` and attempted to complete pending gates, exhausting 18 turns and exiting with `error_max_turns` (API-equivalent list estimate $1.210, not a charge). Its test route `run_81fc6652752fd9fb` remains active under the original Claude owner; it was **not** transferred or force-finalized.
