@@ -59,7 +59,7 @@ const CAPABILITY_CONTEXT_INSTRUCTION =
   "Use the exact short-lived sessionCapability supplied by the latest OTM Claude hook context when calling OTM tools. Never copy it into task prompts, evidence, or summaries.";
 
 export const CLAUDE_MCP_SERVER_INSTRUCTIONS =
-  "Claude OTM tools use the shared canonical route, history, and summaries. Read shared history/status first; explicit cross-provider continuation is allowed only after fresh verified host evidence and an idle interval. Every tool call requires the short-lived sessionCapability supplied by OTM's official Claude hooks. Never use a native provider session ID as tool authority. For several already-reviewed independent gates use otm_phase to batch ordered start/progress/complete/audit operations with one model tool request. It is sequential, not globally atomic: if an operation fails, inspect exact canonical state before resuming; never replay an entire partially applied batch.";
+  "Claude OTM tools use one canonical route, history and evidence store. Read workspace history/status first; cross-provider continuation requires verified ownership evidence and an idle interval. Every call requires the short-lived hook-supplied sessionCapability. Never use a provider session ID as authority. For independently reviewed gates, otm_phase batches start/progress/complete/audit: activate pending parents, record exact internal steps done WITH evidence, then complete with {taskId,evidence}, never invented summary/status properties. It is sequential, not globally atomic; on partial failure inspect canonical state and retry only unapplied operations.";
 
 export const CLAUDE_OTM_TOOLS = Object.freeze([
   ...Object.entries(MANAGED_TOOL_METHODS).map(([name]) =>
@@ -315,6 +315,18 @@ function executeClaudePhase(adapter, args, workspaceRoot) {
     const scoped = { ...payload, workspaceRoot };
     const safeSchema = withoutSessionScopes(base.inputSchema);
     safeSchema.additionalProperties = false;
+    const unknown = Object.keys(payload).filter(key =>
+      !Object.hasOwn(safeSchema.properties || {}, key),
+    );
+    if (unknown.length) {
+      const completionHint = item.name === "otm_complete_task"
+        ? " Complete an active gate with taskId and evidence only; mark required internal steps done with evidence through otm_progress first."
+        : " Use only fields declared by the original canonical OTM tool schema.";
+      throw new OtmError(
+        `Phase operation ${index} (${item.name}) rejects unsupported arguments: ${unknown.join(", ")}.${completionHint}`,
+        { code: "MCP_UNKNOWN_ARGUMENT" },
+      );
+    }
     validateJsonSchema(payload, safeSchema, "operations[" + index + "].arguments");
     validateJsonSchema(scoped, base.inputSchema, "operations[" + index + "].arguments");
     return { name: item.name, arguments: scoped };
@@ -355,7 +367,7 @@ function buildPhaseTool() {
   return {
     name: "otm_phase",
     description: CAPABILITY_CONTEXT_INSTRUCTION +
-      " Settle a bounded accepted-work phase in one model tool turn: ordered start_task/progress/complete_task/audit_stop operations. Validate every nested schema BEFORE mutating; the underlying OTM transitions keep their own evidence and state checks. A partial failure preserves successful earlier operations and returns their exact indices; NEVER blindly replay the entire batch. This is NOT a generic scheduler or a replacement for the canonical OTM task database.",
+      " Settle several VERIFIED gates in one model tool request (max 16). Each gate must be active (otm_start_task if pending), each required internalStep marked done WITH evidence (otm_progress with exact internalStepId/internalStepStatus/evidence), THEN otm_complete_task with taskId and evidence only. NEVER put summary or status inside otm_complete_task. Batch accepts only ordered start_task/progress/complete_task/audit_stop operations. All nested fields are validated BEFORE mutation; partial failure lists applied indices and requires otm_snapshot before retry. Not a native Agent scheduler or a new task database.",
     inputSchema: {
       type: "object",
       properties: {

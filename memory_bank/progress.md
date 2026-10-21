@@ -1,5 +1,11 @@
 # Progress
 
+## 2026-10-21 - Live Claude phase admission and validation guidance
+
+A real scratch Claude Code run with Opus Medium and three native Haiku implementers passed all 15 Python tests in 11 model turns (~$1.026 CLI API-equivalent). The root called `otm_phase` but first added an unsupported nested `summary` on `otm_complete_task`; strict prevalidation rejected all operations with no state change. A corrected batch then failed at the first parent completion because required atomic `otm_progress` evidence had not been recorded. The third batch recorded exact internal-step evidence then completed all four gates successfully. The OTM store shows the test run as `ready_to_finalize` (all gates done), not `cleared`: headless `claude -p` transcript exposed SessionStart but no Stop hook event. Do not force a synthetic Stop or claim canonical finalization without native host evidence.
+
+Updated the Claude-only `otm_phase` tool description and MCP server instructions to explicitly state `start_task -> progress(required internal step with evidence) -> complete_task({taskId,evidence})`; forbid invented `summary`/`status` fields; report exact bad argument names and index when prevalidation rejects a batch. The canonical schema, signed scope, 16-operation bound, Codex tools, and partial-batch safety remain unchanged.
+
 ## 2026-10-21 - Claude phase evidence batching to reduce expensive Opus root turns
 
 Added the Claude-only `otm_phase` MCP frontend operation: up to 16 ordered, canonical `otm_start_task`, `otm_progress`, `otm_complete_task` or `otm_audit_stop` actions under one freshly verified short-lived Claude capability. It validates **every** nested action/schema and rejects workspace/provider/session overrides before modifying state. All transitions use existing provider adapter/OTM gates; there is no additional task store, Codex tool change or implicit cross-provider continuation. Runtime failure returns exact prefix receipts and instructs snapshot-based targeted recovery, never replaying a partial batch. This saves Opus multiple root tool turns in phases with several accepted independent gates. Focused isolated JSON-store tests verify prevalidation, signed scope, two-gate success, partial failure/recovery, and action/size restrictions; full OTM suite acceptance must be recorded after test execution.

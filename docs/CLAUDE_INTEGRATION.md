@@ -83,6 +83,8 @@ Example of the allowed shape (IDs and evidence must come from the actual current
 }
 ```
 
+**Live Opus/Haiku qualification lesson:** `otm_complete_task` does **not** accept a `summary` or `status` argument. It accepts the exact active `taskId` and, when required, `evidence`. Model-reviewed internal-step evidence must be recorded first with `otm_progress` (`internalStepId`/status/evidence) before closing the parent gate. The Claude frontend now reports the exact invalid operation index and unsupported keys at prevalidation, with a targeted completion hint; no partial OTM state is written for unsupported fields.
+
 The operation is **sequential and fail-fast, not globally atomic**. If a later valid operation fails, it returns `ok:false`, the exact applied indices, the failure code and a requirement to inspect `otm_snapshot` before any retry. Earlier accepted state is preserved, never silently rolled back or replayed. Invalid nested arguments/actions are rejected up front and apply nothing. Do not use this interface for structural reconciliation, cross-provider continuation or untrusted task-ownership changes.
 
 This tool is intended for **post-worker accepted phases**. Use one structural `otm_reconcile` to review/decompose the original request, then native Claude Agents do the work and `otm_phase` settles several independently verified gates. It reduces redundant root tool turns; it does not eliminate the required final Stop audit or permit fabricated evidence.

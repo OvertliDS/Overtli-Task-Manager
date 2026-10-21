@@ -38,6 +38,8 @@ test("Claude phase tool is discoverable but Codex tool registry is unchanged",()
   assert.ok(tool);
   assert.equal(tool.inputSchema.required.includes("sessionCapability"),true);
   assert.equal(tool.inputSchema.properties.operations.maxItems,16);
+  assert.match(tool.description,/NEVER put summary or status/i);
+  assert.match(tool.description,/internalStep.*evidence/i);
 });
 test("prevalidation rejects invalid nested identities and schemas BEFORE any mutation",()=>{
   const ctx=context();
@@ -48,6 +50,11 @@ test("prevalidation rejects invalid nested identities and schemas BEFORE any mut
       op("otm_complete_task",{taskId:ctx.ids[0],status:"done"}),
     ]),{code:"MCP_UNKNOWN_ARGUMENT"});
     assert.deepEqual(ctx.snapshot().snapshot.tasks.map(x=>x.status),before,"failed validation must not partially mutate OTM");
+    assert.throws(()=>ctx.invoke([
+      op("otm_start_task",{taskId:ctx.ids[0]}),
+      op("otm_complete_task",{taskId:ctx.ids[0],summary:"Invented unsupported field",evidence:{kind:"test_result",summary:"Provided evidence"}}),
+    ]),error=>error.code==="MCP_UNKNOWN_ARGUMENT" && error.message.includes("summary") && error.message.includes("otm_progress"));
+    assert.deepEqual(ctx.snapshot().snapshot.tasks.map(x=>x.status),before,"unsupported summary field must be rejected before changing any task");
     assert.throws(()=>ctx.invoke([
       op("otm_start_task",{taskId:ctx.ids[0],workspaceRoot:"C:/foreign"}),
     ]),{code:"CLAUDE_PHASE_SCOPE_OVERRIDE"});
