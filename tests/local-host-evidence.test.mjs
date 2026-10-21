@@ -767,6 +767,58 @@ test("unmatched Codex stop still invalidates owner coverage", () => {
   assert.equal(result.coverage.complete, false);
 });
 
+test("Claude start after a recorded stop resumes the agent; start while active still invalidates", () => {
+  // SendMessage to a completed Claude worker resumes it under the same agent id.
+  const fixture = createFixture();
+  const input = claudeInspectionInput(fixture);
+  const agentId = "claude-resumed-agent-01";
+  const observe = (eventName) =>
+    observeHostHook(createClaudeHook(input, { eventName, agentId }));
+  for (const eventName of ["SubagentStart", "SubagentStop", "SubagentStart"]) {
+    const result = observe(eventName);
+    assert.equal(result.observed, true, JSON.stringify(result));
+    assert.equal(result.coverage.complete, true);
+  }
+  const file = ownerCoveragePath(
+    fixture,
+    "claude",
+    input.ownerSession.nativeSessionId,
+  );
+  let row = JSON.parse(fs.readFileSync(file, "utf8")).subagents[0];
+  assert.equal(row.status, "active");
+  assert.equal(row.stoppedAt, null);
+  assert.equal(row.resumes, 1);
+
+  assert.equal(observe("SubagentStop").observed, true);
+  row = JSON.parse(fs.readFileSync(file, "utf8")).subagents[0];
+  assert.equal(row.status, "stopped");
+  const settled = inspectOwnerWork(input);
+  assert.equal(settled.complete, true, JSON.stringify(settled));
+
+  assert.equal(observe("SubagentStart").observed, true);
+  const duplicate = observe("SubagentStart");
+  assert.equal(duplicate.observed, false);
+  assert.equal(duplicate.code, "NATIVE_SUBAGENT_START_DUPLICATE");
+  assert.equal(duplicate.coverage.complete, false);
+});
+
+test("Codex start after a recorded stop still invalidates owner coverage", () => {
+  const fixture = createFixture();
+  const input = inspectionInput(fixture);
+  const agentId = "codex-child-agent-restart";
+  for (const eventName of ["SubagentStart", "SubagentStop"]) {
+    assert.equal(
+      observeHostHook(createHook(input, { eventName, agentId })).observed,
+      true,
+    );
+  }
+  const result = observeHostHook(
+    createHook(input, { eventName: "SubagentStart", agentId }),
+  );
+  assert.equal(result.observed, false);
+  assert.equal(result.code, "NATIVE_SUBAGENT_START_DUPLICATE");
+});
+
 test("Claude coverage invalidated only by an orphan stop reopens at the next SessionStart", () => {
   const fixture = createFixture();
   const input = claudeInspectionInput(fixture);

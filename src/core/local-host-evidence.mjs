@@ -584,7 +584,28 @@ function observeNativeSubagent({ config, base, owner, current, now }) {
     (row) => row.agentId === agentId,
   );
   let subagents;
-  if (base.eventName === "SubagentStart") {
+  if (
+    base.eventName === "SubagentStart" &&
+    owner.provider === "claude" &&
+    existing &&
+    existing.status === "stopped"
+  ) {
+    // Claude resumes a finished agent under its original id (SendMessage to a
+    // completed worker), so a start after a recorded stop reactivates the row.
+    subagents = current.record.subagents.map((row) =>
+      row.agentId === agentId
+        ? {
+            ...row,
+            status: "active",
+            startedAt: now,
+            startHash: sourceHash,
+            stoppedAt: null,
+            stopHash: null,
+            resumes: (Number.isSafeInteger(row.resumes) ? row.resumes : 0) + 1,
+          }
+        : row,
+    );
+  } else if (base.eventName === "SubagentStart") {
     if (
       existing ||
       current.record.subagents.length >= MAX_OWNER_COVERAGE_ENTRIES
