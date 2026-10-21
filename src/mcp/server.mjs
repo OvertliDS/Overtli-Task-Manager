@@ -29,14 +29,19 @@ import { inspectDoctor, renderDoctor } from "../cli/doctor.mjs";
 export const MCP_SERVER_INSTRUCTIONS =
   "OTM routes are scoped to CODEX_THREAD_ID. Use exact route IDs from the latest otm_snapshot; see the overtli-task-manager skill for full lifecycle guidance.";
 
-export async function runMcpServer({ env = process.env } = {}) {
+export async function runMcpServer({
+  env = process.env,
+  cwd = process.cwd(),
+  transport = null,
+} = {}) {
   const packageRoot = resolve(
     dirname(fileURLToPath(import.meta.url)),
     "..",
     "..",
   );
   let manager = null;
-  const getManager = () => manager || (manager = createTaskManager({ env }));
+  const getManager = () =>
+    manager || (manager = createTaskManager({ env, cwd }));
   const server = new Server(
     { name: "overtli_task_manager", version: VERSION },
     {
@@ -60,6 +65,7 @@ export async function runMcpServer({ env = process.env } = {}) {
         manager: name === "otm_doctor" ? null : getManager(),
         packageRoot,
         env,
+        cwd,
       });
       return toMcpResult(result, {
         detail:
@@ -135,7 +141,7 @@ export async function runMcpServer({ env = process.env } = {}) {
     if (scoped) {
       const workspaceRoot = authorizeScopedResource(scoped, {
         env,
-        cwd: process.cwd(),
+        cwd,
       });
       const current = getManager().snapshot({
         workspaceRoot,
@@ -155,7 +161,7 @@ export async function runMcpServer({ env = process.env } = {}) {
         ],
       };
     }
-    const workspaceRoot = findWorkspaceRoot(process.cwd());
+    const workspaceRoot = findWorkspaceRoot(cwd);
     const sessionId = resolveSessionId({}, env);
     if (request.params.uri === "otm://current") {
       const current = getManager().snapshot({
@@ -207,7 +213,7 @@ export async function runMcpServer({ env = process.env } = {}) {
     throw new Error(`Unknown OTM resource: ${request.params.uri}`);
   });
 
-  const transport = new StdioServerTransport();
+  const activeTransport = transport || new StdioServerTransport();
   let closed = false;
   const closeStore = () => {
     if (closed) return;
@@ -216,9 +222,26 @@ export async function runMcpServer({ env = process.env } = {}) {
       manager?.close?.();
     } catch {}
   };
-  process.once("SIGINT", closeStore);
-  process.once("SIGTERM", closeStore);
-  await server.connect(transport);
+  if (!transport) {
+    process.once("SIGINT", closeStore);
+    process.once("SIGTERM", closeStore);
+  }
+  await server.connect(activeTransport);
+  const sdkOnClose = activeTransport.onclose;
+  activeTransport.onclose = () => {
+    try {
+      sdkOnClose?.();
+    } finally {
+      closeStore();
+    }
+  };
+  return {
+    server,
+    close: async () => {
+      await server.close();
+      closeStore();
+    },
+  };
 }
 
 export function parseScopedResourceUri(uri) {
@@ -420,7 +443,7 @@ function sizeError(field, maximum, type) {
   });
 }
 
-async function dispatchTool({ name, args, manager, packageRoot, env }) {
+async function dispatchTool({ name, args, manager, packageRoot, env, cwd }) {
   switch (name) {
     case "otm_start":
       return manager.start(args);
@@ -483,7 +506,10 @@ async function dispatchTool({ name, args, manager, packageRoot, env }) {
           "## OTM expired memory purge\n\nExpired memory entries were evaluated.\n",
       };
     case "otm_project_review": {
-      const review = reviewProjectContext(args);
+      const review = reviewProjectContext({
+        ...args,
+        workspaceRoot: args.workspaceRoot || findWorkspaceRoot(cwd),
+      });
       if (!review.unchanged) {
         manager.upsertMemory({
           workspaceRoot: review.workspaceRoot,
@@ -502,14 +528,13 @@ async function dispatchTool({ name, args, manager, packageRoot, env }) {
     case "otm_install_workspace": {
       const result = installWorkspace({
         ...args,
-        cwd: process.cwd(),
+        cwd,
         packageRoot,
       });
       return { result, markdown: renderInstallResult(result) };
     }
     case "otm_doctor": {
-      const workspaceRoot =
-        args.workspaceRoot || findWorkspaceRoot(process.cwd());
+      const workspaceRoot = args.workspaceRoot || findWorkspaceRoot(cwd);
       const sessionId = resolveSessionId(args, env);
       const report = inspectDoctor({
         workspaceRoot,
