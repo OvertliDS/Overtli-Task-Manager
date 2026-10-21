@@ -1,5 +1,15 @@
 # Progress
 
+## 2026-10-21 - Live Claude root/Haiku qualification and scoped OTM startup
+
+Ran two official first-party Claude Code Pro sessions in isolated, disposable Python repositories (Opus 5.5 Medium root with two Haiku 5.5 native implementers each). First session's two workers repaired independent modules and external verification passed 9/9; however the root attempted OTM structural reconciliation after implementation, repeatedly used unsupported `changes[].status` and attempted to complete pending gates, exhausting 18 turns and exiting with `error_max_turns` (API-equivalent list estimate $1.210, not a charge). Its test route `run_81fc6652752fd9fb` remains active under the original Claude owner; it was **not** transferred or force-finalized.
+
+Identified and fixed Claude `SessionStart` presenting global shared task history as "in this project". The hook now requests `readSharedHistory({scope:"workspace"})` while explicit `otm_history` global browsing and safe cross-provider continuation remain available. Strengthened signed Claude session capabilities to reject noncanonical base64url alternate encodings of the same signature bytes; improved the test to always mutate the final character. The added isolated workspace-history test and entire local OTM suite pass 253/253.
+
+Installed a compact Claude small-task OTM skill clarification (source-owned by ODC) instructing early one-time model-reviewed gate reconciliation, valid atomic internal steps and status changes through `otm_start_task`/`otm_progress`/`otm_complete_task`, not repeated invalid structural reconciliation.
+
+Second fresh official CLI session, using only standing OVERTLI native delegation policy (no explicit "spawn agents" system addendum), launched two Haiku implementers, fixed `initials.py` and `port_policy.py`, passed 9/9 unittests, and finished successfully. OTM route `run_f7c4d2a262c260cd` is `cleared`, all three accepted gates `done`, final summary present. CLI returned 13-turn success plus two additional streamed result segments, total API-equivalent list cost $1.21747, with Opus $1.20743 and Haiku $0.01004; do not sum repeated streamed total-cost fields. OTM `UserPromptSubmit`, `SubagentStart/Stop`, and `Stop` were exercised without live model API billing. Bash permissions intentionally restricted the CLI smoke; isolated host-side unit tests confirmed the code without broad shell permissions. No production MCP service restart or user-project edit.
+
 ## 2026-10-21 - Claude hook friction from a long real session
 
 Observed in a 9-hour Claude session (APEX project): auto-compaction emitted a

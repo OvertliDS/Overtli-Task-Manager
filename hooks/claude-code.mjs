@@ -325,7 +325,10 @@ async function handleClaudeHook(
         eventName,
       );
     }
-    const shared = adapter.readSharedHistory({ workspaceRoot, limit: 20 });
+    // SessionStart is a project-context hook, not a global history navigator.
+    // Do not inject unrelated providers' active tasks into a fresh project.
+    // Explicit cross-project continuation remains available via /otm continue <runId>.
+    const shared = adapter.readSharedHistory({ workspaceRoot, scope: "workspace", limit: 20 });
     const active = shared.runs.filter((run) =>
       ["active", "ready_to_finalize", "blocked", "paused"].includes(run.status),
     );

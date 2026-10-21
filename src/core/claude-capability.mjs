@@ -77,6 +77,10 @@ export function verifyClaudeSessionCapability(
   if (parts.length !== 3 || parts[0] !== "otm1" || !parts[1] || !parts[2]) {
     throw invalidCapability();
   }
+  // Node's base64url decoder accepts noncanonical final bits and ignored characters.
+  // Require the exact canonical encoding, not merely matching decoded bytes.
+  if (!/^[A-Za-z0-9_-]+$/.test(parts[1]) || !/^[A-Za-z0-9_-]+$/.test(parts[2]))
+    throw invalidCapability();
   const key = readCapabilityKey(env);
   const expected = Buffer.from(sign(parts[1], key), "base64url");
   let supplied;
@@ -86,6 +90,7 @@ export function verifyClaudeSessionCapability(
     throw invalidCapability();
   }
   if (
+    supplied.toString("base64url") !== parts[2] ||
     expected.length !== supplied.length ||
     !crypto.timingSafeEqual(expected, supplied)
   ) {

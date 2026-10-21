@@ -1820,6 +1820,65 @@ test("Claude settings installer merges the supported user file, is idempotent, a
   assert.equal(fs.readFileSync(settingsPath).equals(originalBytes), true);
 });
 
+test("Claude SessionStart injects only same-workspace active history", () => {
+  const foreignRoot = workspace();
+  const localRoot = workspace();
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "otm-startup-workspace-filter-"));
+  const env = {
+    ...process.env,
+    OTM_STATE_DIR: stateDir,
+    OTM_STORAGE: "json",
+    OTM_AUTO_SYNC_AGENTS: "0",
+  };
+  // The runtime's createStore uses <stateDir>/json, not <stateDir> itself.
+  const store = createConfiguredStore({ env });
+  const foreign = adapter({
+    provider: "codex",
+    nativeSessionId: "codex-foreign-startup-fixture",
+    workspaceRoot: foreignRoot,
+    env,
+    store,
+  });
+  const local = adapter({
+    provider: "codex",
+    nativeSessionId: "codex-local-startup-fixture",
+    workspaceRoot: localRoot,
+    env,
+    store,
+  });
+  const foreignRun = foreign.startTask({
+    workspaceRoot: foreignRoot,
+    goal: "FOREIGN_ROUTE_MUST_NOT_APPEAR",
+    tasks: [reviewedAtomicTask("Foreign shared history gate")],
+  });
+  const localRun = local.startTask({
+    workspaceRoot: localRoot,
+    goal: "LOCAL_ROUTE_SHOULD_APPEAR",
+    tasks: [reviewedAtomicTask("Local shared history gate")],
+  });
+  assert.equal(foreign.readSharedHistory({ scope: "all", limit: 10 }).runs.length, 2,
+    "Explicit global shared-history browsing remains available");
+
+  const result = runClaudeHook(
+    hookPayload("SessionStart", "claude-local-startup-fixture", {
+      cwd: localRoot,
+      source: "startup",
+    }),
+    {
+      env,
+      cwd: localRoot,
+      args: ["--state-dir", stateDir, "--storage", "json"],
+    },
+  );
+  const context = additionalContext(result);
+  assert.match(context, /LOCAL_ROUTE_SHOULD_APPEAR/);
+  assert.doesNotMatch(context, /FOREIGN_ROUTE_MUST_NOT_APPEAR/);
+  assert.match(context, new RegExp(localRun.run.id));
+  assert.doesNotMatch(context, new RegExp(foreignRun.run.id));
+  foreign.close();
+  local.close();
+});
+
 test("Claude hook runtime args pin its capability and store to the shared backend", () => {
   const workspaceRoot = workspace();
   const inheritedStateDir = fs.mkdtempSync(
@@ -2199,9 +2258,28 @@ test("Claude capabilities reject expiry and tampering while keeping session iden
       .nativeSessionId,
     nativeSessionId,
   );
+  // Base64url permits distinct textual encodings of the same bytes unless
+  // the representation is checked for canonical form before verification.
+  const tokenParts = capability.split(".");
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const tailIndex = alphabet.indexOf(tokenParts[2].at(-1));
+  assert.ok(tailIndex >= 0);
+  const aliasSignature = tokenParts[2].slice(0, -1) + alphabet[tailIndex ^ 1];
+  assert.equal(
+    Buffer.from(aliasSignature, "base64url").equals(Buffer.from(tokenParts[2], "base64url")),
+    true,
+    "the noncanonical variant decodes to identical signature bytes",
+  );
+  assert.throws(
+    () => verifyClaudeSessionCapability(
+      `${tokenParts[0]}.${tokenParts[1]}.${aliasSignature}`,
+      { env, now: 11_000 },
+    ),
+    { code: "CLAUDE_SESSION_CAPABILITY_INVALID" },
+  );
   assert.throws(
     () =>
-      verifyClaudeSessionCapability(`${capability.slice(0, -1)}x`, {
+      verifyClaudeSessionCapability(`${capability.slice(0, -1)}${capability.endsWith("x") ? "y" : "x"}`, {
         env,
         now: 11_000,
       }),
