@@ -3,6 +3,7 @@ import path from "node:path";
 import { ensureDir, atomicWriteJson } from "../core/fs-utils.mjs";
 import { OtmError } from "../core/errors.mjs";
 import { nowIso } from "../core/ids.mjs";
+import { compactOwnerWorkEvents } from "../core/work-evidence.mjs";
 
 export class JsonStore {
   constructor({ stateDir, readOnly = false }) {
@@ -818,6 +819,18 @@ export class JsonStore {
           String(a.id).localeCompare(String(b.id)),
       );
     return { events: events.slice(-limit), totalCount: events.length };
+  }
+
+  /** Complete owner work evidence; see core/work-evidence.mjs. */
+  getOwnerWorkEvidence(runId, owner) {
+    const events = this.#read()
+      .events.filter((event) => event.runId === runId)
+      .sort(
+        (a, b) =>
+          String(a.createdAt).localeCompare(String(b.createdAt)) ||
+          String(a.id).localeCompare(String(b.id)),
+      );
+    return compactOwnerWorkEvents(events, owner);
   }
 
   upsertSummary(summary) {

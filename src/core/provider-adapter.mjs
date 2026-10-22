@@ -14,6 +14,7 @@ import {
   HOST_CONTINUATION_REQUIRED_SOURCES,
   validateHostContinuationEvidence,
 } from "./continuation.mjs";
+import { readOwnerWorkEvidence } from "./work-evidence.mjs";
 import {
   createProviderEnvironment,
   createProviderSession,
@@ -356,15 +357,17 @@ export function createProviderAdapter({
     // Claude's own transcript records the call's tool_result; treat that as
     // the same settlement PostToolUse would have produced.
     let transcriptSettledIds = [];
+    // Complete owner-scoped work receipts; null only when a store cannot prove
+    // completeness. Never a capped history window.
+    const ownerWorkEvents =
+      eventName === "Stop" || eventName === "SubagentStop"
+        ? readOwnerWorkEvidence(manager.store, current.run.id, {
+            ownerSessionId: session.sessionId,
+            providerSessionKey: session.providerSessionKey,
+          })
+        : null;
     if (eventName === "Stop" || eventName === "SubagentStop") {
-      const history = manager.store.getEventSnapshot?.(current.run.id, 10_000);
-      const openToolIds = openToolWorkIds(
-        (history?.events || []).filter(
-          (event) =>
-            event?.payload?.ownerSessionId === session.sessionId &&
-            event?.payload?.providerSessionKey === session.providerSessionKey,
-        ),
-      );
+      const openToolIds = openToolWorkIds(ownerWorkEvents || []);
       if (openToolIds.size > 0) {
         transcriptSettledIds = toolResultsInTranscripts(
           claudeTranscriptPaths(payload, eventName),
@@ -384,31 +387,17 @@ export function createProviderAdapter({
     }
     if (eventName === "Stop") {
       const inventory = claudeWorkInventory(payload);
-      const eventHistory = manager.store.getEventSnapshot?.(
-        current.run.id,
-        10_000,
-      );
-      if (
-        !eventHistory ||
-        !Array.isArray(eventHistory.events) ||
-        !Number.isSafeInteger(eventHistory.totalCount) ||
-        eventHistory.totalCount < 0 ||
-        eventHistory.events.length !== eventHistory.totalCount
-      ) {
+      if (!ownerWorkEvents) {
         inventory.complete = false;
         inventory.unknownWorkCount += 1;
         inventory.inventoryReason = [
           inventory.inventoryReason,
-          "durable OTM hook history was absent, invalid, or truncated",
+          "durable OTM owner work receipts were unavailable or incomplete",
         ]
           .filter(Boolean)
           .join("; ");
       } else {
-        const ownerEvents = eventHistory.events.filter(
-          (event) =>
-            event?.payload?.ownerSessionId === session.sessionId &&
-            event?.payload?.providerSessionKey === session.providerSessionKey,
-        );
+        const ownerEvents = ownerWorkEvents;
         // A background subagent's start receipt stays open until its
         // SubagentStop, while Claude also lists it as an active background
         // task. Count it once, as active work, not again as unknown work.
@@ -512,20 +501,17 @@ export function createProviderAdapter({
         },
       );
     }
-    const history = manager.store.getEventSnapshot?.(runId, 10_000);
-    if (
-      !history ||
-      !Array.isArray(history.events) ||
-      !Number.isSafeInteger(history.totalCount) ||
-      history.totalCount < 0 ||
-      history.events.length !== history.totalCount
-    ) {
+    const events = readOwnerWorkEvidence(manager.store, runId, {
+      ownerSessionId: previous.run.sessionId,
+      providerSessionKey:
+        previous.run.metadata?.providerSession?.providerSessionKey,
+    });
+    if (!events) {
       throw new OtmError(
-        "The prior route event history is incomplete, so its host work cannot be proved settled. Inspect the full durable owner history and use an explicit host recovery path before continuing.",
+        "The prior route's owner work receipts are incomplete, so its host work cannot be proved settled. Inspect the full durable owner history and use an explicit host recovery path before continuing.",
         { code: "OWNER_WORK_UNKNOWN" },
       );
     }
-    const events = history.events;
     const activityEvent = findLastOwnerActivityEvent(events, previous.run);
     let hostEvidence = null;
     if (typeof inspectOwnerWork === "function") {
@@ -599,24 +585,16 @@ export function createProviderAdapter({
     ) {
       return { complete: false, code: "OWNER_ACTIVITY_UNKNOWN" };
     }
-    const history = manager.store.getEventSnapshot?.(run.id, 10_000);
-    if (
-      !history ||
-      !Array.isArray(history.events) ||
-      !Number.isSafeInteger(history.totalCount) ||
-      history.totalCount < 0 ||
-      history.events.length !== history.totalCount
-    ) {
+    const ownerEvents = readOwnerWorkEvidence(manager.store, run.id, {
+      ownerSessionId: run.sessionId,
+      providerSessionKey: owner.providerSessionKey,
+    });
+    if (!ownerEvents) {
       return { complete: false, code: "OTM_EVENT_HISTORY_INCOMPLETE" };
     }
-    const activityEvent = findLastOwnerActivityEvent(history.events, run);
+    const activityEvent = findLastOwnerActivityEvent(ownerEvents, run);
     if (!activityEvent)
       return { complete: false, code: "OWNER_ACTIVITY_UNKNOWN" };
-    const ownerEvents = history.events.filter(
-      (event) =>
-        event?.payload?.ownerSessionId === run.sessionId &&
-        event?.payload?.providerSessionKey === owner.providerSessionKey,
-    );
     const pendingWork = findPendingWork(ownerEvents);
     if (pendingWork.length) {
       return {
@@ -639,7 +617,7 @@ export function createProviderAdapter({
       activityAt: activityEvent.createdAt,
       activityEventId: activityEvent.id,
       requiredSources: HOST_CONTINUATION_REQUIRED_SOURCES,
-      events: history.events,
+      events: ownerEvents,
     });
     if (hostEvidence && typeof hostEvidence.then === "function") {
       return { complete: false, code: "HOST_INSPECTOR_INVALID" };

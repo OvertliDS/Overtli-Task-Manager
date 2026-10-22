@@ -24,6 +24,7 @@ import {
   loadHostEvidenceModule,
   resolveHostEvidenceModulePath,
 } from "../core/continuation.mjs";
+import { readOwnerWorkEvidence } from "../core/work-evidence.mjs";
 
 export async function runHookScript(
   eventName,
@@ -950,16 +951,6 @@ function codexStopWorkBlocker(manager, run, sessionId, hostObservation) {
   }
 
   try {
-    const history = manager.store.getEventSnapshot?.(run.id, 10_000);
-    if (
-      !history ||
-      !Array.isArray(history.events) ||
-      !Number.isSafeInteger(history.totalCount) ||
-      history.totalCount < 0 ||
-      history.events.length !== history.totalCount
-    ) {
-      return "OTM_EVENT_HISTORY_INCOMPLETE";
-    }
     const providerSession = run.metadata?.providerSession;
     if (!providerSession) return null;
     if (
@@ -967,12 +958,11 @@ function codexStopWorkBlocker(manager, run, sessionId, hostObservation) {
       providerSession.nativeSessionId !== sessionId
     )
       return "OWNER_ACTIVITY_UNKNOWN";
-    const ownerEvents = history.events.filter(
-      (event) =>
-        event?.payload?.ownerSessionId === sessionId &&
-        event?.payload?.providerSessionKey ===
-          providerSession.providerSessionKey,
-    );
+    const ownerEvents = readOwnerWorkEvidence(manager.store, run.id, {
+      ownerSessionId: sessionId,
+      providerSessionKey: providerSession.providerSessionKey,
+    });
+    if (!ownerEvents) return "OTM_EVENT_HISTORY_INCOMPLETE";
     if (findPendingWork(ownerEvents).length > 0) return "HOST_WORK_PENDING";
   } catch {
     return "OTM_EVENT_HISTORY_UNAVAILABLE";

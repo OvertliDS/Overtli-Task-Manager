@@ -690,7 +690,7 @@ test("activity arriving during host inspection invalidates the transfer CAS", ()
   store.close();
 });
 
-test("continuation fails closed when the durable owner event history is truncated", () => {
+test("continuation fails closed when the store cannot prove owner work evidence", () => {
   const workspaceRoot = workspace();
   const env = { ...process.env, OTM_STORAGE: "json" };
   const { store } = createStore();
@@ -707,11 +707,7 @@ test("continuation fails closed when the durable owner event history is truncate
     tasks: [reviewedAtomicTask("History truncation gate")],
   });
   recordActivity(store, route.run);
-  const getEventSnapshot = store.getEventSnapshot.bind(store);
-  store.getEventSnapshot = (runId, limit) => {
-    const snapshot = getEventSnapshot(runId, limit);
-    return { ...snapshot, totalCount: snapshot.totalCount + 1 };
-  };
+  store.getOwnerWorkEvidence = () => null;
   const receiver = adapter({
     provider: "claude",
     nativeSessionId: "claude-truncated-history",

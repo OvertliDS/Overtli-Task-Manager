@@ -1419,6 +1419,36 @@ export class SqliteStore {
     };
   }
 
+  /**
+   * Complete owner work evidence without loading the whole history: the
+   * latest owner activity receipt and the latest receipt per host work id.
+   * Matches compactOwnerWorkEvents in core/work-evidence.mjs.
+   */
+  getOwnerWorkEvidence(runId, owner) {
+    return this.db
+      .prepare(
+        `WITH owner_events AS (
+          SELECT *, json_extract(payload_json, '$.workId') AS work_id FROM events
+          WHERE run_id = ?
+            AND event_type IN ('provider_session_activity', 'provider_host_work_started', 'provider_host_work_settled')
+            AND json_extract(payload_json, '$.ownerSessionId') = ?
+            AND json_extract(payload_json, '$.providerSessionKey') = ?
+        ), ranked AS (
+          SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY CASE
+              WHEN event_type = 'provider_session_activity' THEN 'activity'
+              WHEN typeof(work_id) = 'text' AND work_id <> '' THEN 'work:' || work_id
+              ELSE 'event:' || id
+            END
+            ORDER BY created_at DESC, id DESC
+          ) AS evidence_rank FROM owner_events
+        )
+        SELECT * FROM ranked WHERE evidence_rank = 1 ORDER BY created_at ASC, id ASC`,
+      )
+      .all(runId, owner?.ownerSessionId ?? null, owner?.providerSessionKey ?? null)
+      .map(fromEventRow);
+  }
+
   upsertSummary(summary) {
     this.db
       .prepare(
