@@ -2076,9 +2076,22 @@ test("manual task switching is blocked until the active task is completed or rec
   const [first, second] = started.snapshot.tasks;
   assert.equal(first.status, "active");
 
+  // An auto-activated gate with no recorded work may yield to another gate.
+  manager.markTaskActive({ workspaceRoot, taskId: second.id });
+  manager.markTaskActive({ workspaceRoot, taskId: first.id });
+  manager.progress({
+    workspaceRoot,
+    taskId: first.id,
+    message: "First task underway.",
+    evidence: { kind: "note", summary: "Edited the first file." },
+  });
+
   assert.throws(
     () => manager.markTaskActive({ workspaceRoot, taskId: second.id }),
-    /Complete or explicitly reconcile the active task before moving on/,
+    (error) =>
+      error.code === "ACTIVE_TASK_INCOMPLETE" &&
+      error.message.includes(first.id) &&
+      error.message.includes(second.id),
   );
   assert.throws(
     () =>
@@ -2087,7 +2100,7 @@ test("manual task switching is blocked until the active task is completed or rec
         taskId: second.id,
         message: "Trying to jump ahead.",
       }),
-    /Complete or explicitly reconcile the active task before moving on/,
+    /Only one required gate may be active/,
   );
 
   manager.reconcile({

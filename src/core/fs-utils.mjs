@@ -172,7 +172,24 @@ export function getHomeDir(env = process.env) {
   );
 }
 
+/**
+ * Convert a Git Bash/MSYS (`/d/x`), Cygwin (`/cygdrive/d/x`) or WSL
+ * (`/mnt/d/x`) drive path to its Windows form. Claude Code can report such a
+ * hook `cwd` after Bash runs; path.resolve would otherwise map it onto the
+ * current drive (`C:\d\x`) and split one session across two workspaces.
+ */
+export function normalizeHostPath(value, platform = process.platform) {
+  if (platform !== "win32" || typeof value !== "string") return value;
+  const match = value.match(/^\/(?:(?:cygdrive|mnt)\/)?([a-zA-Z])(?:\/(.*))?$/);
+  if (!match) return value;
+  return path.win32.join(
+    `${match[1].toUpperCase()}:\\`,
+    ...(match[2] || "").split("/").filter(Boolean),
+  );
+}
+
 export function findWorkspaceRoot(startCwd = process.cwd()) {
+  startCwd = normalizeHostPath(startCwd);
   let current = path.resolve(startCwd);
   let fallback = null;
   while (true) {

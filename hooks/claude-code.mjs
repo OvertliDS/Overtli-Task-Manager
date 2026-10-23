@@ -31,7 +31,9 @@ async function main() {
     const hostEvidenceModule = hookOptions.hostEvidenceModulePath
       ? await loadHostEvidenceModule(hookOptions.hostEvidenceModulePath)
       : null;
-    const workspaceRoot = findWorkspaceRoot(hookPayload.cwd || process.cwd());
+    const cwdWorkspaceRoot = findWorkspaceRoot(
+      hookPayload.cwd || process.cwd(),
+    );
     const needsCapability = ["SessionStart", "UserPromptSubmit"].includes(
       mapped.eventName,
     );
@@ -40,7 +42,7 @@ async function main() {
       try {
         sessionCapability = issueClaudeSessionCapability({
           nativeSessionId: mapped.nativeSessionId,
-          workspaceRoot,
+          workspaceRoot: cwdWorkspaceRoot,
         });
       } catch (error) {
         const message = `OTM could not create a secure Claude tool capability. ${redactSensitiveText(error?.message || String(error))}`;
@@ -60,10 +62,24 @@ async function main() {
     const adapter = createProviderAdapter({
       provider: "claude",
       nativeSessionId: mapped.nativeSessionId,
-      workspaceRoot,
+      workspaceRoot: cwdWorkspaceRoot,
       inspectOwnerWork: hostEvidenceModule?.inspectOwnerWork || null,
     });
     try {
+      // A Claude session keeps one route even when its cwd later moves into a
+      // nested repository or another folder. The route this exact native
+      // session owns fixes the workspace for every hook of that session.
+      const owned = adapter.snapshot({
+        workspaceRoot: cwdWorkspaceRoot,
+        write: false,
+      }).run;
+      const workspaceRoot =
+        owned?.metadata?.providerSession?.provider === "claude" &&
+        owned.metadata.providerSession.nativeSessionId ===
+          mapped.nativeSessionId &&
+        typeof owned.workspaceRoot === "string"
+          ? owned.workspaceRoot
+          : cwdWorkspaceRoot;
       let observerDiagnostic = null;
       let hostObservation = null;
       if (
@@ -261,10 +277,26 @@ async function handleClaudeHook(
     );
     const status = inventory?.payload;
     if (!status?.complete || status.unknownWorkCount > 0) {
+      const unmatchedCount = status?.unmatchedReceiptCount || 0;
+      const onlyReceipts =
+        Array.isArray(status?.unmatchedReceipts) &&
+        unmatchedCount > 0 &&
+        status.unknownWorkCount === unmatchedCount;
+      if (onlyReceipts && status.activeWorkCount > 0) {
+        // Claude still runs background work and re-invokes the session when
+        // it ends; the next Stop re-checks these receipts. End the turn
+        // without finalizing instead of forcing an idle turn.
+        return { continue: true, suppressOutput: true };
+      }
+      if (onlyReceipts) {
+        return {
+          decision: "block",
+          reason: `OTM cannot finalize this route: ${unmatchedCount} unmatched OTM hook work receipt(s) never received a terminal hook (${status.unmatchedReceipts.join(", ")}${unmatchedCount > status.unmatchedReceipts.length ? ", ..." : ""}) and Claude reports no running background work. A "subagent:" receipt means SubagentStop never arrived; a "tool:" receipt means neither PostToolUse nor a transcript tool_result was recorded. Wait for or stop that exact work in Claude, then retry Stop.`,
+        };
+      }
       return {
         decision: "block",
-        reason:
-          "OTM cannot close this turn while Claude reports unclassified background tasks/session crons. Wait for them or cancel them through Claude, then retry. A chat stop does not settle detached work.",
+        reason: `OTM cannot close this turn while Claude reports unclassified background tasks/session crons${status?.inventoryReason ? ` (${status.inventoryReason})` : ""}. Wait for them or cancel them through Claude, then retry. A chat stop does not settle detached work.`,
       };
     }
     if (status.activeWorkCount > 0) {
@@ -277,9 +309,18 @@ async function handleClaudeHook(
     if (!current.run) return { continue: true, suppressOutput: true };
     const hostBlocker = claudeStopHostBlocker(hostStatus);
     if (hostBlocker) {
+      const mismatch = hostStatus.hostObservation?.mismatch;
+      const detail =
+        hostBlocker === "HOST_HOOK_IDENTITY_UNVERIFIED" && mismatch
+          ? ` ${identityMismatchHelp(mismatch, workspaceRoot, current.run)}`
+          : ["ODC_OWNER_COVERAGE_MISSING", "ODC_OWNER_COVERAGE_LEGACY"].includes(
+                hostBlocker,
+              )
+            ? ` This Claude session has no owner coverage record: coverage begins only at a fresh SessionStart with source "startup", and replaying SessionStart cannot create it later. Continue route ${current.run.id} from a new Claude session with /otm continue ${current.run.id}.`
+            : " Configure or repair the exact host observer, finish/cancel its recorded work, then retry Stop.";
       return {
         decision: "block",
-        reason: `OTM cannot finalize this route while trusted owner-work coverage is missing, active, or unknown (${hostBlocker}). Configure or repair the exact host observer, finish/cancel its recorded work, then retry Stop.`,
+        reason: `OTM cannot finalize this route while trusted owner-work coverage is missing, active, or unknown (${hostBlocker}${mismatch ? `: ${mismatch} mismatch` : ""}).${detail}`,
       };
     }
     const ownedWork = adapter.inspectOwnedWork({
@@ -319,12 +360,18 @@ async function handleClaudeHook(
 
   if (eventName === "SessionStart") {
     const current = adapter.snapshot({ write: false });
+    const coverageNote = sessionStartCoverageNote(
+      hostStatus,
+      payload,
+      current.run,
+    );
     if (current.run) {
       return hookMessage(
-        `Overtli Task Manager loaded the shared canonical route. Keep ownership in this session and continue with its exact task IDs.\n\n${current.markdown}`,
+        `Overtli Task Manager loaded the shared canonical route. Keep ownership in this session and continue with its exact task IDs.\n\n${current.markdown}${coverageNote ? `\n\n${coverageNote}` : ""}`,
         eventName,
       );
     }
+    if (coverageNote) return hookMessage(coverageNote, eventName);
     // SessionStart is a project-context hook, not a global history navigator.
     // Do not inject unrelated providers' active tasks into a fresh project.
     // Explicit cross-project continuation remains available via /otm continue <runId>.
@@ -392,6 +439,38 @@ function claudeStopHostBlocker({
     return "HOST_WORK_UNKNOWN";
   }
   return coverage.pendingCount > 0 ? "ODC_WORK_PENDING" : null;
+}
+
+/**
+ * SessionStart never blocks, so explain when it could not establish trusted
+ * owner coverage instead of returning silently. Coverage starts only at a
+ * fresh `startup`; replaying resume/compact/clear for a session that already
+ * ran unobserved (or for an unknown session id) creates no state.
+ */
+function sessionStartCoverageNote(
+  { hostEvidenceConfigured, hostObservation } = {},
+  payload,
+  run,
+) {
+  if (!hostEvidenceConfigured || !hostObservation) return null;
+  if (hostObservation.coverage?.complete === true) return null;
+  const code = hostObservation.code || "HOST_WORK_UNKNOWN";
+  if (code === "ODC_OWNER_COVERAGE_LEGACY") {
+    return run
+      ? `OTM host coverage is not recorded for this Claude session (${code}). Coverage begins only at a fresh SessionStart with source "startup"; this "${payload.source || "unknown"}" start cannot create it, so Stop cannot finalize route ${run.id} from this session. Finish the gates, then continue the route from a new Claude session with /otm continue ${run.id}.`
+      : `OTM recorded nothing for Claude session ${payload.session_id}: no route is owned by it and host coverage begins only at a SessionStart with source "startup" (${code}). If you replayed this hook by hand, use the session_id of the live session that owns the route.`;
+  }
+  return `OTM host coverage for this Claude session is incomplete (${code}${hostObservation.mismatch ? `: ${hostObservation.mismatch} mismatch` : ""}); Stop will not finalize a route until it is repaired.`;
+}
+
+function identityMismatchHelp(mismatch, workspaceRoot, run) {
+  if (mismatch === "workspaceRoot")
+    return `The Stop hook resolved workspace ${workspaceRoot}, but route ${run?.id} belongs to ${run?.workspaceRoot}. Return the session to the route's folder (or finish the route there), then retry Stop.`;
+  if (mismatch === "routeOwner" || mismatch === "session_id")
+    return `This Stop hook's Claude session does not own route ${run?.id}. Continue it explicitly with /otm continue ${run?.id} from the owning session, or let the owner finish it.`;
+  if (mismatch === "routeRevision")
+    return "The route changed while the hook was reading it. Retry Stop.";
+  return "Claude sent a hook payload whose identity fields do not match this session. Retry Stop; if it repeats, reconnect the session so SessionStart re-establishes coverage.";
 }
 
 function handlePrompt(adapter, payload, workspaceRoot, rawPrompt) {

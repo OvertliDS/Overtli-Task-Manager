@@ -1022,9 +1022,37 @@ test("Claude lifecycle hooks record observations and block unsafe Stop decisions
     }),
     { env, cwd: workspaceRoot },
   );
-  // The cancelled tool above is still an unmatched receipt, so this stays blocked.
-  assert.equal(activeBackground.decision, "block");
-  assert.match(activeBackground.reason, /unclassified background tasks/i);
+  // The cancelled tool above is still an unmatched receipt, but Claude reports
+  // running background work and re-invokes the session when it ends: the turn
+  // ends without finalizing instead of blocking into an idle turn.
+  assert.equal(activeBackground.decision, undefined);
+  assert.equal(activeBackground.continue, true);
+  assert.equal(store.getRun(startedRoute.run.id).finalizedAt, null);
+  const unfamiliarStatus = runClaudeHook(
+    hookPayload("Stop", sessionId, {
+      cwd: workspaceRoot,
+      stop_hook_active: false,
+      background_tasks: [{ id: "bash-bg", status: "backgrounded" }, {}],
+      session_crons: [],
+    }),
+    { env, cwd: workspaceRoot },
+  );
+  assert.equal(
+    unfamiliarStatus.decision,
+    undefined,
+    "a listed background task with an unfamiliar status is Claude-tracked active work",
+  );
+  const malformedEntry = runClaudeHook(
+    hookPayload("Stop", sessionId, {
+      cwd: workspaceRoot,
+      stop_hook_active: false,
+      background_tasks: ["not-an-object"],
+      session_crons: [],
+    }),
+    { env, cwd: workspaceRoot },
+  );
+  assert.equal(malformedEntry.decision, "block");
+  assert.match(malformedEntry.reason, /unclassified background tasks/i);
   const missingInventory = runClaudeHook(
     hookPayload("Stop", sessionId, {
       cwd: workspaceRoot,

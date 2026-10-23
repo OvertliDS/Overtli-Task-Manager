@@ -2,6 +2,42 @@
 
 ## 0.2.0 - Unreleased
 
+### Claude long-session fixes (2026-10-23)
+
+- Stop no longer fails with `HOST_HOOK_IDENTITY_UNVERIFIED` after the session
+  cwd changes. Claude reports a Git Bash path (`/d/...`) as hook `cwd` after
+  Bash runs, which resolved to `C:\d\...`, and a `cd` into a nested
+  repository resolved a different workspace. `findWorkspaceRoot` now converts
+  MSYS/Cygwin/WSL drive paths, and every Claude hook uses the workspace of the
+  route its exact native session owns. Identity failures now name the
+  mismatching field (`workspaceRoot`, `routeRevision`, `routeOwner`, ...) and
+  the fix.
+- A `SessionStart` that cannot create owner coverage (a non-`startup` source,
+  including a manual replay with an unknown session id) explains
+  `ODC_OWNER_COVERAGE_LEGACY` instead of returning silently. It writes no
+  store state. Stop explains missing coverage and the `/otm continue` path.
+- Tool calls made inside a subagent are attributed to it (hook `agent_id`, or
+  the subagent transcript that issued the `tool_use`). While the subagent
+  runs they count once with it; when it stops they are settled durably
+  (`settlementEvent: "subagent-ended"`). Any listed background task with an
+  unfamiliar or missing status is Claude-tracked active work. When Claude
+  reports running work, unmatched OTM receipts end the turn without
+  finalizing instead of blocking; with nothing running, the block names the
+  exact receipt ids.
+- Contract review sticks for hook-recorded continuation prompts and for any
+  prompt arriving after every required gate is terminal. `otm_complete_task`
+  accepts `contractReviewed: true` to acknowledge new context in the same call.
+- Unknown-argument errors (Claude and Codex MCP) give the JSON path, the
+  offending keys and the allowed keys; inside `otm_phase` the path starts with
+  `operations[<index>].arguments`. A `oneOf` mismatch reports the matching
+  branch's own error.
+- Starting or recording progress on another gate is allowed while the active
+  gate was only auto-activated (no evidence or step progress); it returns to
+  pending. A gate with recorded progress still raises `ACTIVE_TASK_INCOMPLETE`,
+  which now names both gate ids.
+- The compact snapshot includes internal step ids for pending, active and
+  blocked gates.
+
 ### Claude hook friction fixes
 
 - A typed or transcript-backed Claude `SubagentStop` with no matching start

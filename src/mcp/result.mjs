@@ -249,8 +249,22 @@ function compactTask(task = {}, includeDescendants = false) {
     "active",
   ]);
   if (compact.title) compact.title = compactText(compact.title, 300);
-  if (!includeDescendants) return compact;
   const steps = Array.isArray(task.internalSteps) ? task.internalSteps : [];
+  if (!includeDescendants) {
+    // Open non-current gates still expose exact step ids, so a batch can
+    // start a gate and record its step progress without another snapshot.
+    if (!["pending", "active", "blocked"].includes(task.status) || !steps.length)
+      return compact;
+    compact.internalStepCount = steps.length;
+    compact.omittedInternalStepCount = Math.max(
+      0,
+      steps.length - MAX_VISIBLE_INTERNAL_STEPS,
+    );
+    compact.internalSteps = steps
+      .slice(0, MAX_VISIBLE_INTERNAL_STEPS)
+      .map((step) => pick(step, ["id", "status", "required", "evidenceRequired"]));
+    return compact;
+  }
   compact.internalStepCount = steps.length;
   compact.omittedInternalStepCount = Math.max(
     0,

@@ -1598,6 +1598,20 @@ export function createTaskManager(options = {}) {
       (Array.isArray(args.changes) && args.changes.length > 0) ||
       args.contractReviewed === true;
     const tasks = store.getTasks(run.id);
+    // A hook-recorded "continue" prompt, or any prompt arriving after every
+    // required gate is already terminal, adds no gate the model must re-plan:
+    // keep the prior review instead of demanding a fresh contract review.
+    const keepPriorReview =
+      !includesModelReview &&
+      sourceContextChanged &&
+      args.hookEventName === "UserPromptSubmit" &&
+      run.metadata?.contractReview?.status === "reviewed" &&
+      (mode === "continue" ||
+        !tasks.some(
+          (task) =>
+            task.required &&
+            !["done", "dropped", "superseded"].includes(task.status),
+        ));
     const originalById = new Map(tasks.map((task) => [task.id, task]));
     let workingTasks = tasks.map((task) => ({
       ...task,
@@ -1772,6 +1786,7 @@ export function createTaskManager(options = {}) {
             sourceContext,
             sourceContextChanged,
             includesModelReview,
+            keepPriorReview,
             routeRevision: Number(run.routeRevision || 1) + 1,
             at: now,
           }),
@@ -1956,6 +1971,15 @@ export function createTaskManager(options = {}) {
             evidence: progressEvidence,
           });
       assertRunTransition(run.status, "active", { runId: run.id });
+      // An untouched auto-activated gate yields to the gate receiving progress.
+      const yielded = store
+        .getTasks(run.id)
+        .filter((other) => other.status === "active" && other.id !== task.id)
+        .map((other) => ({
+          ...other,
+          status: "pending",
+          metadata: suspendInternalStepProgress(other.metadata),
+        }));
       run = commitRunMutation(
         {
           ...run,
@@ -1963,7 +1987,7 @@ export function createTaskManager(options = {}) {
           status: "active",
           routeRevision: (run.routeRevision || 1) + 1,
         },
-        [{ ...task, evidence, status, metadata: nextMetadata }],
+        [...yielded, { ...task, evidence, status, metadata: nextMetadata }],
         "progress",
         {
           message: args.message || null,
@@ -2008,7 +2032,10 @@ export function createTaskManager(options = {}) {
       "Forced completion is not available through the normal lifecycle API.",
       "PRIVILEGED_OPERATION_REQUIRED",
     );
-    assertContractReviewed(run);
+    const reviewedNow =
+      args.contractReviewed === true &&
+      run.metadata?.contractReview?.status === "needs_model_review";
+    if (!reviewedNow) assertContractReviewed(run);
     assertCondition(
       task.status === "active",
       `Cannot complete a task in status ${task.status}. Activate it through route reconciliation first.`,
@@ -2060,12 +2087,26 @@ export function createTaskManager(options = {}) {
       runId: run.id,
     });
     assertTaskListTransitions(store.getTasks(run.id), taskUpdates);
+    const completedRevision = (run.routeRevision || 1) + 1;
     run = commitRunMutation(
       {
         ...run,
         currentTaskId: next?.id || null,
         status: next ? "active" : "ready_to_finalize",
-        routeRevision: (run.routeRevision || 1) + 1,
+        routeRevision: completedRevision,
+        ...(reviewedNow
+          ? {
+              metadata: {
+                ...(run.metadata || {}),
+                contractReview: buildContractReview({
+                  sourceContext: run.metadata?.sourceContext || {},
+                  includesModelReview: true,
+                  routeRevision: completedRevision,
+                  at: nowIso(),
+                }),
+              },
+            }
+          : {}),
       },
       taskUpdates,
       "task_completed",
@@ -3499,9 +3540,18 @@ function buildContractReview({
   sourceContext,
   sourceContextChanged,
   includesModelReview,
+  keepPriorReview = false,
   routeRevision,
   at,
 }) {
+  if (keepPriorReview && prior)
+    return {
+      ...prior,
+      sourceContextDigest: sourceContext.digest,
+      routeRevision,
+      reason:
+        "Prior model review kept: the new prompt was a continuation or arrived after every required gate was terminal.",
+    };
   if (includesModelReview)
     return {
       status: "reviewed",
@@ -3534,7 +3584,7 @@ function buildContractReview({
 function assertContractReviewed(run) {
   assertCondition(
     run.metadata?.contractReview?.status !== "needs_model_review",
-    "Reconcile the complete accumulated source context before completing route gates: re-read it, then call otm_reconcile with tasks/changes for any new requirement, or with contractReviewed: true when the current gates already cover it.",
+    "Reconcile the complete accumulated source context before completing route gates: re-read it, then call otm_reconcile with tasks/changes for any new requirement, or pass contractReviewed: true (on otm_reconcile, or on this otm_complete_task) when the current gates already cover it.",
     "CONTRACT_REVIEW_REQUIRED",
     { contractReview: run.metadata?.contractReview },
   );
@@ -5042,10 +5092,29 @@ function assertCanSwitchTask(tasks, targetTask, args = {}) {
   const active = tasks.find(
     (task) => task.status === "active" && task.required,
   );
-  assertCondition(
-    !active || active.id === targetTask.id,
-    `Complete or explicitly reconcile the active task before moving on: ${active?.title}`,
-    "ACTIVE_TASK_INCOMPLETE",
+  // Completing a gate auto-activates the next one. A gate that only became
+  // active that way, with no evidence or step progress of its own, may yield
+  // to an explicit start; the switch returns it to pending.
+  if (!active || active.id === targetTask.id || !hasRecordedTaskWork(active))
+    return;
+  throw new OtmError(
+    `Only one required gate may be active. Gate ${active.id} ("${active.title}") is active with recorded progress; complete it (otm_complete_task) or reconcile it before starting ${targetTask.id}. In an otm_phase batch, put its otm_complete_task before the next otm_start_task.`,
+    {
+      code: "ACTIVE_TASK_INCOMPLETE",
+      details: { activeTaskId: active.id, requestedTaskId: targetTask.id },
+    },
+  );
+}
+
+function hasRecordedTaskWork(task) {
+  if (Array.isArray(task.evidence) && task.evidence.length > 0) return true;
+  const progressed = (step) =>
+    ["done", "complete", "completed", "skipped", "blocked"].includes(
+      step?.status,
+    ) ||
+    (Array.isArray(step?.evidence) && step.evidence.length > 0);
+  return (task.metadata?.internalSteps || []).some(
+    (step) => progressed(step) || (step?.miniSteps || []).some(progressed),
   );
 }
 

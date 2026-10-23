@@ -216,6 +216,11 @@ export const tools = [
         runId: { type: "string" },
         taskId: { type: "string" },
         evidence: evidenceSchema,
+        contractReviewed: {
+          type: "boolean",
+          description:
+            "Set true only after re-reading the accumulated source context when the current gates already cover it. Clears CONTRACT_REVIEW_REQUIRED in the same call instead of a separate otm_reconcile.",
+        },
       },
       required: ["taskId"],
     },

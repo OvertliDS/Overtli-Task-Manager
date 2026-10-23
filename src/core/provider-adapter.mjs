@@ -342,6 +342,10 @@ export function createProviderAdapter({
           ...common,
           workId,
           workLabel: eventName === "SubagentStart" ? "subagent" : "tool use",
+          // A tool call made inside a subagent belongs to that subagent's work.
+          ...(eventName === "PreToolUse" && safeHostId(payload.agent_id)
+            ? { agentId: payload.agent_id.trim() }
+            : {}),
         },
       });
     } else if (
@@ -357,6 +361,21 @@ export function createProviderAdapter({
     // Claude's own transcript records the call's tool_result; treat that as
     // the same settlement PostToolUse would have produced.
     let transcriptSettledIds = [];
+    // Open tool receipt -> owning subagent id, from the hook's agent_id or
+    // from the subagent transcript that issued the tool_use.
+    let toolOwners = new Map();
+    // A subagent's in-flight tool calls end with it; record that durably so
+    // owner-work inspection and continuation see the same settlement.
+    const settleWithSubagent = (toolWorkId, agentId) =>
+      observations.push({
+        eventType: "provider_host_work_settled",
+        payload: {
+          ...common,
+          workId: toolWorkId,
+          settlementEvent: "subagent-ended",
+          agentId,
+        },
+      });
     // Complete owner-scoped work receipts; null only when a store cannot prove
     // completeness. Never a capped history window.
     const ownerWorkEvents =
@@ -369,10 +388,21 @@ export function createProviderAdapter({
     if (eventName === "Stop" || eventName === "SubagentStop") {
       const openToolIds = openToolWorkIds(ownerWorkEvents || []);
       if (openToolIds.size > 0) {
-        transcriptSettledIds = toolResultsInTranscripts(
+        const scan = scanTranscripts(
           claudeTranscriptPaths(payload, eventName),
           openToolIds,
         );
+        transcriptSettledIds = scan.settled;
+        toolOwners = scan.owners;
+        for (const event of ownerWorkEvents || []) {
+          const started = event.payload;
+          if (
+            event.eventType === "provider_host_work_started" &&
+            openToolIds.has(started?.workId) &&
+            safeHostId(started?.agentId)
+          )
+            toolOwners.set(started.workId, started.agentId.trim());
+        }
         for (const settledId of transcriptSettledIds) {
           observations.push({
             eventType: "provider_host_work_settled",
@@ -382,6 +412,13 @@ export function createProviderAdapter({
               settlementEvent: "transcript-tool-result",
             },
           });
+        }
+        if (eventName === "SubagentStop" && safeHostId(payload.agent_id)) {
+          const stopped = payload.agent_id.trim();
+          const settled = new Set(transcriptSettledIds);
+          for (const [toolWorkId, agentId] of toolOwners)
+            if (agentId === stopped && !settled.has(toolWorkId))
+              settleWithSubagent(toolWorkId, agentId);
         }
       }
     }
@@ -398,17 +435,40 @@ export function createProviderAdapter({
           .join("; ");
       } else {
         const ownerEvents = ownerWorkEvents;
-        // A background subagent's start receipt stays open until its
-        // SubagentStop, while Claude also lists it as an active background
-        // task. Count it once, as active work, not again as unknown work.
-        let coveredSubagents = 0;
-        const pendingWork = findPendingWorkEntries([
+        const stillOpen = findPendingWorkEntries([
           ...ownerEvents,
           ...transcriptSettledIds.map((settledId) => ({
             eventType: "provider_host_work_settled",
             payload: { workId: settledId },
           })),
-        ]).filter(([workId]) => {
+        ]);
+        const openIds = new Set(stillOpen.map(([workId]) => workId));
+        // A tool call made inside a subagent is that subagent's work: while
+        // the subagent is open it is counted once with it; once the subagent
+        // has stopped, its in-flight tool calls ended with it.
+        const ownedByOpenSubagent = new Set();
+        const pendingWork = stillOpen.filter(([workId]) => {
+          const agentId = toolOwners.get(workId);
+          if (!agentId) return true;
+          if (openIds.has(`subagent:${agentId}`)) {
+            ownedByOpenSubagent.add(workId);
+            return false;
+          }
+          // Owner evidence keeps only the latest receipt per work id, so a
+          // stopped subagent appears as its settlement receipt.
+          const subagentEnded = ownerEvents.some(
+            (event) =>
+              event.eventType === "provider_host_work_settled" &&
+              event.payload?.workId === `subagent:${agentId}`,
+          );
+          if (subagentEnded) settleWithSubagent(workId, agentId);
+          return !subagentEnded;
+        });
+        // A background subagent's start receipt stays open until its
+        // SubagentStop, while Claude also lists it as an active background
+        // task. Count it once, as active work, not again as unknown work.
+        let coveredSubagents = 0;
+        const unmatched = pendingWork.filter(([workId]) => {
           if (
             workId.startsWith("subagent:") &&
             coveredSubagents < inventory.activeWorkCount
@@ -418,16 +478,22 @@ export function createProviderAdapter({
           }
           return true;
         });
-        if (pendingWork.length > 0) {
+        if (unmatched.length > 0) {
           inventory.complete = false;
-          inventory.unknownWorkCount += pendingWork.length;
+          inventory.unknownWorkCount += unmatched.length;
+          inventory.unmatchedReceiptCount = unmatched.length;
+          inventory.unmatchedReceipts = unmatched
+            .slice(0, 5)
+            .map(([workId]) => workId);
           inventory.inventoryReason = [
             inventory.inventoryReason,
-            `${pendingWork.length} unmatched OTM hook work receipt(s)`,
+            `${unmatched.length} unmatched OTM hook work receipt(s)`,
           ]
             .filter(Boolean)
             .join("; ");
         }
+        if (ownedByOpenSubagent.size > 0)
+          inventory.subagentToolReceiptCount = ownedByOpenSubagent.size;
       }
       observations.push({
         eventType: "provider_work_inventory",
@@ -864,13 +930,21 @@ function claudeTranscriptPaths(payload, eventName) {
   });
 }
 
-function toolResultsInTranscripts(files, openToolIds) {
+/**
+ * Scan host transcripts for open tool receipts: a tool_result settles one,
+ * and a tool_use inside a subagent transcript (agent-<id>.jsonl) names the
+ * subagent that owns it.
+ */
+function scanTranscripts(files, openToolIds) {
   const wanted = new Map(
     [...openToolIds].map((workId) => [workId.slice("tool:".length), workId]),
   );
   const settled = new Set();
+  const owners = new Map();
   for (const file of files) {
     if (settled.size === wanted.size) break;
+    const agentId = path.basename(file).match(/^agent-(.+)\.jsonl$/i)?.[1];
+    const ownerId = agentId && safeHostId(agentId) ? agentId : null;
     let text;
     try {
       if (fs.statSync(file).size > MAX_TRANSCRIPT_SCAN_BYTES) continue;
@@ -879,7 +953,9 @@ function toolResultsInTranscripts(files, openToolIds) {
       continue;
     }
     for (const line of text.split("\n")) {
-      if (!line.includes('"tool_result"')) continue;
+      const hasResult = line.includes('"tool_result"');
+      const hasUse = ownerId && line.includes('"tool_use"');
+      if (!hasResult && !hasUse) continue;
       let record;
       try {
         record = JSON.parse(line);
@@ -889,13 +965,17 @@ function toolResultsInTranscripts(files, openToolIds) {
       const content = record?.message?.content;
       if (!Array.isArray(content)) continue;
       for (const block of content) {
-        if (block?.type !== "tool_result") continue;
-        const workId = wanted.get(block.tool_use_id);
-        if (workId) settled.add(workId);
+        if (block?.type === "tool_result") {
+          const workId = wanted.get(block.tool_use_id);
+          if (workId) settled.add(workId);
+        } else if (hasUse && block?.type === "tool_use") {
+          const workId = wanted.get(block.id);
+          if (workId) owners.set(workId, ownerId);
+        }
       }
     }
   }
-  return [...settled];
+  return { settled: [...settled], owners };
 }
 
 function claudeWorkInventory(payload) {
@@ -925,26 +1005,30 @@ function claudeWorkInventory(payload) {
         "completed",
         "complete",
         "succeeded",
+        "success",
+        "done",
+        "finished",
+        "exited",
         "failed",
         "errored",
+        "error",
         "cancelled",
         "canceled",
         "stopped",
+        "killed",
+        "terminated",
+        "aborted",
+        "interrupted",
+        "timed_out",
+        "timeout",
       ].includes(status)
     )
       continue;
-    if (
-      [
-        "queued",
-        "pending",
-        "running",
-        "working",
-        "scheduled",
-        "active",
-      ].includes(status)
-    )
-      activeWorkCount += 1;
-    else unknownWorkCount += 1;
+    // Every other listed entry (running, queued, an unfamiliar status, or no
+    // status at all) is work Claude itself tracks and re-invokes the session
+    // for when it ends: active, never finalized past, but not a reason to
+    // block the turn.
+    activeWorkCount += 1;
   }
   return {
     source: "claude-stop-hook",

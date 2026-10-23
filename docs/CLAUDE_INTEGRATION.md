@@ -85,6 +85,8 @@ Example of the allowed shape (IDs and evidence must come from the actual current
 
 **Live Opus/Haiku qualification lesson:** `otm_complete_task` does **not** accept a `summary` or `status` argument. It accepts the exact active `taskId` and, when required, `evidence`. Model-reviewed internal-step evidence must be recorded first with `otm_progress` (`internalStepId`/status/evidence) before closing the parent gate. The Claude frontend now reports the exact invalid operation index and unsupported keys at prevalidation, with a targeted completion hint; no partial OTM state is written for unsupported fields.
 
+Only one required gate may be active. Completing a gate auto-activates the next one; a later `otm_start_task` (or `otm_progress`) for a different gate may replace it while that auto-activated gate has no evidence or step progress. Once a gate has recorded progress, put its `otm_complete_task` before the next `otm_start_task`, or the batch fails with `ACTIVE_TASK_INCOMPLETE` naming both gate ids. The compact snapshot lists `internalSteps` ids for pending gates, so one batch can start a gate and progress its steps by id. Unknown nested keys fail with the exact path, for example `operations[1].arguments.evidence includes unsupported property: check. Allowed keys at ...`.
+
 The operation is **sequential and fail-fast, not globally atomic**. If a later valid operation fails, it returns `ok:false`, the exact applied indices, the failure code and a requirement to inspect `otm_snapshot` before any retry. Earlier accepted state is preserved, never silently rolled back or replayed. Invalid nested arguments/actions are rejected up front and apply nothing. Do not use this interface for structural reconciliation, cross-provider continuation or untrusted task-ownership changes.
 
 This tool is intended for **post-worker accepted phases**. Use one structural `otm_reconcile` to review/decompose the original request, then native Claude Agents do the work and `otm_phase` settles several independently verified gates. It reduces redundant root tool turns; it does not eliminate the required final Stop audit or permit fabricated evidence.
@@ -304,8 +306,29 @@ strips these client frames (`stripHarnessFrames` in `src/core/planner.mjs`)
 before classification, so they never start a route, become its goal, or reopen
 contract review; a prompt that is only frames still refreshes the capability.
 When new source context does arrive and the existing gates already cover it,
-call `otm_reconcile` with `contractReviewed: true` after re-reading it; hooks
-never set that flag. `otm_snapshot` with `detail: true` keeps one copy of the
+call `otm_reconcile` with `contractReviewed: true` after re-reading it, or pass
+`contractReviewed: true` on the `otm_complete_task` that closes a covered gate;
+hooks never set that flag. A prompt the hook classifies as a continuation, or
+any prompt that arrives after every required gate is terminal, keeps the prior
+review instead of demanding a new one.
+
+Every Claude hook resolves its workspace from the route its exact native
+session owns, not from the payload `cwd` alone: a session whose cwd moves into
+a nested repository, or that Claude reports as a Git Bash path such as
+`/d/Project`, keeps its route's workspace. When an identity check still fails,
+the Stop reason names the field (`HOST_HOOK_IDENTITY_UNVERIFIED: workspaceRoot
+mismatch`) and the fix. Owner coverage starts only at `SessionStart` with
+`source: "startup"`; a later resume/compact/clear start, or a manual replay
+with a session id that owns nothing, explains `ODC_OWNER_COVERAGE_LEGACY` in
+its context and writes no state.
+
+At Stop, tool receipts made inside a subagent (hook `agent_id`, or the
+`agent-<id>.jsonl` transcript holding the `tool_use`) count once with that
+subagent while it runs and settle with `settlementEvent: "subagent-ended"` when
+it stops. Any `background_tasks`/`session_crons` object without a terminal
+status is Claude-tracked active work. While Claude reports active work, open
+OTM receipts end the turn without finalizing; with nothing running, the block
+lists the exact receipt ids. `otm_snapshot` with `detail: true` keeps one copy of the
 source context and caps each entry at 4,000 characters, and shared history no
 longer exposes Claude's native session UUID.
 

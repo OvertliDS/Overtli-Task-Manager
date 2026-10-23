@@ -228,6 +228,7 @@ export function observeHostHook(input = {}) {
       observed: false,
       dispatchAllowed: false,
       code: base.code,
+      ...(base.mismatch ? { mismatch: base.mismatch } : {}),
     });
   }
 
@@ -2169,7 +2170,11 @@ function validateHookInput(input) {
       nativeSessionId: input?.nativeSessionId,
     });
   } catch {
-    return { ok: false, code: "HOST_HOOK_IDENTITY_UNVERIFIED" };
+    return {
+      ok: false,
+      code: "HOST_HOOK_IDENTITY_UNVERIFIED",
+      mismatch: "nativeSessionId",
+    };
   }
   const owner = run?.metadata?.providerSession;
   const toolEvent = [
@@ -2186,45 +2191,75 @@ function validateHookInput(input) {
     "conversation_id",
     "conversationId",
   ];
-  if (
-    input?.schemaVersion !== HOST_HOOK_OBSERVATION_SCHEMA ||
-    !["codex", "claude"].includes(input.provider) ||
-    !supportedEvents.has(input.eventName) ||
-    !payload ||
-    typeof payload !== "object" ||
-    Array.isArray(payload) ||
-    payload.hook_event_name !== input.eventName ||
-    payload.session_id !== input.nativeSessionId ||
-    (input.provider === "codex" && toolEvent && !validId(payload.turn_id)) ||
-    optionalIdentityAliases.some(
-      (field) =>
-        Object.hasOwn(payload, field) &&
-        payload[field] !== input.nativeSessionId,
-    ) ||
-    (toolEvent && !validId(payload.tool_use_id)) ||
-    (toolEvent && typeof payload.tool_name !== "string") ||
-    (toolEvent && !payload.tool_input) ||
-    (subagentEvent && !validId(payload.agent_id)) ||
-    !validId(input.nativeSessionId) ||
-    input.providerSessionKey !== derived.providerSessionKey ||
-    input.sessionId !== derived.sessionId ||
-    (run &&
-      (!owner ||
-        input.provider !== owner.provider ||
-        input.nativeSessionId !== owner.nativeSessionId ||
-        input.providerSessionKey !== owner.providerSessionKey ||
-        input.sessionId !== run.sessionId ||
-        input.routeRevision !== run.routeRevision ||
-        typeof run.id !== "string" ||
-        !Number.isSafeInteger(run.routeRevision))) ||
-    (!run &&
-      input.routeRevision !== null &&
-      input.routeRevision !== undefined) ||
-    (input.workspaceRoot !== undefined &&
-      (!path.isAbsolute(input.workspaceRoot) ||
-        (run && input.workspaceRoot !== run.workspaceRoot)))
-  ) {
-    return { ok: false, code: "HOST_HOOK_IDENTITY_UNVERIFIED" };
+  const objectPayload =
+    payload && typeof payload === "object" && !Array.isArray(payload);
+  // Ordered named checks: the first failure names the exact mismatch so the
+  // Stop message can say what differs instead of a bare identity code.
+  const checks = [
+    ["schemaVersion", input?.schemaVersion !== HOST_HOOK_OBSERVATION_SCHEMA],
+    ["provider", !["codex", "claude"].includes(input?.provider)],
+    ["eventName", !supportedEvents.has(input?.eventName)],
+    ["payload", !objectPayload],
+    ["hook_event_name", payload?.hook_event_name !== input?.eventName],
+    ["session_id", payload?.session_id !== input?.nativeSessionId],
+    [
+      "turn_id",
+      input?.provider === "codex" && toolEvent && !validId(payload?.turn_id),
+    ],
+    [
+      "sessionAlias",
+      objectPayload &&
+        optionalIdentityAliases.some(
+          (field) =>
+            Object.hasOwn(payload, field) &&
+            payload[field] !== input.nativeSessionId,
+        ),
+    ],
+    [
+      "tool",
+      toolEvent &&
+        (!validId(payload?.tool_use_id) ||
+          typeof payload?.tool_name !== "string" ||
+          !payload?.tool_input),
+    ],
+    ["agent_id", subagentEvent && !validId(payload?.agent_id)],
+    ["nativeSessionId", !validId(input?.nativeSessionId)],
+    [
+      "providerSession",
+      input?.providerSessionKey !== derived.providerSessionKey ||
+        input?.sessionId !== derived.sessionId,
+    ],
+    [
+      "routeOwner",
+      Boolean(run) &&
+        (!owner ||
+          input.provider !== owner.provider ||
+          input.nativeSessionId !== owner.nativeSessionId ||
+          input.providerSessionKey !== owner.providerSessionKey ||
+          input.sessionId !== run.sessionId),
+    ],
+    [
+      "routeRevision",
+      run
+        ? input.routeRevision !== run.routeRevision ||
+          typeof run.id !== "string" ||
+          !Number.isSafeInteger(run.routeRevision)
+        : input?.routeRevision !== null && input?.routeRevision !== undefined,
+    ],
+    [
+      "workspaceRoot",
+      input?.workspaceRoot !== undefined &&
+        (!path.isAbsolute(input.workspaceRoot) ||
+          (Boolean(run) && input.workspaceRoot !== run.workspaceRoot)),
+    ],
+  ];
+  const failed = checks.find(([, failure]) => failure);
+  if (failed) {
+    return {
+      ok: false,
+      code: "HOST_HOOK_IDENTITY_UNVERIFIED",
+      mismatch: failed[0],
+    };
   }
   return {
     ok: true,

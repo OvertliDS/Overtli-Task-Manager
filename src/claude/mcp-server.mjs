@@ -127,6 +127,10 @@ export async function runClaudeMcpServer({
         structuredContent: {
           ok: false,
           code: error?.code || "OTM_INTERNAL_ERROR",
+          // Schema-validation details hold only paths and key names.
+          ...(error?.code === "MCP_UNKNOWN_ARGUMENT" && error.details
+            ? { details: error.details }
+            : {}),
         },
       };
     }
@@ -322,9 +326,17 @@ function executeClaudePhase(adapter, args, workspaceRoot) {
       const completionHint = item.name === "otm_complete_task"
         ? " Complete an active gate with taskId and evidence only; mark required internal steps done with evidence through otm_progress first."
         : " Use only fields declared by the original canonical OTM tool schema.";
+      const allowedKeys = Object.keys(safeSchema.properties || {});
       throw new OtmError(
-        `Phase operation ${index} (${item.name}) rejects unsupported arguments: ${unknown.join(", ")}.${completionHint}`,
-        { code: "MCP_UNKNOWN_ARGUMENT" },
+        `Phase operation ${index} (${item.name}) rejects unsupported arguments at operations[${index}].arguments: ${unknown.join(", ")}. Allowed keys: ${allowedKeys.join(", ")}.${completionHint}`,
+        {
+          code: "MCP_UNKNOWN_ARGUMENT",
+          details: {
+            path: `operations[${index}].arguments`,
+            unknownKeys: unknown,
+            allowedKeys,
+          },
+        },
       );
     }
     validateJsonSchema(payload, safeSchema, "operations[" + index + "].arguments");
@@ -530,18 +542,28 @@ function validateClaudeArguments(schema, args) {
 
 function validateJsonSchema(value, schema, field) {
   if (Array.isArray(schema.oneOf)) {
+    const failures = [];
     const matches = schema.oneOf.filter((candidate) => {
       try {
         validateJsonSchema(value, candidate, field);
         return true;
-      } catch {
+      } catch (error) {
+        failures.push({ candidate, error });
         return false;
       }
     });
-    if (matches.length !== 1)
+    if (matches.length !== 1) {
+      // When exactly one branch has the value's JSON type, its own error
+      // (path, unknown key, allowed keys) is the actionable explanation.
+      const sameType = failures.filter(({ candidate }) =>
+        jsonTypeMatches(value, candidate.type),
+      );
+      if (matches.length === 0 && sameType.length === 1)
+        throw sameType[0].error;
       throw new OtmError(`${field} does not match exactly one allowed shape.`, {
         code: "MCP_INVALID_ARGUMENTS",
       });
+    }
     return;
   }
   if (schema.type === "object") {
@@ -561,8 +583,15 @@ function validateJsonSchema(value, schema, field) {
       );
       if (unknown.length)
         throw new OtmError(
-          "Claude OTM arguments include unsupported properties.",
-          { code: "MCP_UNKNOWN_ARGUMENT" },
+          `${field} includes unsupported ${unknown.length === 1 ? "property" : "properties"}: ${unknown.join(", ")}. Allowed keys at ${field}: ${Object.keys(properties).join(", ") || "(none)"}.`,
+          {
+            code: "MCP_UNKNOWN_ARGUMENT",
+            details: {
+              path: field,
+              unknownKeys: unknown,
+              allowedKeys: Object.keys(properties),
+            },
+          },
         );
     }
     for (const [key, child] of Object.entries(value))
@@ -622,6 +651,14 @@ function validateJsonSchema(value, schema, field) {
     });
   if (schema.properties || schema.items)
     validateJsonSchema(value, schema, field);
+}
+
+function jsonTypeMatches(value, type) {
+  if (type === "object")
+    return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  if (type === "array") return Array.isArray(value);
+  if (type === "integer" || type === "number") return typeof value === "number";
+  return type !== undefined && typeof value === type;
 }
 
 function scrubInput(value, capability) {

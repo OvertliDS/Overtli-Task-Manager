@@ -338,10 +338,13 @@ export function validateMcpArgs(name, args) {
   );
   const unknown = Object.keys(args).filter((key) => !allowed.has(key));
   if (unknown.length)
-    throw new OtmError("MCP arguments include unsupported properties.", {
+    throw new OtmError(
+      `MCP arguments include unsupported properties: ${unknown.join(", ")}. Allowed keys: ${[...allowed].join(", ")}.`,
+      {
       code: "MCP_UNKNOWN_ARGUMENT",
       details: { fields: unknown },
-    });
+      },
+    );
   assertAcyclicContext(args);
   // A conservative top-level budget remains in force for legacy/simple tool
   // schemas; richer nested schemas below impose tighter field-specific bounds.
@@ -381,7 +384,7 @@ function validateSchemaValue(value, schema = {}, field) {
       );
       if (unknown.length)
         throw new OtmError(
-          "MCP nested arguments include unsupported properties.",
+          `${field} includes unsupported properties: ${unknown.join(", ")}. Allowed keys at ${field}: ${Object.keys(properties).join(", ") || "(none)"}.`,
           {
             code: "MCP_UNKNOWN_ARGUMENT",
             details: { fields: unknown.map((key) => `${field}.${key}`) },
