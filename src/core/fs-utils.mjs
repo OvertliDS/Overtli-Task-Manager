@@ -188,11 +188,25 @@ export function normalizeHostPath(value, platform = process.platform) {
   );
 }
 
-export function findWorkspaceRoot(startCwd = process.cwd()) {
+/**
+ * Resolve the workspace that owns `startCwd`: the nearest `.git` ancestor, or
+ * else the nearest project-marker ancestor. The user's home folder (and any
+ * ancestor of it) holds user-global config rather than a project, so the walk
+ * stops before it and never accepts it, even when it carries AGENTS.md,
+ * package.json or a .git. With no project below home the start folder is used.
+ */
+export function findWorkspaceRoot(
+  startCwd = process.cwd(),
+  { homeDir = os.homedir() } = {},
+) {
   startCwd = normalizeHostPath(startCwd);
-  let current = path.resolve(startCwd);
+  const start = path.resolve(startCwd);
+  const home = homeDir ? path.resolve(homeDir) : null;
+  let current = start;
   let fallback = null;
   while (true) {
+    if (home && isSameOrAncestorDir(current, home))
+      return fallback || start;
     if (pathExists(path.join(current, ".git"))) return current;
     if (
       !fallback &&
@@ -205,9 +219,25 @@ export function findWorkspaceRoot(startCwd = process.cwd()) {
     )
       fallback = current;
     const parent = path.dirname(current);
-    if (parent === current) return fallback || path.resolve(startCwd);
+    if (parent === current) return fallback || start;
     current = parent;
   }
+}
+
+/** True when `candidate` is `target` or one of its ancestors (case-insensitive on Windows). */
+function isSameOrAncestorDir(candidate, target) {
+  const comparable = (value) =>
+    process.platform === "win32" ? value.toLowerCase() : value;
+  const relative = path.relative(
+    comparable(path.resolve(candidate)),
+    comparable(path.resolve(target)),
+  );
+  if (!relative) return true;
+  return (
+    relative !== ".." &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
 }
 
 export function workspaceStateDir(workspaceRoot) {

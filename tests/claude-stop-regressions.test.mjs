@@ -163,6 +163,46 @@ test("Git Bash, Cygwin and WSL drive paths resolve to Windows paths", () => {
   }
 });
 
+test("workspace root never settles on the user home folder or above", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "otm-root-home-"));
+  try {
+    // A fake user home shaped like C:\Users\<name>: user-global config only.
+    const home = path.join(sandbox, "home");
+    fs.mkdirSync(path.join(home, "a", "b"), { recursive: true });
+    fs.writeFileSync(path.join(home, "AGENTS.md"), "# user-global\n");
+    fs.writeFileSync(path.join(home, "package.json"), "{}\n");
+    const scratch = path.join(home, "a", "b");
+    // (a) A session in a folder with no project keeps its own cwd.
+    assert.equal(findWorkspaceRoot(scratch, { homeDir: home }), path.resolve(scratch));
+    // A home-level git repository is not a project either.
+    fs.mkdirSync(path.join(home, ".git"));
+    assert.equal(findWorkspaceRoot(scratch, { homeDir: home }), path.resolve(scratch));
+    assert.equal(findWorkspaceRoot(home, { homeDir: home }), path.resolve(home));
+    if (process.platform === "win32") {
+      assert.equal(
+        findWorkspaceRoot(scratch, { homeDir: home.toUpperCase() }),
+        path.resolve(scratch),
+      );
+    }
+    // (b) A real project inside home still resolves to itself.
+    const project = path.join(home, "code", "project");
+    fs.mkdirSync(path.join(project, ".git"), { recursive: true });
+    fs.mkdirSync(path.join(project, "src"), { recursive: true });
+    assert.equal(findWorkspaceRoot(path.join(project, "src"), { homeDir: home }), project);
+    const app = path.join(home, "apps", "tool");
+    fs.mkdirSync(path.join(app, "lib"), { recursive: true });
+    fs.writeFileSync(path.join(app, "package.json"), "{}\n");
+    assert.equal(findWorkspaceRoot(path.join(app, "lib"), { homeDir: home }), app);
+    // (c) A marker-based project outside home is unchanged.
+    const outside = path.join(sandbox, "outside", "proj");
+    fs.mkdirSync(path.join(outside, "src"), { recursive: true });
+    fs.writeFileSync(path.join(outside, "package.json"), "{}\n");
+    assert.equal(findWorkspaceRoot(path.join(outside, "src"), { homeDir: home }), outside);
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
 test("host identity failures name the exact mismatching field", () => {
   const sessionId = "claude-identity-mismatch-session";
   const host = realHost();
